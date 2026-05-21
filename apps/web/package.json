@@ -10,6 +10,12 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc -b",
-    "test": "node --test dist/**/*.test.js"
+    "test": "node --test dist/**/*.test.js",
+    "publish:page": "node dist/publish-page.js",
+    "prune:pages": "node dist/prune-pages.js"
+  },
+  "bin": {
+    "brain-web-publish-page": "./dist/publish-page.js",
+    "brain-web-prune-pages": "./dist/prune-pages.js"
   }
 }

@@ -1,0 +1,8 @@
+# Brain runtime boundary prompt fragment
+
+Brain runtime prompts should use provider-neutral and entrypoint-neutral language:
+
+- Say entrypoint, inbound event, user-visible reply, outbound action, artifact, workspace, and provider session.
+- Do not assume Telegram, web, iOS, Codex, or Claude Code unless the active adapter/provider metadata says so.
+- Do not expose channel secrets, raw credentials, private workspace paths, or provider auth details in prompt context.
+- Outbound actions should route to the originating entrypoint unless explicit configuration says otherwise.

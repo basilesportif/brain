@@ -6,9 +6,13 @@
   "description": "Portable setup and artifact workflow guidance for Brain runtimes.",
   "skills": [
     "skills/setup-self-host/SKILL.md",
+    "skills/setup-server/SKILL.md",
+    "skills/repo-registry/SKILL.md",
     "skills/generated-web-page/SKILL.md"
   ],
-  "prompts": [],
+  "prompts": [
+    "prompts/runtime-boundary.md"
+  ],
   "workflows": [
     "workflows/static-page.json"
   ],
