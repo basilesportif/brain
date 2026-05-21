@@ -5,3 +5,5 @@ export * from "./entrypoints.js";
 export * from "./jobs.js";
 export * from "./subagents.js";
 export * from "./automation.js";
+export * from "./command-intercepts.js";
+export * from "./supervisor.js";

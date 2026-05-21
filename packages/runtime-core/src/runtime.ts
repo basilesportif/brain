@@ -1,7 +1,7 @@
 import { routeOutboundToOrigin, type BrainOutboundAction, type EntryPointInboundEvent } from "@brain/entrypoint-protocol";
 import type { WorkspaceConfig } from "@brain/workspace-schema";
 import { parseBrainDirectives } from "./directives.js";
-import type { ProviderAdapter, ProviderSession, ProviderTurnEvent } from "./provider.js";
+import type { ProviderAdapter, ProviderHealth, ProviderResumeHandle, ProviderSession, ProviderTurnEvent } from "./provider.js";
 import type { SubagentControlPort } from "./subagents.js";
 
 export interface RuntimeControlResult {
@@ -43,6 +43,17 @@ export class BrainRuntime {
   async stop(): Promise<void> {
     await this.session?.stop();
     this.session = undefined;
+  }
+
+  async health(): Promise<ProviderHealth> {
+    if (!this.session) {
+      return { ok: false, provider: this.options.provider.id, detail: "runtime session is not started" };
+    }
+    return this.session.health();
+  }
+
+  async resumeHandle(): Promise<ProviderResumeHandle | undefined> {
+    return this.session?.resumeHandle?.();
   }
 
   async handleInboundEvent(event: EntryPointInboundEvent): Promise<RuntimeTurnResult> {

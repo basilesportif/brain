@@ -16,9 +16,12 @@ Operator smoke checks now include:
 
 ```bash
 pnpm run brainctl -- runtime smoke --config examples/config/runtime.yaml --workspace personal --text ping
+pnpm run brainctl -- run --config examples/config/runtime.yaml --workspace personal --once --fake-text "agents"
+pnpm run brainctl -- health --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl -- logs --file <runtime-jsonl-log> --lines 50
 pnpm run brainctl -- directives check <file-or-stdin>
 ```
 
-These checks are safe for fresh checkouts because they do not contact Telegram, do not invoke a real provider, do not deploy services, and do not execute parsed directive actions.
+These checks are safe for fresh checkouts because they do not contact Telegram, do not invoke a real provider, do not deploy services, and do not execute parsed directive actions. `brainctl run --once --fake-text ...` additionally proves the foreground supervisor and command-intercept path without live entrypoints.
 
 Restart tests should not expect exact turn replay. Validate provider-native resume handles where an adapter supports them, and otherwise validate graceful degradation of active jobs/runtime state.

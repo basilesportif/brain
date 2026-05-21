@@ -21,3 +21,14 @@ Future deployment docs should define:
 
 Initial bootstrap must not require Composio or any optional integration. Those
 can be configured later after Telegram admin pairing is working.
+
+## Current safe operations seams
+
+The repository now has CLI seams for future deployment automation, but they remain non-deploying by default:
+
+- `brainctl start` prints a dry-run supervisor plan unless `--foreground` is supplied.
+- `brainctl health` inspects config/state/log readiness without starting live providers or Telegram.
+- `brainctl logs` tails Brain JSONL logs with redaction.
+- Runtime chat commands such as `update`, `deploy`, `agent backend`, and `employees` are recognized by the supervisor command interceptor, but they only return safe status text in this parity slice. They do not pull git, rebuild, restart systemd, mutate crontabs, or start Employee runtimes.
+
+Future systemd/update work should attach to these seams and keep deployment scripts outside provider/entrypoint packages.

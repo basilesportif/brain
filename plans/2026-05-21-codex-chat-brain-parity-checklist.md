@@ -1,7 +1,7 @@
 # Codex-chat -> Brain parity checklist
 
 Date: 2026-05-21  
-Status: living migration checklist; priority implementation has started
+Status: living migration checklist; supervisor/Telegram bootstrap parity slices added
 
 ## Scope and constraints
 
@@ -41,10 +41,10 @@ Legend:
 - [x] Token loading supports literal/env/file refs with redacted metadata checks.
 - [x] Polling offset persistence stores only Telegram provider-native update offsets.
 - [x] Webhook skeleton validates Telegram secret-token headers.
-- [~] Live polling/webhook can be assembled through adapter seams, but no `brainctl start telegram` or long-running supervisor exists yet.
+- [~] Live polling/webhook can be assembled through adapter seams, and `brainctl run/start --foreground` can now host the runtime supervisor with explicit Telegram polling flags; systemd/live cutover validation remains pending.
 - [~] Voice/audio/video attachment download and upload boundaries exist; OpenAI transcription parity from `codex-chat` is not ported.
-- [ ] Pairing/admin bootstrap flow equivalent to current one-time `/pair` behavior.
-- [ ] Full live Telegram service queueing, user-visible turn timeout/restart messages, and command intercepts (`logs`, `agents`, `employee`, deploy/admin commands).
+- [~] Pairing/admin bootstrap flow has adapter-owned one-time `/pair <code>` state and paired user/chat allowlist support; operator UX/live Telegram validation remains pending.
+- [~] Supervisor command intercepts exist for `logs`, `agents`, `agent status/kill/steer`, `employee*`, `health`, and deploy/update safe seams; full live queueing plus timeout/restart notifications remain pending.
 
 ### 2. Directives and assistant-visible actions
 
@@ -78,7 +78,7 @@ Legend:
 - [x] Runtime now consumes normalized cancel/steer directives through the lifecycle control port.
 - [~] Static and provider-backed executors are covered by tests; full `codex-chat` child process backend parity is not ported.
 - [~] Result routes (`return_to_main`, `send_to_user`, `send_to_admins`, `store_only`, `silent`) are modeled, but user/admin delivery of completed child results needs runtime supervisor work.
-- [ ] Telegram/CLI command parity for `agents`, `agent status`, `agent kill`, `agent steer`, backend switching, and rich job formatting.
+- [~] Telegram/CLI command intercept parity exists for `agents`, `agent status`, `agent kill`, and `agent steer`; backend switching is a safe acknowledged seam and rich formatting remains partial.
 - [ ] Employee/durable-agent runtime parity; real Employee app-server lifecycle remains out of scope except documented gap.
 
 ### 5. Loops and monitors
@@ -110,9 +110,9 @@ Legend:
 - [x] Docs define self-host, deployment, runtime config, testing, provider, web publisher, and private-boundary principles.
 - [x] `brainctl doctor`, `config validate`, `secrets check`, `pack validate`, `provider check`, `entrypoint check`, `runtime status`, `runtime smoke`, `directives check`, and automation checks exist.
 - [~] `doctor` validates config, pack, private boundaries, toolchain, and a temporary subagent lifecycle self-test.
-- [ ] Long-running `brainctl start` / service supervisor equivalent to `codex-chat start`.
-- [ ] Health endpoint/CLI parity for live Telegram, provider auth, logs, process state, and strict optional secrets.
-- [ ] Log buffer/introspection commands, deploy/update script parity, systemd install/uninstall, rollback, and post-update smoke flow.
+- [~] Long-running supervisor shape exists via `brainctl run` and `brainctl start --foreground`; `brainctl start` defaults to a dry-run plan. Full service/systemd equivalence remains pending.
+- [~] `brainctl health` CLI inspects config/state/log readiness and supervisor health is available in-process; no HTTP endpoint or full live auth matrix yet.
+- [~] Supervisor JSONL logs, `brainctl logs`, chat `logs`/`introspect`, and deploy/update safe command seams exist; deploy scripts, systemd install/uninstall, rollback, and post-update smoke remain pending.
 
 ### 9. Fresh-server setup
 
@@ -126,7 +126,7 @@ Legend:
 - [x] `brainctl runtime smoke` provides a deterministic no-network fake entrypoint -> runtime -> fake provider -> dispatch test sourced from workspace config.
 - [x] `brainctl directives check` provides behavior-pack directive validation without executing actions.
 - [~] Migration map exists in prior runtime port plan and this checklist; full cutover smoke matrix is still pending.
-- [ ] Live cutover smoke: Telegram send/reply/edit/artifact, Codex exec/app-server turn, subagent dispatch/cancel/steer/result, loop dry-run/dispatch, monitor trigger, web publish, health/log/update rollback.
+- [~] Additional no-network supervisor smoke covers command intercepts, logs, health, Telegram pairing, and subagent status/cancel/steer seams; live cutover smoke remains pending for Telegram sends, Codex turns, monitor/web/update rollback, and result delivery.
 
 ## Implemented in this pass
 
@@ -138,3 +138,18 @@ Legend:
 - Added `brainctl directives check` no-execute directive validation.
 - Added root CLI tests and included them in `pnpm run check`.
 - Updated `docs/brainctl.md` and `docs/testing.md` with the new checks.
+
+
+## Implemented in this pass (supervisor/bootstrap slice)
+
+- Added `BrainSupervisor` to host a long-running entrypoint -> runtime -> outbound dispatch loop with health snapshots, structured JSONL logging hooks, graceful stop, and provider/runtime error fallback messages.
+- Added `RuntimeCommandInterceptor` for service-level commands before provider turns: `help`, `health`, `logs`/`introspect`, `agents`, `agent status`, `agent kill`, `agent steer`, `agent backend`, `employees`, and safe `update`/`deploy` acknowledgements.
+- Added `brainctl start`, `brainctl run`, `brainctl health`, and `brainctl logs` seams. Defaults are fake/no-network and `start` is dry-run unless `--foreground` is supplied; explicit Telegram polling requires token flags.
+- Added Telegram one-time pairing state (`FileTelegramPairingStore`) and adapter handling for `/pair <code>` before allowlist filtering, storing only paired user/chat metadata plus temporary private pairing code state.
+- Added supervisor/command/Telegram pairing smoke tests and documented the new safe operations seams.
+
+Remaining blockers after this pass:
+
+- No real Claude Code wiring, persistent turn replay/idempotency store, deployment, systemd installation, rollback automation, or Employee app-server lifecycle was added by design.
+- Live Telegram/Codex app-server compatibility and user-visible restart/timeout notifications still require a guarded live validation pass.
+- Subagent result delivery to user/admin/main routes is still mostly modeled rather than fully delivered by the supervisor.

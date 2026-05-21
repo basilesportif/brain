@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { access, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { access, appendFile, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,8 +11,8 @@ import YAML from "yaml";
 import { validateAssistantPack } from "@brain/assistant-pack-schema";
 import { FakeEntrypointAdapter } from "@brain/entrypoint-protocol";
 import { validateWorkspaceConfig, type BrainConfig } from "@brain/workspace-schema";
-import { AutomationRuntime, BrainRuntime, FakeProviderAdapter, FileSubagentJobStore, RuntimeEntrypointBridge, StaticSubagentExecutor, SubagentLifecycle, parseBrainDirectives } from "@brain/runtime-core";
-import { FileTelegramPollingStateStore, TelegramEntrypointAdapter, loadTelegramToken } from "@brain/entrypoint-telegram";
+import { AutomationRuntime, BrainRuntime, BrainSupervisor, EchoProviderAdapter, FakeProviderAdapter, FileSubagentJobStore, RuntimeCommandInterceptor, RuntimeEntrypointBridge, StaticSubagentExecutor, SubagentLifecycle, parseBrainDirectives, type BrainSupervisorLogRecord, type ProviderAdapter, type RuntimeLogEntry } from "@brain/runtime-core";
+import { FileTelegramPairingStore, FileTelegramPollingStateStore, TelegramBotApiClient, TelegramEntrypointAdapter, loadTelegramToken } from "@brain/entrypoint-telegram";
 import { createCodexProvider, type CodexTransportKind } from "@brain/provider-codex";
 import { createClaudeCodeProvider, type ClaudeCodeTransportKind } from "@brain/provider-claude-code";
 
@@ -40,6 +40,72 @@ program.command("doctor")
   .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
   .option("--pack <path>", "assistant pack directory", "assistant-packs/core")
   .action(async (options) => exitWith(await doctorCommand(options)));
+
+program.command("start")
+  .description("Prepare or foreground a long-running Brain supervisor. Defaults to a safe dry-run plan unless --foreground is supplied.")
+  .option("--foreground", "run the supervisor in this process instead of printing the start plan")
+  .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--entrypoint <kind>", "entrypoint kind: fake or telegram", "fake")
+  .option("--provider <kind>", "provider kind: fake, echo, codex, claude-code", "fake")
+  .option("--state <path>", "runtime state root")
+  .option("--artifacts <path>", "runtime artifact root")
+  .option("--log <path>", "runtime JSONL log path")
+  .option("--once", "stop after one inbound event")
+  .option("--fake-text <text>", "enqueue one fake inbound message for smoke testing")
+  .option("--transport <kind>", "provider transport for codex/claude-code")
+  .option("--binary <path>", "provider binary for live checks")
+  .option("--cwd <path>", "provider working directory")
+  .option("--app-server-url <url>", "Codex app-server WebSocket URL")
+  .option("--telegram-token-env <name>", "Telegram token env var for explicit live polling")
+  .option("--telegram-token-file <path>", "Telegram token file for explicit live polling")
+  .option("--telegram-polling", "enable live Telegram getUpdates polling; requires a token ref")
+  .option("--telegram-max-polls <n>", "maximum Telegram polls before stopping", parseNumberOption)
+  .option("--polling-state <path>", "Telegram polling offset state path")
+  .option("--telegram-pairing", "enable one-time /pair bootstrap state")
+  .option("--telegram-pairing-state <dir>", "directory for Telegram paired identity state")
+  .action(async (options) => exitWith(await startCommand(options)));
+
+program.command("run")
+  .description("Run the Brain supervisor in the foreground. Fake provider/entrypoint defaults avoid live side effects.")
+  .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--entrypoint <kind>", "entrypoint kind: fake or telegram", "fake")
+  .option("--provider <kind>", "provider kind: fake, echo, codex, claude-code", "fake")
+  .option("--state <path>", "runtime state root")
+  .option("--artifacts <path>", "runtime artifact root")
+  .option("--log <path>", "runtime JSONL log path")
+  .option("--once", "stop after one inbound event")
+  .option("--fake-text <text>", "enqueue one fake inbound message for smoke testing")
+  .option("--transport <kind>", "provider transport for codex/claude-code")
+  .option("--binary <path>", "provider binary for live checks")
+  .option("--cwd <path>", "provider working directory")
+  .option("--app-server-url <url>", "Codex app-server WebSocket URL")
+  .option("--telegram-token-env <name>", "Telegram token env var for explicit live polling")
+  .option("--telegram-token-file <path>", "Telegram token file for explicit live polling")
+  .option("--telegram-polling", "enable live Telegram getUpdates polling; requires a token ref")
+  .option("--telegram-max-polls <n>", "maximum Telegram polls before stopping", parseNumberOption)
+  .option("--polling-state <path>", "Telegram polling offset state path")
+  .option("--telegram-pairing", "enable one-time /pair bootstrap state")
+  .option("--telegram-pairing-state <dir>", "directory for Telegram paired identity state")
+  .action(async (options) => exitWith(await runCommand(options)));
+
+program.command("health")
+  .description("Inspect runtime supervisor/state/log readiness without starting live providers by default.")
+  .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--state <path>", "runtime state root")
+  .option("--log <path>", "runtime JSONL log path")
+  .action(async (options) => exitWith(await healthCommand(options)));
+
+program.command("logs")
+  .description("Tail Brain runtime JSONL logs with conservative redaction.")
+  .option("--file <path>", "runtime JSONL log file")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--state <path>", "runtime state root used to derive default log path")
+  .option("--lines <n>", "number of lines to return", parseNumberOption, 100)
+  .option("--raw", "include raw payloads")
+  .action(async (options) => exitWith(await logsCommand(options)));
 
 const config = program.command("config").description("Runtime configuration commands");
 config.command("validate")
@@ -122,7 +188,252 @@ automation.command("due")
   .option("--dry-run", "do not dispatch; this is the default safe behavior", true)
   .action(async (options) => exitWith(await automationDueCommand(options)));
 
-await program.parseAsync(process.argv);
+interface SupervisorRunCommandOptions {
+  config: string;
+  workspace: string;
+  entrypoint?: string;
+  provider?: string;
+  state?: string;
+  artifacts?: string;
+  log?: string;
+  once?: boolean;
+  fakeText?: string;
+  transport?: string;
+  binary?: string;
+  cwd?: string;
+  appServerUrl?: string;
+  telegramTokenEnv?: string;
+  telegramTokenFile?: string;
+  telegramPolling?: boolean;
+  telegramMaxPolls?: number;
+  pollingState?: string;
+  telegramPairing?: boolean;
+  telegramPairingState?: string;
+}
+
+async function startCommand(options: SupervisorRunCommandOptions & { foreground?: boolean }): Promise<CliResult> {
+  const config = await loadValidConfig(options.config);
+  if (!config.ok || !config.config) return config;
+  if (!config.config.workspaces[options.workspace]) return { ok: false, summary: `workspace not found: ${options.workspace}`, details: { available: Object.keys(config.config.workspaces) } };
+  const paths = supervisorPaths(options.workspace, options);
+  if (!options.foreground) {
+    return {
+      ok: true,
+      summary: "supervisor start plan ready (dry run; pass --foreground to run)",
+      details: {
+        workspace: options.workspace,
+        config: path.resolve(options.config),
+        entrypoint: options.entrypoint ?? "fake",
+        provider: options.provider ?? "fake",
+        stateRoot: paths.stateRoot,
+        artifactRoot: paths.artifactRoot,
+        logPath: paths.logPath,
+        liveTelegramPolling: Boolean(options.telegramPolling),
+        deployment: "not performed",
+      },
+    };
+  }
+  return runCommand(options);
+}
+
+async function runCommand(options: SupervisorRunCommandOptions): Promise<CliResult> {
+  const config = await loadValidConfig(options.config);
+  if (!config.ok || !config.config) return config;
+  const workspace = config.config.workspaces[options.workspace];
+  if (!workspace) return { ok: false, summary: `workspace not found: ${options.workspace}`, details: { available: Object.keys(config.config.workspaces) } };
+
+  const paths = supervisorPaths(options.workspace, options);
+  await mkdir(path.dirname(paths.logPath), { recursive: true, mode: 0o700 });
+  const store = new FileSubagentJobStore({ root: paths.stateRoot });
+  const subagents = new SubagentLifecycle({
+    workspaceId: options.workspace,
+    store,
+    executor: new StaticSubagentExecutor({ id: "brainctl-static", outputText: "Static subagent completed." }),
+    artifactRoot: paths.artifactRoot,
+  });
+  const hydration = await subagents.init();
+
+  const provider = createCliProvider(options);
+  const entrypoint = await createCliEntrypoint(options.workspace, workspace.primaryEntrypointId, options, paths);
+  const runtime = new BrainRuntime({ workspaceId: options.workspace, workspace, provider, subagents });
+  const logReader = new FileRuntimeLogReader(paths.logPath);
+  let supervisor: BrainSupervisor;
+  const commandInterceptor = new RuntimeCommandInterceptor({
+    subagents,
+    logs: logReader,
+    health: { health: () => supervisor.health() },
+  });
+  supervisor = new BrainSupervisor({
+    runtime,
+    entrypoint,
+    commandInterceptor,
+    logger: (record) => appendSupervisorLog(paths.logPath, record),
+  });
+
+  const controller = new AbortController();
+  const onSignal = () => controller.abort("signal");
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+  try {
+    const result = await supervisor.run({ maxEvents: options.once ? 1 : undefined, signal: controller.signal });
+    const health = await supervisor.health();
+    return {
+      ok: result.stoppedReason !== "aborted" || controller.signal.aborted,
+      summary: `supervisor stopped: ${result.stoppedReason}`,
+      details: {
+        workspace: options.workspace,
+        provider: provider.id,
+        entrypoint: entrypoint.id,
+        processed: result.processed.length,
+        stoppedReason: result.stoppedReason,
+        hydration,
+        dispatchResults: result.processed.flatMap((item) => item.dispatchResults.map((dispatch) => ({ type: dispatch.action.type, status: dispatch.status, target: dispatch.action.target }))),
+        interceptedCommands: result.processed.map((item) => item.intercepted?.command).filter(Boolean),
+        stateRoot: paths.stateRoot,
+        artifactRoot: paths.artifactRoot,
+        logPath: paths.logPath,
+        health,
+      },
+    };
+  } finally {
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+    await subagents.shutdown("brainctl run stopped").catch(() => undefined);
+  }
+}
+
+async function healthCommand(options: { config: string; workspace: string; state?: string; log?: string }): Promise<CliResult> {
+  const config = await loadValidConfig(options.config);
+  const paths = supervisorPaths(options.workspace, options);
+  const state = await runtimeStatusCommand({ workspace: options.workspace, state: paths.stateRoot });
+  const logMeta = await fileMetadata(paths.logPath);
+  return {
+    ok: config.ok && state.ok,
+    summary: config.ok && state.ok ? "runtime health seams inspected" : "runtime health seams need attention",
+    details: {
+      config: config.ok ? config.details : config,
+      workspace: options.workspace,
+      state: state.details,
+      logs: { path: paths.logPath, metadata: logMeta },
+      liveProcessesStarted: false,
+      deployment: "not performed",
+    },
+  };
+}
+
+async function logsCommand(options: { file?: string; workspace: string; state?: string; lines: number; raw?: boolean }): Promise<CliResult> {
+  const paths = supervisorPaths(options.workspace, { state: options.state, log: options.file });
+  const reader = new FileRuntimeLogReader(paths.logPath);
+  const entries = await reader.tail(options.lines, { includeRaw: options.raw });
+  return {
+    ok: true,
+    summary: entries.length === 0 ? "no runtime logs found" : "runtime logs tailed",
+    details: { path: paths.logPath, lines: entries.length, entries },
+  };
+}
+
+function supervisorPaths(workspace: string, options: { state?: string; artifacts?: string; log?: string }): { stateRoot: string; artifactRoot: string; logPath: string } {
+  const base = path.join(process.env.HOME ?? ".", ".brain", "workspaces", workspace);
+  const stateRoot = path.resolve(options.state ?? path.join(base, "state"));
+  return {
+    stateRoot,
+    artifactRoot: path.resolve(options.artifacts ?? path.join(base, "artifacts", "subagents")),
+    logPath: path.resolve(options.log ?? path.join(base, "logs", "runtime.jsonl")),
+  };
+}
+
+function createCliProvider(options: SupervisorRunCommandOptions): ProviderAdapter {
+  const provider = (options.provider ?? "fake").toLowerCase();
+  if (provider === "fake") return new FakeProviderAdapter();
+  if (provider === "echo") return new EchoProviderAdapter();
+  if (provider === "codex") return createCodexProvider({
+    transport: (options.transport as CodexTransportKind | undefined) ?? "stub",
+    binary: options.binary,
+    cwd: options.cwd,
+    appServerUrl: options.appServerUrl,
+  });
+  if (provider === "claude-code" || provider === "claude") return createClaudeCodeProvider({ transport: (options.transport as ClaudeCodeTransportKind | undefined) ?? "stub" });
+  throw new Error(`unknown provider: ${options.provider}`);
+}
+
+async function createCliEntrypoint(workspaceId: string, primaryEntrypointId: string, options: SupervisorRunCommandOptions, paths: { stateRoot: string }): Promise<FakeEntrypointAdapter | TelegramEntrypointAdapter> {
+  const kind = (options.entrypoint ?? "fake").toLowerCase();
+  if (kind === "fake") {
+    const entrypoint = new FakeEntrypointAdapter({ workspaceId, entrypointId: primaryEntrypointId, channelKind: "fake", displayName: "Brainctl fake entrypoint" });
+    if (options.fakeText !== undefined) entrypoint.enqueueText(options.fakeText, { conversationId: "brainctl-run" });
+    if (options.once) entrypoint.close();
+    return entrypoint;
+  }
+  if (kind !== "telegram") throw new Error(`unknown entrypoint: ${options.entrypoint}`);
+  const apiClient = options.telegramPolling
+    ? await TelegramBotApiClient.fromTokenRef({ tokenEnv: options.telegramTokenEnv, tokenFile: options.telegramTokenFile, required: true })
+    : undefined;
+  const pairingState = options.telegramPairingState ? path.resolve(options.telegramPairingState) : path.join(paths.stateRoot, "telegram-pairing");
+  return new TelegramEntrypointAdapter({
+    workspaceId,
+    entrypointId: primaryEntrypointId,
+    apiClient,
+    polling: options.telegramPolling ? {
+      enabled: true,
+      maxPolls: options.telegramMaxPolls,
+      stateStore: new FileTelegramPollingStateStore(path.resolve(options.pollingState ?? path.join(paths.stateRoot, "telegram-offset.json"))),
+    } : undefined,
+    pairing: options.telegramPairing || options.telegramPairingState ? {
+      enabled: true,
+      store: new FileTelegramPairingStore(pairingState),
+    } : undefined,
+  });
+}
+
+async function appendSupervisorLog(filePath: string, record: BrainSupervisorLogRecord): Promise<void> {
+  await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  await appendFile(filePath, `${JSON.stringify(redactSecrets(record))}\n`, { mode: 0o600 });
+}
+
+class FileRuntimeLogReader {
+  constructor(private readonly filePath: string) {}
+
+  async tail(lines: number, options: { includeRaw?: boolean } = {}): Promise<RuntimeLogEntry[]> {
+    let raw = "";
+    try {
+      raw = await readFile(this.filePath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+    const selected = raw.split(/\r?\n/).filter(Boolean).slice(-Math.max(1, lines));
+    return selected.map((line) => {
+      try {
+        const parsed = redactSecrets(JSON.parse(line)) as Record<string, unknown>;
+        return {
+          at: stringField(parsed.at),
+          level: stringField(parsed.level),
+          component: stringField(parsed.component),
+          message: stringField(parsed.message) ?? line,
+          raw: options.includeRaw ? parsed.raw : undefined,
+        };
+      } catch {
+        return { message: redactString(line) };
+      }
+    });
+  }
+}
+
+function stringField(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function redactSecrets(value: unknown): unknown {
+  if (typeof value === "string") return redactString(value);
+  if (!value || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(redactSecrets);
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, /(token|secret|password|api[_-]?key|authorization)/i.test(key) ? "[redacted]" : redactSecrets(item)]));
+}
+
+function redactString(value: string): string {
+  return value.replace(/\b\d{5,}:[A-Za-z0-9_-]{16,}\b/g, "[redacted-telegram-token]")
+    .replace(/\b(sk-[A-Za-z0-9_-]{16,})\b/g, "[redacted-api-key]");
+}
 
 async function setupCommand(options: { workspace: string; path: string; dryRun?: boolean }): Promise<CliResult> {
   const workspaceRoot = path.resolve(options.path);
@@ -498,3 +809,5 @@ function exitWith(result: CliResult): void {
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   if (!result.ok) process.exitCode = 1;
 }
+
+await program.parseAsync(process.argv);

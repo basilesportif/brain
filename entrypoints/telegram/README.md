@@ -23,7 +23,8 @@ Current implementation includes:
 - token loading from literal/env/file refs with redacted metadata only;
 - durable polling offset storage for Telegram `getUpdates` without any Brain turn replay/idempotency store;
 - polling and a small webhook HTTP server skeleton that do not require a real token in tests;
-- private admin allowlist filtering by Telegram user/chat id; and
+- private admin allowlist filtering by Telegram user/chat id;
+- one-time `/pair <code>` bootstrap state for paired user/chat identities before allowlist filtering; and
 - outbound mapping for replies, edits, photo/document/voice/audio/video artifacts, status actions, reactions, and delete-after-send cleanup for staged local artifacts.
 
 It is suitable for runtime smoke tests and mapping checks. Live polling/webhook startup is still intentionally a skeleton: no process manager, reverse proxy, token file, or deployment side effects are installed by this package.
@@ -34,7 +35,7 @@ The setup flow should make Telegram usable enough for future configuration work:
 
 1. Store the BotFather token only in a private workspace secret file or host secret store.
 2. Configure `telegram-main` as the only enabled entrypoint in `single-primary` mode.
-3. Pair the initial admin by private user/chat ID or by a one-time pairing code the user sends to the bot.
+3. Pair the initial admin by private user/chat ID or by a one-time pairing code the user sends to the bot (`/pair <code>`). The temporary code and paired identities live under private adapter state; checks should report only counts/presence, not the code value.
 4. Prefer polling for first bootstrap because it only requires outbound HTTPS.
 5. Leave webhook URL, reverse proxy, TLS, generated pages, and additional integrations disabled unless the user explicitly enables them.
 6. After admin pairing, allow future integration setup commands to be received through Telegram.

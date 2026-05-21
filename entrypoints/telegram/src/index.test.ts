@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { FileTelegramPollingStateStore, TelegramBotApiClient, TelegramEntrypointAdapter, createTelegramWebhookServer, handleTelegramWebhookUpdate, loadTelegramToken, outboundActionToTelegramIntent, pollTelegramUpdates, resolveTelegramAttachmentDownload, telegramUpdateToInboundEvent, type TelegramBotApi, type TelegramCallIntent } from "./index.js";
+import { FileTelegramPairingStore, FileTelegramPollingStateStore, TelegramBotApiClient, TelegramEntrypointAdapter, createTelegramWebhookServer, handleTelegramWebhookUpdate, loadTelegramToken, outboundActionToTelegramIntent, pollTelegramUpdates, resolveTelegramAttachmentDownload, telegramUpdateToInboundEvent, type TelegramBotApi, type TelegramCallIntent } from "./index.js";
 
 test("maps Telegram message-like updates into Brain inbound events", () => {
   const event = telegramUpdateToInboundEvent({
@@ -79,6 +79,49 @@ test("Telegram admin allowlist filters unauthorized updates", () => {
   }, { workspaceId: "personal", adminAllowlist: { userIds: [7], chatIds: [123] } });
   assert.equal(allowed?.actor?.id, "7");
 });
+
+
+
+test("Telegram pairing bootstrap stores one-time paired identities before allowlist filtering", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-telegram-pairing-"));
+  try {
+    const calls: Array<{ method: string; payload?: Record<string, unknown> }> = [];
+    const api: TelegramBotApi = {
+      async call(method, payload) {
+        calls.push({ method, payload });
+        return { ok: true, result: { message_id: 100 } };
+      },
+    };
+    const store = new FileTelegramPairingStore(root);
+    const adapter = new TelegramEntrypointAdapter({
+      workspaceId: "personal",
+      adminAllowlist: { denyWhenEmpty: true },
+      apiClient: api,
+      pairing: { enabled: true, store, codeFactory: () => "123456" },
+      updates: [
+        { update_id: 700, message: { message_id: 1, text: "hello before pair", chat: { id: 123 }, from: { id: 7 } } },
+        { update_id: 701, message: { message_id: 2, text: "/pair 123456", chat: { id: 123 }, from: { id: 7 } } },
+        { update_id: 702, message: { message_id: 3, text: "hello after pair", chat: { id: 123 }, from: { id: 7 } } },
+      ],
+    });
+    await adapter.start();
+    assert.equal((await adapter.pairingStatus()).codePresent, true);
+
+    const events = [];
+    for await (const event of adapter.inboundEvents()) events.push(event);
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0]?.text, "hello after pair");
+    assert.equal((await store.readPairingCode()), undefined);
+    assert.deepEqual((await store.listUsers()).map((user) => user.userId), ["7"]);
+    assert.deepEqual((await store.listChats()).map((chat) => chat.chatId), ["123"]);
+    assert.equal(calls[0]?.method, "sendMessage");
+    assert.match(String(calls[0]?.payload?.text), /Paired user 7/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 
 test("Telegram polling skeleton maps getUpdates without a real token", async () => {
   const calls: string[] = [];

@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { randomInt } from "node:crypto";
 import type { BrainAttachment, BrainEntrypointAdapter, BrainOutboundAction, EntryPointHealth, EntryPointInboundEvent, EntryPointRef, JsonRecord, OutboundDispatchResult } from "@brain/entrypoint-protocol";
 
 export interface TelegramMessageLike {
@@ -42,6 +43,7 @@ export interface TelegramEntrypointAdapterOptions extends TelegramEntrypointOpti
   updates?: Iterable<TelegramUpdateLike> | AsyncIterable<TelegramUpdateLike>;
   apiClient?: TelegramBotApi;
   polling?: TelegramPollingOptions;
+  pairing?: TelegramPairingOptions;
   dispatchIntent?(intent: TelegramCallIntent, action: BrainOutboundAction): Promise<OutboundDispatchResult> | OutboundDispatchResult;
 }
 
@@ -53,6 +55,45 @@ export interface TelegramCallIntent {
 export interface TelegramAdminAllowlist {
   userIds?: Array<string | number>;
   chatIds?: Array<string | number>;
+  /** When true, an empty allowlist blocks normal messages unless paired state allows them. */
+  denyWhenEmpty?: boolean;
+}
+
+export interface TelegramPairedUser {
+  userId: string;
+  isAdmin?: boolean;
+  pairedAt?: string;
+}
+
+export interface TelegramPairedChat {
+  chatId: string;
+  pairedAt?: string;
+}
+
+export interface TelegramPairingStore {
+  init?(): Promise<void>;
+  listUsers(): Promise<TelegramPairedUser[]>;
+  listChats(): Promise<TelegramPairedChat[]>;
+  addIdentity(userId: string | number, chatId: string | number, isAdmin?: boolean): Promise<void>;
+  readPairingCode(): Promise<string | undefined>;
+  writePairingCode(code: string): Promise<void>;
+  deletePairingCode(): Promise<void>;
+}
+
+export interface TelegramPairingOptions {
+  enabled?: boolean;
+  enabledOnEmptyAllowlist?: boolean;
+  store: TelegramPairingStore;
+  codeFactory?: () => string;
+  replyOnPair?: boolean;
+}
+
+export interface TelegramPairingStatus {
+  enabled: boolean;
+  pending: boolean;
+  users: number;
+  chats: number;
+  codePresent: boolean;
 }
 
 export interface TelegramPollingOptions {
@@ -162,11 +203,83 @@ export class FileTelegramPollingStateStore implements TelegramPollingStateStore 
   }
 }
 
+
+export class FileTelegramPairingStore implements TelegramPairingStore {
+  constructor(readonly root: string) {}
+
+  async init(): Promise<void> {
+    await mkdir(this.root, { recursive: true, mode: 0o700 });
+  }
+
+  async listUsers(): Promise<TelegramPairedUser[]> {
+    return this.readJson<TelegramPairedUser[]>("telegram_users.json", []);
+  }
+
+  async listChats(): Promise<TelegramPairedChat[]> {
+    return this.readJson<TelegramPairedChat[]>("telegram_chats.json", []);
+  }
+
+  async addIdentity(userId: string | number, chatId: string | number, isAdmin = true): Promise<void> {
+    await this.init();
+    const pairedAt = new Date().toISOString();
+    const userKey = String(userId);
+    const chatKey = String(chatId);
+    const users = await this.listUsers();
+    if (!users.some((user) => user.userId === userKey)) users.push({ userId: userKey, isAdmin, pairedAt });
+    const chats = await this.listChats();
+    if (!chats.some((chat) => chat.chatId === chatKey)) chats.push({ chatId: chatKey, pairedAt });
+    await this.writeJson("telegram_users.json", users);
+    await this.writeJson("telegram_chats.json", chats);
+  }
+
+  async readPairingCode(): Promise<string | undefined> {
+    try {
+      const code = (await readFile(this.path("pairing_code.txt"), "utf8")).trim();
+      return code || undefined;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+  }
+
+  async writePairingCode(code: string): Promise<void> {
+    await this.init();
+    await atomicWriteText(this.path("pairing_code.txt"), `${code.trim()}\n`, 0o600);
+  }
+
+  async deletePairingCode(): Promise<void> {
+    await unlink(this.path("pairing_code.txt")).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+  }
+
+  private async readJson<T>(file: string, fallback: T): Promise<T> {
+    try {
+      return JSON.parse(await readFile(this.path(file), "utf8")) as T;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return fallback;
+      throw error;
+    }
+  }
+
+  private async writeJson(file: string, value: unknown): Promise<void> {
+    await this.init();
+    await atomicWriteText(this.path(file), `${JSON.stringify(value, null, 2)}\n`, 0o600);
+  }
+
+  private path(file: string): string {
+    const resolved = path.resolve(this.root, file);
+    if (!isInsidePath(resolved, path.resolve(this.root))) throw new Error(`Telegram pairing path escapes root: ${file}`);
+    return resolved;
+  }
+}
+
 export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
   readonly id: string;
   readonly ref: EntryPointRef;
   private started = false;
   private lastEventId?: string;
+  private pollingController?: AbortController;
 
   constructor(private readonly options: TelegramEntrypointAdapterOptions) {
     this.id = options.entrypointId ?? "telegram-main";
@@ -187,19 +300,25 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
   }
 
   async start(): Promise<void> {
+    await this.preparePairing();
+    if (this.options.polling?.enabled) this.pollingController = new AbortController();
     this.started = true;
   }
 
   async stop(): Promise<void> {
     this.started = false;
+    this.pollingController?.abort("telegram entrypoint stopped");
+    this.pollingController = undefined;
   }
 
   async health(): Promise<EntryPointHealth> {
+    const pairing = await this.pairingStatus().catch(() => undefined);
+    const pairingDetail = pairing?.enabled ? `; pairing=${pairing.pending ? "pending" : "ready"} users=${pairing.users} chats=${pairing.chats}` : "";
     return {
       ok: this.started,
       entrypointId: this.id,
       detail: this.started
-        ? (this.options.apiClient ? "started with Telegram API client boundary" : "started without Telegram network client")
+        ? `${this.options.apiClient ? "started with Telegram API client boundary" : "started without Telegram network client"}${pairingDetail}`
         : "stopped",
       lastEventId: this.lastEventId,
     };
@@ -207,8 +326,10 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
 
   async *inboundEvents(): AsyncIterable<EntryPointInboundEvent> {
     for await (const update of this.updateSource()) {
-      const event = telegramUpdateToInboundEvent(update, this.options);
+      if (await this.handlePairingUpdate(update)) continue;
+      const event = telegramUpdateToInboundEvent(update, { ...this.options, adminAllowlist: undefined });
       if (!event) continue;
+      if (!(await this.isEventAllowed(event))) continue;
       this.lastEventId = event.id;
       yield event;
     }
@@ -238,9 +359,66 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
     return resolveTelegramAttachmentDownload(attachment, this.options.apiClient);
   }
 
+  async pairingStatus(): Promise<TelegramPairingStatus> {
+    const pairing = this.options.pairing;
+    if (!pairing?.enabled) return { enabled: false, pending: false, users: 0, chats: 0, codePresent: false };
+    await pairing.store.init?.();
+    const [users, chats, code] = await Promise.all([pairing.store.listUsers(), pairing.store.listChats(), pairing.store.readPairingCode()]);
+    return { enabled: true, pending: Boolean(code), users: users.length, chats: chats.length, codePresent: Boolean(code) };
+  }
+
+  private async preparePairing(): Promise<void> {
+    const pairing = this.options.pairing;
+    if (!pairing?.enabled) return;
+    await pairing.store.init?.();
+    const shouldEnable = await this.shouldEnablePairing(pairing);
+    if (!shouldEnable) return;
+    const existing = await pairing.store.readPairingCode();
+    if (!existing) await pairing.store.writePairingCode((pairing.codeFactory?.() ?? makeTelegramPairingCode()).trim());
+  }
+
+  private async shouldEnablePairing(pairing: TelegramPairingOptions): Promise<boolean> {
+    if (pairing.enabledOnEmptyAllowlist === false) return false;
+    const [users, chats] = await Promise.all([pairing.store.listUsers(), pairing.store.listChats()]);
+    const configuredUsers = this.options.adminAllowlist?.userIds?.length ?? 0;
+    const configuredChats = this.options.adminAllowlist?.chatIds?.length ?? 0;
+    return configuredUsers + configuredChats + users.length + chats.length === 0;
+  }
+
+  private async handlePairingUpdate(update: TelegramUpdateLike): Promise<boolean> {
+    const pairing = this.options.pairing;
+    if (!pairing?.enabled) return false;
+    const command = telegramPairCommand(update);
+    if (!command) return false;
+    const expected = await pairing.store.readPairingCode();
+    const ok = Boolean(expected && command.code === expected);
+    if (ok) {
+      await pairing.store.addIdentity(command.userId, command.chatId, true);
+      await pairing.store.deletePairingCode();
+    }
+    this.lastEventId = `telegram_pair_${update.update_id}_${command.messageId}`;
+    if (pairing.replyOnPair !== false && this.options.apiClient) {
+      const text = ok ? `Paired user ${command.userId} and chat ${command.chatId}.` : "Pairing failed.";
+      await this.options.apiClient.call("sendMessage", compact({ chat_id: command.chatId, text, reply_to_message_id: command.messageId })).catch(() => undefined);
+    }
+    return true;
+  }
+
+  private async isEventAllowed(event: EntryPointInboundEvent): Promise<boolean> {
+    const pairing = this.options.pairing;
+    if (!pairing?.enabled) return isTelegramEventAllowed(event, this.options.adminAllowlist);
+    const [users, chats] = await Promise.all([pairing.store.listUsers(), pairing.store.listChats()]);
+    return isTelegramEventAllowed(event, {
+      ...this.options.adminAllowlist,
+      userIds: [...(this.options.adminAllowlist?.userIds ?? []), ...users.map((user) => user.userId)],
+      chatIds: [...(this.options.adminAllowlist?.chatIds ?? []), ...chats.map((chat) => chat.chatId)],
+      denyWhenEmpty: this.options.adminAllowlist?.denyWhenEmpty ?? true,
+    });
+  }
+
   private updateSource(): AsyncIterable<TelegramUpdateLike> {
     if (this.options.updates) return toAsyncIterable(this.options.updates);
-    if (this.options.apiClient && this.options.polling?.enabled) return pollTelegramUpdates(this.options.apiClient, this.options.polling);
+    if (this.options.apiClient && this.options.polling?.enabled) return pollTelegramUpdates(this.options.apiClient, { ...this.options.polling, signal: this.pollingController?.signal ?? this.options.polling.signal });
     return toAsyncIterable([]);
   }
 }
@@ -555,6 +733,7 @@ function isTelegramEventAllowed(event: EntryPointInboundEvent, allowlist: Telegr
   if (!allowlist) return true;
   const users = new Set((allowlist.userIds ?? []).map(String));
   const chats = new Set((allowlist.chatIds ?? []).map(String));
+  if (allowlist.denyWhenEmpty && users.size === 0 && chats.size === 0) return false;
   const userOk = users.size === 0 || (event.actor?.id !== undefined && users.has(String(event.actor.id)));
   const chatOk = chats.size === 0 || (event.conversation?.id !== undefined && chats.has(String(event.conversation.id)));
   return userOk && chatOk;
@@ -615,6 +794,32 @@ function isLikelyLocalPath(value: string): boolean {
 
 function safeTelegramFileName(filePath: string): string {
   return path.basename(filePath).replace(/[^A-Za-z0-9._-]/g, "_") || "telegram-file";
+}
+
+
+function telegramPairCommand(update: TelegramUpdateLike): { code: string; userId: string; chatId: string; messageId: number } | undefined {
+  const message = update.message;
+  const text = message?.text?.trim();
+  if (!message || !text) return undefined;
+  const match = text.match(/^\/pair(?:@\w+)?\s+(\S+)$/i);
+  if (!match || !match[1] || !message.from) return undefined;
+  return { code: match[1], userId: String(message.from.id), chatId: String(message.chat.id), messageId: message.message_id };
+}
+
+function makeTelegramPairingCode(): string {
+  return String(randomInt(100_000, 1_000_000));
+}
+
+async function atomicWriteText(target: string, text: string, mode: number): Promise<void> {
+  await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+  const temp = path.join(path.dirname(target), `.${path.basename(target)}.${process.pid}.${Date.now()}.tmp`);
+  await writeFile(temp, text, { mode });
+  await rename(temp, target);
+}
+
+function isInsidePath(child: string, parent: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative === "" || (relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 function normalizeToken(value: string | undefined): string | undefined {

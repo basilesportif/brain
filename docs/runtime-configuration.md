@@ -1,6 +1,6 @@
 # Runtime configuration skeleton
 
-Status: initial schemas and validation exist in `@brain/workspace-schema`; `brainctl doctor` also runs a temporary runtime-core store/subagent lifecycle self-test. Live provider and entrypoint processes are still not wired.
+Status: initial schemas and validation exist in `@brain/workspace-schema`; `brainctl doctor` also runs a temporary runtime-core store/subagent lifecycle self-test. A foreground supervisor shape exists behind `brainctl run`/`start --foreground`, with fake provider/entrypoint defaults and explicit live Telegram polling flags.
 
 Brain runtime configuration must make active entrypoints explicit so prompt packs and provider adapters do not accidentally depend on Telegram-specific behavior.
 
@@ -137,5 +137,6 @@ Current `codex-chat` behavior should migrate as a single-primary workspace confi
 - Ensure any outbound action created while handling a Telegram inbound event defaults back to `telegram-main`.
 - Keep bot tokens, webhook secrets, polling config, chat allowlists, and Telegram API details in the Telegram adapter config/secret boundary.
 - For Telegram polling, persist only Telegram's provider-native update offset (for example under workspace `state/telegram-offset.json`). Do not build a separate durable turn replay or idempotency store.
+- Telegram one-time `/pair <code>` bootstrap is adapter-owned state. Brain stores paired user/chat metadata and the temporary pairing code under the configured private state directory; checks and docs should report only presence/count metadata, not the code value.
 - Loop and monitor definitions are validated in-process. The default runtime/CLI behavior does not install crontabs, filesystem watchers, or shell monitors; explicit future operator commands should be required for host-level scheduling.
 - Do not enable web or iOS in the migrated workspace until multi-entrypoint routing, identity, permissions, notifications, and conflict handling have explicit config and tests.

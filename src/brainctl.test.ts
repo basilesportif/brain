@@ -40,6 +40,46 @@ test("brainctl directives check parses legacy codex-chat controls without execut
   }
 });
 
+
+test("brainctl start, run, health, and logs expose safe supervisor seams", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-supervisor-"));
+  try {
+    const state = path.join(root, "state");
+    const artifacts = path.join(root, "artifacts");
+    const log = path.join(root, "runtime.jsonl");
+
+    const start = spawnBrainctl(["start", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--state", state, "--artifacts", artifacts, "--log", log]);
+    assert.equal(start.status, 0, start.stderr);
+    const startJson = JSON.parse(start.stdout) as { ok: boolean; summary: string; details: { deployment: string } };
+    assert.equal(startJson.ok, true);
+    assert.match(startJson.summary, /dry run/);
+    assert.equal(startJson.details.deployment, "not performed");
+
+    const run = spawnBrainctl(["run", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--once", "--fake-text", "agents", "--state", state, "--artifacts", artifacts, "--log", log]);
+    assert.equal(run.status, 0, run.stderr);
+    const runJson = JSON.parse(run.stdout) as { ok: boolean; details: { processed: number; interceptedCommands: string[]; logPath: string } };
+    assert.equal(runJson.ok, true);
+    assert.equal(runJson.details.processed, 1);
+    assert.deepEqual(runJson.details.interceptedCommands, ["agents"]);
+    assert.equal(runJson.details.logPath, log);
+
+    const health = spawnBrainctl(["health", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--state", state, "--log", log]);
+    assert.equal(health.status, 0, health.stderr);
+    const healthJson = JSON.parse(health.stdout) as { ok: boolean; details: { liveProcessesStarted: boolean } };
+    assert.equal(healthJson.ok, true);
+    assert.equal(healthJson.details.liveProcessesStarted, false);
+
+    const logs = spawnBrainctl(["logs", "--file", log, "--lines", "3"]);
+    assert.equal(logs.status, 0, logs.stderr);
+    const logsJson = JSON.parse(logs.stdout) as { ok: boolean; details: { lines: number; entries: Array<{ message: string }> } };
+    assert.equal(logsJson.ok, true);
+    assert.ok(logsJson.details.lines > 0);
+    assert.ok(logsJson.details.entries.some((entry) => /Intercepted service command/.test(entry.message)));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 function spawnBrainctl(args: string[]) {
   return spawnSync(process.execPath, [brainctl.pathname, ...args], {
     cwd: repoRoot,

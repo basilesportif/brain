@@ -8,6 +8,8 @@ This package must not import Codex-, Claude-, Telegram-, web-, or iOS-specific S
 
 - Generic provider contracts plus an echo provider for tests/smoke checks.
 - Generic entrypoint bridge that connects entrypoint inbound event streams to runtime turns and dispatches resulting outbound actions.
+- `BrainSupervisor` for a long-running foreground entrypoint/runtime loop with health snapshots, structured log hooks, graceful stop, and error fallback sends.
+- `RuntimeCommandInterceptor` for service-level `help`, `health`, `logs`, `agents`, `agent status/kill/steer`, deploy/update safe seams, and Employee/backend placeholder commands before provider turns.
 - Fake entrypoint and fake provider helpers for no-network end-to-end smoke tests.
 - Brain directive parsing for `brain-actions` blocks.
 - `BrainRuntime` turn handling that routes generic outbound actions back to the originating entrypoint and consumes `dispatch_subagent` actions when a subagent lifecycle port is configured.
