@@ -26,6 +26,9 @@ importers:
       '@brain/runtime-core':
         specifier: workspace:*
         version: link:packages/runtime-core
+      '@brain/web':
+        specifier: workspace:*
+        version: link:apps/web
       '@brain/workspace-schema':
         specifier: workspace:*
         version: link:packages/config/workspace-schema

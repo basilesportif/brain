@@ -14,6 +14,7 @@
     { "path": "packages/runtime-core" },
     { "path": "packages/providers/codex" },
     { "path": "packages/providers/claude-code" },
-    { "path": "entrypoints/telegram" }
+    { "path": "entrypoints/telegram" },
+    { "path": "apps/web" }
   ]
 }

@@ -26,6 +26,7 @@
     "@brain/provider-claude-code": "workspace:*",
     "@brain/provider-codex": "workspace:*",
     "@brain/runtime-core": "workspace:*",
+    "@brain/web": "workspace:*",
     "@brain/workspace-schema": "workspace:*",
     "commander": "^14.0.1",
     "smol-toml": "^1.4.2",

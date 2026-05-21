@@ -1,3 +1,5 @@
+import { appendFile, mkdir, rm, writeFile } from "node:fs/promises";
+import path from "node:path";
 import type { JsonRecord } from "@brain/entrypoint-protocol";
 import {
   loopDefinitionSchema,
@@ -12,6 +14,10 @@ export interface AutomationRuntimeOptions {
   loops?: unknown[];
   monitors?: unknown[];
   subagents?: SubagentDispatchPort;
+  spool?: AutomationEventSpool;
+  locks?: AutomationLockStore;
+  notifier?: AutomationNotifier;
+  commandRunner?: AutomationCommandRunner;
   now?: () => Date;
 }
 
@@ -36,12 +42,51 @@ export interface AutomationDefinitionHealth {
 
 export type AutomationRunResult =
   | { status: "dispatched"; loopId: string; jobId: string; dryRun: false }
+  | { status: "executed"; loopId: string; dryRun: false; outputText?: string; notificationCount: number }
   | { status: "dry_run"; loopId: string; jobId?: undefined; dryRun: true; detail: string }
   | { status: "disabled" | "not_found" | "not_runnable"; loopId: string; dryRun: boolean; detail: string };
+
+export type AutomationMonitorRunResult =
+  | { status: "dispatched"; monitorId: string; jobId: string; dryRun: false }
+  | { status: "notified"; monitorId: string; dryRun: false; notificationCount: number }
+  | { status: "dry_run"; monitorId: string; dryRun: true; detail: string }
+  | { status: "disabled" | "not_found" | "not_runnable"; monitorId: string; dryRun: boolean; detail: string };
 
 export interface AutomationDueRunOptions {
   dryRun?: boolean;
   now?: Date;
+}
+
+export interface AutomationEvent {
+  id: string;
+  workspaceId: string;
+  kind: "loop" | "monitor";
+  definitionId: string;
+  phase: "scheduled" | "started" | "completed" | "failed" | "skipped";
+  at: string;
+  detail?: string;
+  metadata?: JsonRecord;
+}
+
+export interface AutomationEventSpool {
+  append(event: AutomationEvent): Promise<void>;
+}
+
+export interface AutomationLock {
+  release(): Promise<void>;
+}
+
+export interface AutomationLockStore {
+  acquire(key: string): Promise<AutomationLock | undefined>;
+}
+
+export interface AutomationNotifier {
+  notifyAdmins(text: string, metadata?: JsonRecord): Promise<void>;
+  enqueueMain?(text: string, metadata?: JsonRecord): Promise<void>;
+}
+
+export interface AutomationCommandRunner {
+  run(command: string, args: string[], options: { cwd?: string; env?: Record<string, string>; timeoutSec?: number }): Promise<{ exitCode: number; stdout: string; stderr: string }>;
 }
 
 export class AutomationRuntime {
@@ -76,37 +121,148 @@ export class AutomationRuntime {
     const loop = this.loops.find((candidate) => candidate.id === loopId);
     if (!loop) return { status: "not_found", loopId, dryRun, detail: `No loop matched ${loopId}.` };
     if (!loop.enabled) return { status: "disabled", loopId, dryRun, detail: `Loop ${loopId} is disabled.` };
-    if (loop.type !== "dispatch_subagent") {
-      return { status: "not_runnable", loopId, dryRun, detail: `Loop ${loopId} is ${loop.type}; runtime skeleton only dispatches subagent loops.` };
-    }
-    if (!loop.profile || !loop.prompt) {
-      return { status: "not_runnable", loopId, dryRun, detail: `Loop ${loopId} is missing profile or prompt.` };
-    }
+    if (loop.type === "dispatch_subagent" && (!loop.profile || !loop.prompt)) return { status: "not_runnable", loopId, dryRun, detail: `Loop ${loopId} is missing profile or prompt.` };
+    if (loop.type === "command" && !loop.command) return { status: "not_runnable", loopId, dryRun, detail: `Loop ${loopId} is missing command.` };
+    if (loop.type === "prompt" && !loop.prompt) return { status: "not_runnable", loopId, dryRun, detail: `Loop ${loopId} is missing prompt.` };
     if (dryRun) {
-      return { status: "dry_run", loopId, dryRun: true, detail: `Would dispatch ${loop.profile} from loop ${loopId}.` };
+      return { status: "dry_run", loopId, dryRun: true, detail: dryRunLoopDetail(loop) };
     }
-    if (!this.options.subagents) {
-      return { status: "not_runnable", loopId, dryRun, detail: "No subagent dispatch port is configured." };
+    if (loop.lock) {
+      const lock = await this.options.locks?.acquire(`loop:${loop.id}`);
+      if (!lock && this.options.locks) return { status: "not_runnable", loopId, dryRun, detail: `Loop ${loopId} is already locked.` };
+      try {
+        return await this.executeLoop(loop);
+      } finally {
+        await lock?.release();
+      }
     }
-    const jobId = await this.options.subagents.dispatch({
+    return this.executeLoop(loop);
+  }
+
+  async runMonitorOnce(monitorId: string, input: { line?: string; context?: string; dryRun?: boolean } = {}): Promise<AutomationMonitorRunResult> {
+    const dryRun = input.dryRun ?? false;
+    const monitor = this.monitors.find((candidate) => candidate.id === monitorId);
+    if (!monitor) return { status: "not_found", monitorId, dryRun, detail: `No monitor matched ${monitorId}.` };
+    if (!monitor.enabled) return { status: "disabled", monitorId, dryRun, detail: `Monitor ${monitorId} is disabled.` };
+    const prompt = monitor.prompt ?? ["Monitor event received.", `Monitor: ${monitor.id}`, input.line ? `Line: ${input.line}` : undefined, input.context ? `Context:\n${input.context}` : undefined].filter(Boolean).join("\n");
+    if (dryRun) return { status: "dry_run", monitorId, dryRun: true, detail: `Would handle monitor ${monitorId} with route ${monitor.route}.` };
+    await this.appendEvent("monitor", monitor.id, "started", { detail: input.line });
+    try {
+      if (monitor.route === "store_only" || monitor.route === "silent") {
+        await this.appendEvent("monitor", monitor.id, "completed", { detail: "stored only" });
+        return { status: "notified", monitorId, dryRun: false, notificationCount: 0 };
+      }
+      if (monitor.route === "dispatch_subagent") {
+        if (!this.options.subagents) return { status: "not_runnable", monitorId, dryRun, detail: "No subagent dispatch port is configured." };
+        const jobId = await this.options.subagents.dispatch({
+          workspaceId: this.options.workspaceId,
+          profile: stringFromConfig(monitor.config.profile) ?? "debugger",
+          prompt,
+          route: "return_to_main",
+          ownerType: "monitor",
+          ownerId: monitor.id,
+          summary: monitor.description ?? `Monitor ${monitor.id}`,
+          metadata: compactJsonRecord({ automationKind: "monitor", monitorId: monitor.id, triggeredAt: this.nowIso(), line: input.line }),
+        });
+        await this.appendEvent("monitor", monitor.id, "completed", { detail: `dispatched ${jobId}` });
+        return { status: "dispatched", monitorId, jobId, dryRun: false };
+      }
+      if (!this.options.notifier) return { status: "not_runnable", monitorId, dryRun, detail: "No notifier is configured." };
+      await this.options.notifier.enqueueMain?.(prompt, compactJsonRecord({ source: "monitor", monitorId: monitor.id }));
+      if (monitor.route === "send_to_admins") await this.options.notifier.notifyAdmins(prompt, compactJsonRecord({ source: "monitor", monitorId: monitor.id }));
+      await this.appendEvent("monitor", monitor.id, "completed", { detail: "notified" });
+      return { status: "notified", monitorId, dryRun: false, notificationCount: monitor.route === "send_to_admins" ? 1 : 0 };
+    } catch (error) {
+      await this.appendEvent("monitor", monitor.id, "failed", { detail: errorMessage(error) });
+      throw error;
+    }
+  }
+
+  private async executeLoop(loop: LoopDefinition): Promise<AutomationRunResult> {
+    await this.appendEvent("loop", loop.id, "started", { detail: loop.description });
+    try {
+      if (loop.type === "dispatch_subagent") {
+        if (!this.options.subagents) return { status: "not_runnable", loopId: loop.id, dryRun: false, detail: "No subagent dispatch port is configured." };
+        const jobId = await this.options.subagents.dispatch({
+          workspaceId: this.options.workspaceId,
+          profile: loop.profile as string,
+          prompt: loop.prompt as string,
+          route: loop.route,
+          ownerType: "loop",
+          ownerId: loop.id,
+          timeoutSec: loop.timeoutSec,
+          model: loop.model,
+          effort: loop.effort,
+          summary: loop.description ?? `Loop ${loop.id}`,
+          metadata: compactJsonRecord({
+            automationKind: "loop",
+            loopId: loop.id,
+            schedule: loop.schedule,
+            triggeredAt: this.nowIso(),
+          }),
+        });
+        await this.appendEvent("loop", loop.id, "completed", { detail: `dispatched ${jobId}` });
+        return { status: "dispatched", loopId: loop.id, jobId, dryRun: false };
+      }
+
+      if (loop.type === "command") {
+        if (!this.options.commandRunner) return { status: "not_runnable", loopId: loop.id, dryRun: false, detail: "No command runner is configured." };
+        const output = await this.options.commandRunner.run(loop.command as string, loop.args ?? [], { timeoutSec: loop.timeoutSec });
+        const text = [output.stdout, output.stderr].filter(Boolean).join("\n").trim();
+        if (output.exitCode !== 0) {
+          if (loop.notifyOnFailure) await this.options.notifier?.notifyAdmins(`Loop ${loop.id} failed with exit ${output.exitCode}:\n${text}`, compactJsonRecord({ source: "loop", loopId: loop.id }));
+          await this.appendEvent("loop", loop.id, "failed", { detail: `exit ${output.exitCode}` });
+          return { status: "not_runnable", loopId: loop.id, dryRun: false, detail: `Command exited ${output.exitCode}` };
+        }
+        if (loop.route === "send_to_admins") await this.options.notifier?.notifyAdmins(text || `Loop ${loop.id} completed.`, compactJsonRecord({ source: "loop", loopId: loop.id }));
+        await this.appendEvent("loop", loop.id, "completed", { detail: "command executed" });
+        return { status: "executed", loopId: loop.id, dryRun: false, outputText: text, notificationCount: loop.route === "send_to_admins" ? 1 : 0 };
+      }
+
+      const prompt = loop.prompt ?? "";
+      if (loop.route === "dispatch_subagent") {
+        if (!this.options.subagents) return { status: "not_runnable", loopId: loop.id, dryRun: false, detail: "No subagent dispatch port is configured." };
+        const jobId = await this.options.subagents.dispatch({
+          workspaceId: this.options.workspaceId,
+          profile: loop.profile ?? "researcher",
+          prompt,
+          route: "return_to_main",
+          ownerType: "loop",
+          ownerId: loop.id,
+          timeoutSec: loop.timeoutSec,
+          model: loop.model,
+          effort: loop.effort,
+          summary: loop.description ?? `Loop ${loop.id}`,
+          metadata: compactJsonRecord({ automationKind: "loop", loopId: loop.id, schedule: loop.schedule, triggeredAt: this.nowIso() }),
+        });
+        await this.appendEvent("loop", loop.id, "completed", { detail: `dispatched ${jobId}` });
+        return { status: "dispatched", loopId: loop.id, jobId, dryRun: false };
+      }
+      if (loop.route === "send_to_admins") await this.options.notifier?.notifyAdmins(prompt, compactJsonRecord({ source: "loop", loopId: loop.id }));
+      else await this.options.notifier?.enqueueMain?.(prompt, compactJsonRecord({ source: "loop", loopId: loop.id }));
+      await this.appendEvent("loop", loop.id, "completed", { detail: "prompt routed" });
+      return { status: "executed", loopId: loop.id, dryRun: false, outputText: prompt, notificationCount: loop.route === "send_to_admins" ? 1 : 0 };
+    } catch (error) {
+      await this.appendEvent("loop", loop.id, "failed", { detail: errorMessage(error) });
+      throw error;
+    }
+  }
+
+  private async appendEvent(kind: AutomationEvent["kind"], definitionId: string, phase: AutomationEvent["phase"], options: { detail?: string; metadata?: JsonRecord } = {}): Promise<void> {
+    await this.options.spool?.append({
+      id: `${kind}_${definitionId}_${Date.now()}_${Math.random().toString(16).slice(2)}`,
       workspaceId: this.options.workspaceId,
-      profile: loop.profile,
-      prompt: loop.prompt,
-      route: loop.route,
-      ownerType: "loop",
-      ownerId: loop.id,
-      timeoutSec: loop.timeoutSec,
-      model: loop.model,
-      effort: loop.effort,
-      summary: loop.description ?? `Loop ${loop.id}`,
-      metadata: compactJsonRecord({
-        automationKind: "loop",
-        loopId: loop.id,
-        schedule: loop.schedule,
-        triggeredAt: (this.options.now?.() ?? new Date()).toISOString(),
-      }),
+      kind,
+      definitionId,
+      phase,
+      at: this.nowIso(),
+      detail: options.detail,
+      metadata: options.metadata,
     });
-    return { status: "dispatched", loopId, jobId, dryRun: false };
+  }
+
+  private nowIso(): string {
+    return (this.options.now?.() ?? new Date()).toISOString();
   }
 
   async runDueLoops(options: AutomationDueRunOptions = {}): Promise<AutomationRunResult[]> {
@@ -125,8 +281,14 @@ export class AutomationRuntime {
     };
     if (!loop.enabled) return { id: loop.id, enabled: false, status: "disabled", schedule };
     if (!schedule.valid) return { id: loop.id, enabled: true, status: "not_runnable", detail: "invalid cron schedule expression; no host cron is installed", schedule };
-    if (loop.type !== "dispatch_subagent") {
-      return { id: loop.id, enabled: true, status: "not_runnable", detail: "runtime only dispatches subagent loops by default; no cron or shell side effects are installed", schedule };
+    if (loop.type === "command" && !this.options.commandRunner) {
+      return { id: loop.id, enabled: true, status: "not_runnable", detail: "command loop is valid but no command runner is configured; no cron or shell side effects are installed", schedule };
+    }
+    if (loop.type === "prompt" && !this.options.notifier && loop.route !== "dispatch_subagent") {
+      return { id: loop.id, enabled: true, status: "not_runnable", detail: "prompt loop is valid but no notifier/main queue is configured; no cron side effects are installed", schedule };
+    }
+    if ((loop.type === "dispatch_subagent" || loop.route === "dispatch_subagent") && !this.options.subagents) {
+      return { id: loop.id, enabled: true, status: "ready", detail: "definition is runnable when a subagent dispatch port is configured; current CLI may dry-run only", schedule };
     }
     return { id: loop.id, enabled: true, status: "ready", schedule };
   }
@@ -137,8 +299,67 @@ export class AutomationRuntime {
   }
 }
 
+export class InMemoryAutomationSpool implements AutomationEventSpool {
+  readonly events: AutomationEvent[] = [];
+
+  async append(event: AutomationEvent): Promise<void> {
+    this.events.push(structuredClone(event));
+  }
+}
+
+export class FileAutomationSpool implements AutomationEventSpool {
+  constructor(readonly root: string) {}
+
+  async append(event: AutomationEvent): Promise<void> {
+    const file = path.join(this.root, "spool", "automation-events.jsonl");
+    await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+    await appendFile(file, `${JSON.stringify(event)}\n`, { mode: 0o600 });
+  }
+}
+
+export class InMemoryAutomationLockStore implements AutomationLockStore {
+  private readonly locks = new Set<string>();
+
+  async acquire(key: string): Promise<AutomationLock | undefined> {
+    if (this.locks.has(key)) return undefined;
+    this.locks.add(key);
+    return { release: async () => { this.locks.delete(key); } };
+  }
+}
+
+export class FileAutomationLockStore implements AutomationLockStore {
+  constructor(readonly root: string) {}
+
+  async acquire(key: string): Promise<AutomationLock | undefined> {
+    const safeKey = key.replace(/[^A-Za-z0-9._-]/g, "_");
+    const file = path.join(this.root, "locks", `${safeKey}.lock`);
+    await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+    try {
+      await writeFile(file, `${process.pid}\n`, { flag: "wx", mode: 0o600 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return undefined;
+      throw error;
+    }
+    return { release: async () => { await rm(file, { force: true }); } };
+  }
+}
+
 function compactJsonRecord(record: Record<string, unknown>): JsonRecord {
   return Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined)) as JsonRecord;
+}
+
+function dryRunLoopDetail(loop: LoopDefinition): string {
+  if (loop.type === "dispatch_subagent") return `Would dispatch ${loop.profile} from loop ${loop.id}.`;
+  if (loop.type === "command") return `Would run command loop ${loop.id}: ${loop.command} ${(loop.args ?? []).join(" ")}`.trim();
+  return `Would route prompt loop ${loop.id}.`;
+}
+
+function stringFromConfig(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function isValidCronExpression(expression: string): boolean {

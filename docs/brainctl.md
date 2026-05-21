@@ -11,15 +11,18 @@ pnpm run brainctl -- config validate examples/config/runtime.yaml
 pnpm run brainctl -- secrets check --config examples/config/runtime.yaml
 pnpm run brainctl -- pack validate assistant-packs/core
 pnpm run brainctl -- provider check codex --transport stub
+pnpm run brainctl -- provider smoke codex --transport stub --prompt ping
 pnpm run brainctl -- provider check codex --transport app-server --app-server-url ws://127.0.0.1:9000 --timeout-ms 3000
 pnpm run brainctl -- provider check claude-code --transport stub
 pnpm run brainctl -- entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN --polling-state ~/.brain/workspaces/personal/state/telegram-offset.json
 pnpm run brainctl -- start --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl -- run --config examples/config/runtime.yaml --workspace personal --once --fake-text help
 pnpm run brainctl -- health --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl -- status --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl -- logs --file ~/.brain/workspaces/personal/logs/runtime.jsonl --lines 100
 pnpm run brainctl -- operations plan --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl -- operations systemd --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl -- operations validate --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl -- validate live --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl -- validate live --config examples/config/runtime.yaml --workspace personal --run-safe
 pnpm run brainctl -- runtime status --state ~/.brain/workspaces/personal/state
@@ -28,6 +31,10 @@ pnpm run brainctl -- directives check docs/brainctl.md
 pnpm run brainctl -- automation validate examples/config/automation.yaml
 pnpm run brainctl -- automation run daily-summary --file examples/config/automation.yaml
 pnpm run brainctl -- automation due --file examples/config/automation.yaml --now 2026-05-21T09:00:00.000Z
+pnpm run brainctl -- automation monitor inbox-placeholder --file examples/config/automation.yaml
+pnpm run brainctl -- web validate --dir /path/to/static-page
+pnpm run brainctl -- web publish --dir /path/to/static-page --id demo-page --dry-run
+pnpm run brainctl -- web prune --dry-run
 ```
 
 ## Supervisor commands added for parity smoke
@@ -41,6 +48,9 @@ pnpm run brainctl -- start --config examples/config/runtime.yaml --workspace per
 # Foreground fake-entrypoint/fake-provider smoke through the supervisor and command intercepts.
 pnpm run brainctl -- run --config examples/config/runtime.yaml --workspace personal --once --fake-text "help"
 
+# Optional provider-backed Employee sessions (uses selected provider; keep fake/stub unless live is intended).
+pnpm run brainctl -- run --config examples/config/runtime.yaml --workspace personal --employee-runtime --provider fake
+
 # Inspect state/log readiness without live processes.
 pnpm run brainctl -- health --config examples/config/runtime.yaml --workspace personal
 
@@ -48,9 +58,9 @@ pnpm run brainctl -- health --config examples/config/runtime.yaml --workspace pe
 pnpm run brainctl -- logs --file ~/.brain/workspaces/personal/logs/runtime.jsonl --lines 100
 ```
 
-`start` defaults to a dry-run plan. Use `start --foreground` or `run` to enter the foreground supervisor. The default provider and entrypoint are `fake`, so the command is safe in CI and fresh checkouts. Explicit live Telegram polling requires `--entrypoint telegram --telegram-polling` plus `--telegram-token-env` or `--telegram-token-file`; polling offsets remain Telegram-native state only.
+`start` defaults to a dry-run plan. Use `start --foreground` or `run` to enter the foreground supervisor. The default provider and entrypoint are `fake`, so the command is safe in CI and fresh checkouts. Explicit live Telegram polling requires `--entrypoint telegram --telegram-polling` plus `--telegram-token-env` or `--telegram-token-file`; polling offsets remain Telegram-native state only. Attachment download and voice/audio/video transcription are opt-in with `--telegram-downloads`, `--telegram-download-dir`, and a private `--telegram-transcription-command` seam; no transcription provider keys belong in the repo.
 
-The supervisor intercepts service commands before provider turns when configured: `help`, `health`, `logs`/`introspect`, `agents`, `agent status`, `agent kill`, `agent steer`, `agent backend`, `employees`, `employee status/start/stop/steer`, and `update`/`deploy`. Backend mutation and deploy/update remain safe seams only. Employee commands now update a durable lifecycle record in runtime state, but they still do not start a real Employee app-server process.
+The supervisor intercepts service commands before provider turns when configured: `help`, `health`, `logs`/`introspect`, `agents`, `agent status`, `agent kill`, `agent steer`, `agent backend`, `employees`, `employee status/start/stop/steer`, and `update`/`deploy`. Backend mutation and deploy/update remain safe seams only. Employee commands update durable lifecycle records; pass `--employee-runtime` when running the supervisor to back Employee start/steer/stop with the selected provider session.
 
 
 ## Operations and guarded live-readiness
@@ -74,6 +84,10 @@ pnpm run brainctl -- validate live --config examples/config/runtime.yaml --works
 
 `operations` never runs git, pnpm, systemctl, or deployment commands; it returns the exact operator commands to run externally. `validate live` is a guarded smoke harness: without `--allow-live`, live Codex app-server checks are only planned, Telegram token refs are checked by metadata, and no polling/webhook or user task starts.
 
+`provider smoke` sends one provider turn through the provider abstraction. Stub transport is safe by default; `exec` and `app-server` require `--allow-live`.
+
+`web validate/publish/prune/manifest` wrap `@brain/web` generated-page primitives. They validate static packages, reject secret-like files/content, publish through configured runtime roots/manifests, and keep scratch pages TTL-governed unless `--promoted` is supplied.
+
 ## Safety model
 
 - `setup` creates only private directory scaffolding (`config/`, `secrets/`, `logs/`, `artifacts/`, `state/`, `backups/`, `tmp/`).
@@ -81,17 +95,20 @@ pnpm run brainctl -- validate live --config examples/config/runtime.yaml --works
 - `secrets check` reports only metadata such as env/file ref presence, mode, and byte size; values are redacted.
 - `pack validate` checks assistant-pack manifests, skill frontmatter, and portable public-safety hygiene.
 - `provider check` instantiates provider adapters and reports health without sending a real user task. Codex `app-server` checks can point at an existing WebSocket URL or, when a binary is supplied, exercise the provider-owned app-server protocol startup path.
+- `provider smoke` runs a single provider turn; non-stub transports require `--allow-live`.
 - `entrypoint check` instantiates entrypoint adapters without requiring live credentials. Optional Telegram token and polling-state flags report only redacted token metadata and durable offset metadata.
 - `start` prints a dry-run supervisor start plan by default. `start --foreground` and `run` enter the foreground supervisor; fake provider/entrypoint defaults avoid live side effects.
 - `health` inspects config, state, and log readiness without starting live processes.
+- `status` combines health, runtime state/log metadata, and operations preflight readiness without starting live processes.
 - `logs` tails supervisor JSONL logs with conservative redaction of token/key-like fields.
-- `operations plan` and `operations systemd` render deployment/update/rollback/systemd artifacts without installing, restarting, or mutating a checkout.
+- `operations plan`, `operations systemd`, and `operations validate` render deployment/update/rollback/systemd artifacts and path metadata without installing, restarting, or mutating a checkout.
 - `validate live` renders a guarded Telegram/Codex validation plan; `--run-safe` executes only no-network/no-secret checks unless `--allow-live` is supplied.
 - `runtime status` initializes/reads job state and summarizes active jobs without starting providers or entrypoints.
 - `runtime smoke` runs a deterministic no-network path through a fake entrypoint, `BrainRuntime`, a fake provider, and outbound dispatch routing using workspace metadata from the runtime config.
 - `directives check` parses `brain-actions` and legacy `codex-chat` directive fences without executing anything. It reports normalized action counts, parse errors, and clean-text byte size.
 - `automation validate` validates loop/monitor definitions, cron expression shape, and no-host-scheduler status.
-- `automation run` and `automation due` evaluate loops without installing crontabs/watchers. They dry-run by default; `--dispatch` currently reports not-runnable unless a real runtime dispatch port is wired in a future command.
+- `automation run`, `automation due`, and `automation monitor` evaluate loops/monitor events without installing crontabs/watchers. They dry-run by default; `--dispatch` uses a local static subagent lifecycle plus file spool/locks for fake execution smoke.
+- `web` commands validate/publish/prune generated static page packages through the publisher boundary; publish/prune support `--dry-run`.
 - `doctor` combines the checks above with toolchain and private-boundary placeholder checks.
 
 The CLI is the place future setup, health, runtime, migration, and publisher commands should attach instead of making entrypoint or provider packages own operator workflows.

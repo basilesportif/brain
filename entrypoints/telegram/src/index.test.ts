@@ -191,6 +191,41 @@ test("Telegram API dispatch and file download boundaries are injectable", async 
   assert.equal(attachment.sizeBytes, 123);
 });
 
+test("Telegram adapter can download attachments and append injected audio transcripts", async () => {
+  const api: TelegramBotApi = {
+    async call(method, payload) {
+      if (method === "getFile") return { ok: true, result: { file_id: payload?.file_id, file_path: "voice/audio.ogg", file_size: 12 } };
+      throw new Error(`unexpected method ${method}`);
+    },
+    async downloadFile(filePath) {
+      return { localPath: `/tmp/${path.basename(filePath)}`, filePath };
+    },
+  };
+  const adapter = new TelegramEntrypointAdapter({
+    workspaceId: "personal",
+    apiClient: api,
+    attachmentHandling: {
+      download: true,
+      transcriber: {
+        async transcribe(input) {
+          assert.equal(input.path, "/tmp/audio.ogg");
+          return { text: "transcribed voice note" };
+        },
+      },
+    },
+    updates: [
+      { update_id: 800, message: { message_id: 1, chat: { id: 123 }, from: { id: 7 }, voice: { file_id: "voice_file", mime_type: "audio/ogg" } } },
+    ],
+  });
+  await adapter.start();
+  const events = [];
+  for await (const event of adapter.inboundEvents()) events.push(event);
+  assert.equal(events.length, 1);
+  assert.match(events[0]?.text ?? "", /transcribed voice note/);
+  assert.equal(events[0]?.attachments?.[0]?.localPath, "/tmp/audio.ogg");
+  assert.equal(events[0]?.attachments?.[0]?.metadata?.transcript, "transcribed voice note");
+});
+
 test("Telegram webhook skeleton validates secret token", () => {
   assert.throws(() => handleTelegramWebhookUpdate({
     update_id: 300,

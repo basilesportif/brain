@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { FakeEntrypointAdapter } from "@brain/entrypoint-protocol";
-import { BrainRuntime, BrainSupervisor, EmployeeLifecycle, FakeProviderAdapter, InMemoryEmployeeStore, InMemorySubagentJobStore, RuntimeCommandInterceptor, StaticSubagentExecutor, SubagentLifecycle } from "./index.js";
+import { BrainRuntime, BrainSupervisor, EmployeeLifecycle, FakeProviderAdapter, InMemoryEmployeeStore, InMemorySubagentJobStore, ProviderEmployeeRuntime, RuntimeCommandInterceptor, StaticSubagentExecutor, SubagentLifecycle } from "./index.js";
 
 test("RuntimeCommandInterceptor handles logs and deploy/update as safe service commands", async () => {
   const interceptor = new RuntimeCommandInterceptor({
@@ -66,6 +66,33 @@ test("RuntimeCommandInterceptor records safe Employee lifecycle commands", async
 
   const stop = await interceptor.handle(event("employee stop analyst"));
   assert.match(stop?.actions[0]?.type === "send_text" ? stop.actions[0].text : "", /marked stopped/);
+});
+
+test("EmployeeLifecycle can start and steer an injected provider-backed Employee runtime", async () => {
+  const employees = new EmployeeLifecycle({
+    workspaceId: "personal",
+    store: new InMemoryEmployeeStore(),
+    runtime: new ProviderEmployeeRuntime({
+      workspaceId: "personal",
+      provider: new FakeProviderAdapter((turn) => [{ type: "final", text: `employee saw ${turn.prompt}` }]),
+      now: () => new Date("2026-05-21T00:00:00.000Z"),
+    }),
+    now: () => new Date("2026-05-21T00:00:00.000Z"),
+  });
+  await employees.init();
+
+  const start = await employees.startEmployee({ id: "analyst", prompt: "warm up" });
+  assert.equal(start.status, "success");
+  assert.equal(start.status === "success" ? start.employee.provider : "", "fake");
+  assert.deepEqual(start.status === "success" ? start.employee.metadata?.startEventTypes : [], ["final"]);
+
+  const steer = await employees.steerEmployee("analyst", "continue");
+  assert.equal(steer.status, "success");
+  assert.equal(steer.status === "success" ? (steer.employee.metadata?.lastSteerEventTypes as string[])?.[0] : "", "final");
+
+  const stop = await employees.stopEmployee("analyst");
+  assert.equal(stop.status, "success");
+  assert.equal(stop.status === "success" ? stop.employee.status : "", "stopped");
 });
 
 test("BrainSupervisor intercepts service commands before provider turns", async () => {

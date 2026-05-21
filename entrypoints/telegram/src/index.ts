@@ -44,6 +44,7 @@ export interface TelegramEntrypointAdapterOptions extends TelegramEntrypointOpti
   apiClient?: TelegramBotApi;
   polling?: TelegramPollingOptions;
   pairing?: TelegramPairingOptions;
+  attachmentHandling?: TelegramAttachmentHandlingOptions;
   dispatchIntent?(intent: TelegramCallIntent, action: BrainOutboundAction): Promise<OutboundDispatchResult> | OutboundDispatchResult;
 }
 
@@ -107,6 +108,31 @@ export interface TelegramPollingOptions {
   retryDelayMs?: number;
   onError?(error: Error, context: { poll: number; offset?: number }): void | Promise<void>;
   signal?: AbortSignal;
+}
+
+export interface TelegramTranscriptionResult {
+  text: string;
+}
+
+export interface TelegramAttachmentTranscriber {
+  transcribe(input: { path: string; attachment: BrainAttachment; event: EntryPointInboundEvent }): Promise<TelegramTranscriptionResult>;
+}
+
+export interface TelegramAttachmentHandlingOptions {
+  /**
+   * Resolve Telegram file ids to local/remote downloaded files before yielding
+   * the inbound event. This is intentionally opt-in for live runtimes because it
+   * may contact the Telegram file API and write private data under downloadDir.
+   */
+  download?: boolean;
+  /**
+   * Optional transcriber seam for voice/audio/video attachments that were
+   * resolved to local paths. Brain does not prescribe an OpenAI dependency here;
+   * operators can inject an implementation from private runtime configuration.
+   */
+  transcriber?: TelegramAttachmentTranscriber;
+  transcribeKinds?: Array<BrainAttachment["kind"]>;
+  appendTranscriptToText?: boolean;
 }
 
 export interface TelegramBotApi {
@@ -330,8 +356,9 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
       const event = telegramUpdateToInboundEvent(update, { ...this.options, adminAllowlist: undefined });
       if (!event) continue;
       if (!(await this.isEventAllowed(event))) continue;
-      this.lastEventId = event.id;
-      yield event;
+      const prepared = await this.prepareInboundEvent(event);
+      this.lastEventId = prepared.id;
+      yield prepared;
     }
   }
 
@@ -420,6 +447,65 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
     if (this.options.updates) return toAsyncIterable(this.options.updates);
     if (this.options.apiClient && this.options.polling?.enabled) return pollTelegramUpdates(this.options.apiClient, { ...this.options.polling, signal: this.pollingController?.signal ?? this.options.polling.signal });
     return toAsyncIterable([]);
+  }
+
+  private async prepareInboundEvent(event: EntryPointInboundEvent): Promise<EntryPointInboundEvent> {
+    const handling = this.options.attachmentHandling;
+    if (!handling || !event.attachments?.length) return event;
+
+    const attachments: BrainAttachment[] = [];
+    const transcripts: string[] = [];
+    for (const attachment of event.attachments) {
+      let next = attachment;
+      if (handling.download) {
+        try {
+          next = await this.resolveAttachmentDownload(next);
+        } catch (error) {
+          next = {
+            ...next,
+            metadata: compact({
+              ...(next.metadata ?? {}),
+              downloadError: error instanceof Error ? error.message : String(error),
+            }) as JsonRecord,
+          };
+        }
+      }
+
+      if (shouldTranscribeAttachment(next, handling)) {
+        try {
+          const transcription = await handling.transcriber?.transcribe({ path: next.localPath as string, attachment: next, event });
+          if (transcription?.text?.trim()) {
+            const text = transcription.text.trim();
+            transcripts.push(text);
+            next = {
+              ...next,
+              metadata: compact({
+                ...(next.metadata ?? {}),
+                transcript: text,
+              }) as JsonRecord,
+            };
+          }
+        } catch (error) {
+          next = {
+            ...next,
+            metadata: compact({
+              ...(next.metadata ?? {}),
+              transcriptionError: error instanceof Error ? error.message : String(error),
+            }) as JsonRecord,
+          };
+        }
+      }
+      attachments.push(next);
+    }
+
+    const appendTranscript = handling.appendTranscriptToText !== false && transcripts.length > 0;
+    return {
+      ...event,
+      text: appendTranscript
+        ? [event.text?.trim(), transcripts.map((text, index) => `[Transcript ${index + 1}]\n${text}`).join("\n\n")].filter(Boolean).join("\n\n")
+        : event.text,
+      attachments,
+    };
   }
 }
 
@@ -714,6 +800,12 @@ function attachmentsFrom(message: TelegramMessageLike) {
     attachments.push({ kind: "image", uri: largest?.file_id, sizeBytes: largest?.file_size, metadata: compact({ variants: message.photo.length, telegramFileId: largest?.file_id, width: largest?.width, height: largest?.height }) as JsonRecord });
   }
   return attachments;
+}
+
+function shouldTranscribeAttachment(attachment: BrainAttachment, handling: TelegramAttachmentHandlingOptions): boolean {
+  if (!handling.transcriber || !attachment.localPath) return false;
+  const transcribeKinds = new Set((handling.transcribeKinds ?? ["voice", "audio", "video"]).map(String));
+  return transcribeKinds.has(String(attachment.kind));
 }
 
 function telegramApiDispatchResult(action: BrainOutboundAction, response: unknown): OutboundDispatchResult {

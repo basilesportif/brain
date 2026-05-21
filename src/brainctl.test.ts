@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -101,6 +101,12 @@ test("brainctl operations and live validation commands are non-mutating by defau
     assert.match(systemdJson.details.unit, /ExecStart=pnpm run brainctl -- run/);
     assert.equal(systemdJson.details.sideEffects, "none");
 
+    const validate = spawnBrainctl(["operations", "validate", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--repo", repoRoot, "--state", state, "--artifacts", artifacts, "--log", log]);
+    assert.equal(validate.status, 0, validate.stderr);
+    const validateJson = JSON.parse(validate.stdout) as { ok: boolean; details: { sideEffects: string; commandPlan: { preflight: string[] } } };
+    assert.equal(validateJson.ok, true);
+    assert.ok(validateJson.details.commandPlan.preflight.some((command) => command.includes("runtime smoke")));
+
     const live = spawnBrainctl(["validate", "live", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--codex-transport", "app-server"]);
     assert.equal(live.status, 0, live.stderr);
     const liveJson = JSON.parse(live.stdout) as { ok: boolean; details: { plan: { networkStarted: boolean; checks: Array<{ id: string; mode: string }> }; sideEffects: string } };
@@ -108,6 +114,73 @@ test("brainctl operations and live validation commands are non-mutating by defau
     assert.equal(liveJson.details.sideEffects, "none");
     assert.equal(liveJson.details.plan.networkStarted, false);
     assert.equal(liveJson.details.plan.checks.find((check) => check.id === "codex-provider")?.mode, "plan");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brainctl status, provider smoke, automation monitor, and web wrappers are safe and testable", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-parity-"));
+  try {
+    const state = path.join(root, "state");
+    const artifacts = path.join(root, "artifacts");
+    const log = path.join(root, "runtime.jsonl");
+
+    const status = spawnBrainctl(["status", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--state", state, "--artifacts", artifacts, "--log", log]);
+    assert.equal(status.status, 0, status.stderr);
+    const statusJson = JSON.parse(status.stdout) as { ok: boolean; details: { liveProcessesStarted: boolean; operations: { preflight: string[] } } };
+    assert.equal(statusJson.ok, true);
+    assert.equal(statusJson.details.liveProcessesStarted, false);
+    assert.ok(statusJson.details.operations.preflight.length > 0);
+
+    const providerSmoke = spawnBrainctl(["provider", "smoke", "codex", "--transport", "stub", "--workspace", "personal", "--prompt", "ping"]);
+    assert.equal(providerSmoke.status, 0, providerSmoke.stderr);
+    const providerJson = JSON.parse(providerSmoke.stdout) as { ok: boolean; details: { taskStarted: boolean; eventTypes: string[] } };
+    assert.equal(providerJson.ok, true);
+    assert.equal(providerJson.details.taskStarted, true);
+    assert.ok(providerJson.details.eventTypes.includes("final"));
+
+    const employeeRun = spawnBrainctl(["run", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--once", "--fake-text", "employee start analyst", "--employee-runtime", "--state", state, "--artifacts", artifacts, "--log", log]);
+    assert.equal(employeeRun.status, 0, employeeRun.stderr);
+    const employeeJson = JSON.parse(employeeRun.stdout) as { ok: boolean; details: { interceptedCommands: string[]; dispatchResults: Array<{ type: string }> } };
+    assert.equal(employeeJson.ok, true);
+    assert.deepEqual(employeeJson.details.interceptedCommands, ["employees"]);
+
+    const automationFile = path.join(root, "automation.yaml");
+    await writeFile(automationFile, [
+      "monitors:",
+      "  - id: inbox",
+      "    enabled: true",
+      "    source: filesystem",
+      "    route: dispatch_subagent",
+      "    prompt: Investigate inbox alert.",
+      "    config:",
+      "      profile: debugger",
+      "",
+    ].join("\n"));
+    const automation = spawnBrainctl(["automation", "monitor", "inbox", "--file", automationFile, "--workspace", "personal", "--dispatch", "--state", state, "--artifacts", artifacts, "--line", "ERROR sample"]);
+    assert.equal(automation.status, 0, automation.stderr);
+    const automationJson = JSON.parse(automation.stdout) as { ok: boolean; details: { result: { status: string }; safeDefault: string } };
+    assert.equal(automationJson.ok, true);
+    assert.match(automationJson.details.safeDefault, /no watcher/);
+
+    const pageDir = path.join(root, "page");
+    await mkdir(pageDir, { recursive: true });
+    await writeFile(path.join(pageDir, "index.html"), "<!doctype html><title>Smoke Page</title><h1>ok</h1>\n");
+    const webValidate = spawnBrainctl(["web", "validate", "--dir", pageDir]);
+    assert.equal(webValidate.status, 0, webValidate.stderr);
+    const webValidateJson = JSON.parse(webValidate.stdout) as { ok: boolean; details: { title: string; sideEffects: string } };
+    assert.equal(webValidateJson.ok, true);
+    assert.equal(webValidateJson.details.title, "Smoke Page");
+
+    const manifest = path.join(root, "manifest.json");
+    const runtimeRoot = path.join(root, "pages");
+    const webPublish = spawnBrainctl(["web", "publish", "--dir", pageDir, "--id", "smoke-page", "--runtime-root", runtimeRoot, "--manifest-path", manifest, "--public-base-url", "http://example.test/pages", "--dry-run"]);
+    assert.equal(webPublish.status, 0, webPublish.stderr);
+    const webPublishJson = JSON.parse(webPublish.stdout) as { ok: boolean; details: { dryRun: boolean; url: string } };
+    assert.equal(webPublishJson.ok, true);
+    assert.equal(webPublishJson.details.dryRun, true);
+    assert.equal(webPublishJson.details.url, "http://example.test/pages/smoke-page/");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

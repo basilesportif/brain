@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { AutomationRuntime, isCronDueNow, isValidCronExpression } from "./automation.js";
+import { AutomationRuntime, InMemoryAutomationLockStore, InMemoryAutomationSpool, isCronDueNow, isValidCronExpression } from "./automation.js";
 import type { SubagentDispatchInput, SubagentDispatchPort } from "./subagents.js";
 
 test("AutomationRuntime exposes loop/monitor health without host side effects", () => {
@@ -88,4 +88,50 @@ test("AutomationRuntime validates cron schedules and can run due loops safely", 
 
   assert.deepEqual(await runtime.runDueLoops({ dryRun: false }), [{ status: "dispatched", loopId: "due", jobId: "job_implementer", dryRun: false }]);
   assert.equal(dispatches.length, 1);
+});
+
+test("AutomationRuntime records spool events, honors locks, and can fake command/monitor execution", async () => {
+  const spool = new InMemoryAutomationSpool();
+  const locks = new InMemoryAutomationLockStore();
+  const notifications: string[] = [];
+  const dispatches: SubagentDispatchInput[] = [];
+  const runtime = new AutomationRuntime({
+    workspaceId: "personal",
+    now: () => new Date("2026-05-21T10:00:00.000Z"),
+    spool,
+    locks,
+    notifier: {
+      async notifyAdmins(text) { notifications.push(text); },
+      async enqueueMain(text) { notifications.push(`main:${text}`); },
+    },
+    commandRunner: {
+      async run(command, args) {
+        return { exitCode: 0, stdout: `${command} ${args.join(" ")}`.trim(), stderr: "" };
+      },
+    },
+    subagents: {
+      async dispatch(input) {
+        dispatches.push(input);
+        return "job_monitor_1";
+      },
+    },
+    loops: [
+      { id: "cmd", enabled: true, schedule: "* * * * *", type: "command", command: "echo", args: ["ok"], route: "send_to_admins", lock: true },
+    ],
+    monitors: [
+      { id: "errors", enabled: true, source: "filesystem", route: "dispatch_subagent", prompt: "Investigate monitor event.", config: { profile: "debugger" } },
+    ],
+  });
+
+  const loop = await runtime.runLoopOnce("cmd", { dryRun: false });
+  assert.equal(loop.status, "executed");
+  assert.equal(loop.status === "executed" ? loop.outputText : "", "echo ok");
+  assert.equal(notifications[0], "echo ok");
+  assert.deepEqual(spool.events.filter((event) => event.kind === "loop").map((event) => event.phase), ["started", "completed"]);
+
+  const monitor = await runtime.runMonitorOnce("errors", { line: "ERROR bad", dryRun: false });
+  assert.equal(monitor.status, "dispatched");
+  assert.equal(dispatches[0]?.ownerType, "monitor");
+  assert.equal(dispatches[0]?.profile, "debugger");
+  assert.deepEqual(spool.events.filter((event) => event.kind === "monitor").map((event) => event.phase), ["started", "completed"]);
 });

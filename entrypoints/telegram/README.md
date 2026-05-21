@@ -25,6 +25,7 @@ Current implementation includes:
 - polling and a small webhook HTTP server skeleton that do not require a real token in tests;
 - private admin allowlist filtering by Telegram user/chat id;
 - one-time `/pair <code>` bootstrap state for paired user/chat identities before allowlist filtering; and
+- opt-in attachment download plus an injectable voice/audio/video transcription seam that stores downloaded files under private runtime paths and appends transcript text to inbound events; and
 - outbound mapping for replies, edits, photo/document/voice/audio/video artifacts, status actions, reactions, and delete-after-send cleanup for staged local artifacts.
 
 It is suitable for runtime smoke tests and mapping checks. Live polling/webhook startup is still intentionally a skeleton: no process manager, reverse proxy, token file, or deployment side effects are installed by this package.

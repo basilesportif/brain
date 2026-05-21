@@ -67,6 +67,32 @@ test("BrainSupervisor delivers send_to_user subagent terminal results to the ori
   assert.equal(action.target?.conversationId, "conversation-1");
 });
 
+test("BrainSupervisor includes subagent result artifacts for user delivery routes", async () => {
+  const entrypoint = new FakeEntrypointAdapter({ workspaceId: "personal", entrypointId: "fake-main" });
+  const runtime = new BrainRuntime({ workspaceId: "personal", workspace, provider: new FakeProviderAdapter() });
+  const supervisor = new BrainSupervisor({ runtime, entrypoint });
+  await supervisor.deliverSubagentResult({
+    id: "job_artifact",
+    workspaceId: "personal",
+    profile: "implementer",
+    route: "send_to_user",
+    ownerType: "main",
+    resultTarget: "user",
+    status: "completed",
+    prompt: "make artifact",
+    artifactDir: "/tmp/job_artifact",
+    lastMessagePath: "/tmp/job_artifact/last.md",
+    enqueuedAt: "2026-05-21T00:00:00.000Z",
+    metadata: { origin: { entrypointId: "fake-main", channelKind: "fake", conversationId: "conversation-1" } },
+  }, { status: "completed", outputText: "done", raw: { lastArtifactPath: "/tmp/job_artifact/out.md" } });
+
+  assert.deepEqual(entrypoint.dispatchedActions.map((action) => action.type), ["send_text", "send_artifact"]);
+  const artifact = entrypoint.dispatchedActions[1];
+  assert.equal(artifact?.type, "send_artifact");
+  assert.equal(artifact?.type === "send_artifact" ? artifact.path : "", "/tmp/job_artifact/out.md");
+  assert.equal(artifact?.target?.conversationId, "conversation-1");
+});
+
 test("BrainSupervisor can return subagent terminal results to the main runtime", async () => {
   const entrypoint = new FakeEntrypointAdapter({ workspaceId: "personal", entrypointId: "fake-main" });
   const runtime = new BrainRuntime({

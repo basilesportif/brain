@@ -18,12 +18,17 @@ Operator smoke checks now include:
 pnpm run brainctl -- runtime smoke --config examples/config/runtime.yaml --workspace personal --text ping
 pnpm run brainctl -- run --config examples/config/runtime.yaml --workspace personal --once --fake-text "agents"
 pnpm run brainctl -- health --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl -- status --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl -- logs --file <runtime-jsonl-log> --lines 50
+pnpm run brainctl -- provider smoke codex --transport stub --prompt ping
 pnpm run brainctl -- operations plan --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl -- operations validate --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl -- automation monitor <monitor-id> --file examples/config/automation.yaml
+pnpm run brainctl -- web validate --dir <static-page-dir>
 pnpm run brainctl -- validate live --config examples/config/runtime.yaml --workspace personal --run-safe
 pnpm run brainctl -- directives check <file-or-stdin>
 ```
 
-These checks are safe for fresh checkouts because they do not contact Telegram, do not invoke a real provider task, do not deploy services, and do not execute parsed directive actions. `brainctl run --once --fake-text ...` additionally proves the foreground supervisor and command-intercept path without live entrypoints. `operations plan` proves the deployment/update/rollback seams are renderable without mutation. `validate live --run-safe` runs only config, secret-metadata, runtime-smoke, provider-stub, and no-network entrypoint checks unless explicit live flags are supplied.
+These checks are safe for fresh checkouts because they do not contact Telegram, do not invoke a real non-stub provider task, do not deploy services, and do not execute parsed directive actions. `brainctl run --once --fake-text ...` additionally proves the foreground supervisor and command-intercept path without live entrypoints. `provider smoke codex --transport stub` proves the provider turn contract end-to-end without a real Codex task. `operations plan/validate` prove deployment/update/rollback seams are renderable without mutation. `automation monitor` and `automation run/due --dispatch` can use fake static dispatch plus file spool/locks without installing host schedulers/watchers. `web validate` proves generated-page packages before publish. `validate live --run-safe` runs only config, secret-metadata, runtime-smoke, provider-stub, and no-network entrypoint checks unless explicit live flags are supplied.
 
 Restart tests should not expect exact turn replay. Validate provider-native resume handles where an adapter supports them, and otherwise validate graceful degradation of active jobs/runtime state.

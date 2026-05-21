@@ -227,11 +227,19 @@ function errorMessage(error: unknown): string {
 function subagentDeliveryActions(job: SubagentJob, result: SubagentRunResult): BrainOutboundAction[] {
   if (job.route === "store_only" || job.route === "silent" || job.route === "return_to_main" || job.route === "dispatch_subagent") return [];
   const text = formatSubagentResult(job, result);
+  const artifactPath = resultArtifactPath(job, result);
   if (job.route === "send_to_admins" || job.resultTarget === "admins") {
-    return [{ type: "send_text", text, format: "markdown", target: { route: "admins" } }];
+    return [
+      { type: "send_text", text, format: "markdown", target: { route: "admins" } },
+      ...artifactActions(artifactPath, { route: "admins" }),
+    ];
   }
   if (job.route === "send_to_user" || job.route === "send_progress_and_return" || job.resultTarget === "user") {
-    return [{ type: "send_text", text, format: "markdown", target: originTargetFromJob(job) }];
+    const target = originTargetFromJob(job);
+    return [
+      { type: "send_text", text, format: "markdown", target },
+      ...artifactActions(artifactPath, target),
+    ];
   }
   return [];
 }
@@ -280,6 +288,29 @@ function formatSubagentResult(job: SubagentJob, result: SubagentRunResult): stri
   const error = result.error ?? job.error;
   if (error) lines.push("", `Error: ${error}`);
   return lines.join("\n");
+}
+
+function resultArtifactPath(job: SubagentJob, result: SubagentRunResult): string | undefined {
+  const fromResult = lastArtifactPathFromRaw(result.raw);
+  return fromResult ?? job.lastMessagePath;
+}
+
+function lastArtifactPathFromRaw(raw: unknown): string | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const value = (raw as { lastArtifactPath?: unknown }).lastArtifactPath;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function artifactActions(artifactPath: string | undefined, target: OutboundTarget): BrainOutboundAction[] {
+  if (!artifactPath) return [];
+  return [{
+    type: "send_artifact",
+    path: artifactPath,
+    caption: "Subagent artifact",
+    asDocument: true,
+    target,
+    metadata: { source: "subagent-result" },
+  }];
 }
 
 function originTargetFromJob(job: SubagentJob): OutboundTarget {

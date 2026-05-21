@@ -11,10 +11,11 @@ import YAML from "yaml";
 import { validateAssistantPack } from "@brain/assistant-pack-schema";
 import { FakeEntrypointAdapter } from "@brain/entrypoint-protocol";
 import { validateWorkspaceConfig, type BrainConfig } from "@brain/workspace-schema";
-import { AutomationRuntime, BrainRuntime, BrainSupervisor, EchoProviderAdapter, EmployeeLifecycle, FakeProviderAdapter, FileEmployeeStore, FileSubagentJobStore, RuntimeCommandInterceptor, RuntimeEntrypointBridge, StaticSubagentExecutor, SubagentLifecycle, createGuardedLiveValidationPlan, createOperationsPlan, parseBrainDirectives, renderSystemdService, type BrainSupervisorLogRecord, type OperationsPlan, type ProviderAdapter, type RuntimeLogEntry } from "@brain/runtime-core";
-import { FileTelegramPairingStore, FileTelegramPollingStateStore, TelegramBotApiClient, TelegramEntrypointAdapter, loadTelegramToken } from "@brain/entrypoint-telegram";
+import { AutomationRuntime, BrainRuntime, BrainSupervisor, EchoProviderAdapter, EmployeeLifecycle, FakeProviderAdapter, FileAutomationLockStore, FileAutomationSpool, FileEmployeeStore, FileSubagentJobStore, ProviderEmployeeRuntime, RuntimeCommandInterceptor, RuntimeEntrypointBridge, StaticSubagentExecutor, SubagentLifecycle, createGuardedLiveValidationPlan, createOperationsPlan, parseBrainDirectives, renderSystemdService, type BrainSupervisorLogRecord, type OperationsPlan, type ProviderAdapter, type ProviderTurnEvent, type RuntimeLogEntry } from "@brain/runtime-core";
+import { FileTelegramPairingStore, FileTelegramPollingStateStore, TelegramBotApiClient, TelegramEntrypointAdapter, loadTelegramToken, type TelegramAttachmentTranscriber } from "@brain/entrypoint-telegram";
 import { createCodexProvider, type CodexTransportKind } from "@brain/provider-codex";
 import { createClaudeCodeProvider, type ClaudeCodeTransportKind } from "@brain/provider-claude-code";
+import { pruneExpiredPages, publishPage, readManifest, validatePageDirectory } from "@brain/web";
 
 interface CliResult {
   ok: boolean;
@@ -64,6 +65,10 @@ program.command("start")
   .option("--polling-state <path>", "Telegram polling offset state path")
   .option("--telegram-pairing", "enable one-time /pair bootstrap state")
   .option("--telegram-pairing-state <dir>", "directory for Telegram paired identity state")
+  .option("--telegram-downloads", "download Telegram attachments to the private artifact directory before provider turns")
+  .option("--telegram-download-dir <path>", "directory for downloaded Telegram attachments")
+  .option("--telegram-transcription-command <cmd>", "private command used to transcribe local voice/audio/video files; receives file path as argv[1]")
+  .option("--employee-runtime", "enable provider-backed Employee sessions for employee start/steer commands")
   .action(async (options) => exitWith(await startCommand(options)));
 
 program.command("run")
@@ -88,6 +93,10 @@ program.command("run")
   .option("--polling-state <path>", "Telegram polling offset state path")
   .option("--telegram-pairing", "enable one-time /pair bootstrap state")
   .option("--telegram-pairing-state <dir>", "directory for Telegram paired identity state")
+  .option("--telegram-downloads", "download Telegram attachments to the private artifact directory before provider turns")
+  .option("--telegram-download-dir <path>", "directory for downloaded Telegram attachments")
+  .option("--telegram-transcription-command <cmd>", "private command used to transcribe local voice/audio/video files; receives file path as argv[1]")
+  .option("--employee-runtime", "enable provider-backed Employee sessions for employee start/steer commands")
   .action(async (options) => exitWith(await runCommand(options)));
 
 program.command("health")
@@ -97,6 +106,15 @@ program.command("health")
   .option("--state <path>", "runtime state root")
   .option("--log <path>", "runtime JSONL log path")
   .action(async (options) => exitWith(await healthCommand(options)));
+
+program.command("status")
+  .description("Summarize config, runtime state, logs, and operations readiness without starting live providers.")
+  .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--state <path>", "runtime state root")
+  .option("--artifacts <path>", "runtime artifact root")
+  .option("--log <path>", "runtime JSONL log path")
+  .action(async (options) => exitWith(await statusCommand(options)));
 
 program.command("logs")
   .description("Tail Brain runtime JSONL logs with conservative redaction.")
@@ -130,6 +148,47 @@ operations.command("systemd")
   .option("--service-user <user>", "systemd service user", "brain")
   .option("--repo <path>", "deployment checkout path", process.cwd())
   .action(async (options) => exitWith(await operationsSystemdCommand(options)));
+operations.command("validate")
+  .description("Validate deployment paths and render command readiness without installing or restarting services.")
+  .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--state <path>", "runtime state root")
+  .option("--artifacts <path>", "runtime artifact root")
+  .option("--log <path>", "runtime JSONL log path")
+  .option("--service-name <name>", "systemd service name")
+  .option("--service-user <user>", "systemd service user", "brain")
+  .option("--repo <path>", "deployment checkout path", process.cwd())
+  .action(async (options) => exitWith(await operationsValidateCommand(options)));
+
+const web = program.command("web").description("Generated static web page validation and publisher commands");
+web.command("validate")
+  .description("Validate a generated static page package without publishing it.")
+  .requiredOption("--dir <path>", "page package directory containing index.html")
+  .action(async (options) => exitWith(await webValidateCommand(options)));
+web.command("publish")
+  .description("Publish a generated static page package to the configured runtime root.")
+  .requiredOption("--dir <path>", "page package directory containing index.html")
+  .option("--id <id>", "page id")
+  .option("--title <title>", "override page title")
+  .option("--runtime-root <path>", "runtime pages root")
+  .option("--manifest-path <path>", "manifest path")
+  .option("--public-base-url <url>", "public pages base URL")
+  .option("--ttl-hours <n>", "scratch TTL in hours", parseNumberOption)
+  .option("--promoted", "publish without TTL")
+  .option("--replace", "replace existing page id")
+  .option("--dry-run", "validate and render publish result without copying files")
+  .action(async (options) => exitWith(await webPublishCommand(options)));
+web.command("prune")
+  .description("Prune expired generated pages from the runtime root.")
+  .option("--runtime-root <path>", "runtime pages root")
+  .option("--manifest-path <path>", "manifest path")
+  .option("--now <iso>", "override current time")
+  .option("--dry-run", "render prune result without deleting files")
+  .action(async (options) => exitWith(await webPruneCommand(options)));
+web.command("manifest")
+  .description("Inspect a generated-pages manifest.")
+  .option("--manifest-path <path>", "manifest path", ".brain/web-pages/manifest.json")
+  .action(async (options) => exitWith(await webManifestCommand(options)));
 
 const validate = program.command("validate").description("Guarded validation harnesses");
 validate.command("live")
@@ -172,6 +231,18 @@ provider.command("check")
   .option("--app-server-url <url>", "Codex app-server WebSocket URL for app-server transport")
   .option("--timeout-ms <ms>", "provider health timeout in milliseconds", parseNumberOption)
   .action(async (providerId, options) => exitWith(await providerCheckCommand(providerId, options)));
+provider.command("smoke")
+  .description("Run one provider turn through the provider boundary; non-stub transports require --allow-live.")
+  .argument("<provider>", "provider id: codex or claude-code")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--transport <kind>", "provider transport to instantiate", "stub")
+  .option("--binary <path>", "provider CLI binary for exec health/smoke checks")
+  .option("--cwd <path>", "provider working directory for CLI checks")
+  .option("--app-server-url <url>", "Codex app-server WebSocket URL")
+  .option("--timeout-ms <ms>", "provider timeout in milliseconds", parseNumberOption)
+  .option("--prompt <text>", "prompt text for the smoke turn", "ping")
+  .option("--allow-live", "allow non-stub provider transports to receive the smoke turn")
+  .action(async (providerId, options) => exitWith(await providerSmokeCommand(providerId, options)));
 
 const entrypoint = program.command("entrypoint").description("Entrypoint boundary checks");
 entrypoint.command("check")
@@ -214,7 +285,9 @@ automation.command("run")
   .option("--file <path>", "automation JSON/YAML file with loops/monitors arrays", "examples/config/automation.yaml")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--dry-run", "do not dispatch; this is the default safe behavior", true)
-  .option("--dispatch", "attempt a real dispatch through the configured CLI runtime port (currently reports not-runnable)")
+  .option("--dispatch", "run through the local fake execution harness instead of dry-run")
+  .option("--state <path>", "runtime state root for fake dispatch/spool")
+  .option("--artifacts <path>", "artifact root for fake dispatch")
   .action(async (loopId, options) => exitWith(await automationRunCommand(loopId, options)));
 automation.command("due")
   .description("Evaluate due loops for the current minute without installing cron; dry-run by default.")
@@ -222,7 +295,22 @@ automation.command("due")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--now <iso>", "override current time for deterministic checks")
   .option("--dry-run", "do not dispatch; this is the default safe behavior", true)
+  .option("--dispatch", "attempt fake dispatch for due dispatch_subagent loops")
+  .option("--state <path>", "runtime state root for fake dispatch/spool")
+  .option("--artifacts <path>", "artifact root for fake dispatch")
   .action(async (options) => exitWith(await automationDueCommand(options)));
+automation.command("monitor")
+  .description("Evaluate one monitor event through safe fake execution; dry-run by default.")
+  .argument("<monitor>", "monitor id")
+  .option("--file <path>", "automation JSON/YAML file with loops/monitors arrays", "examples/config/automation.yaml")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--line <text>", "sample monitor line", "sample monitor event")
+  .option("--context <text>", "sample monitor context")
+  .option("--dry-run", "do not dispatch; this is the default safe behavior", true)
+  .option("--dispatch", "attempt fake dispatch through a local static subagent lifecycle")
+  .option("--state <path>", "runtime state root for fake dispatch/spool")
+  .option("--artifacts <path>", "artifact root for fake dispatch")
+  .action(async (monitorId, options) => exitWith(await automationMonitorCommand(monitorId, options)));
 
 interface SupervisorRunCommandOptions {
   config: string;
@@ -245,6 +333,10 @@ interface SupervisorRunCommandOptions {
   pollingState?: string;
   telegramPairing?: boolean;
   telegramPairingState?: string;
+  telegramDownloads?: boolean;
+  telegramDownloadDir?: string;
+  telegramTranscriptionCommand?: string;
+  employeeRuntime?: boolean;
 }
 
 async function startCommand(options: SupervisorRunCommandOptions & { foreground?: boolean }): Promise<CliResult> {
@@ -297,6 +389,7 @@ async function runCommand(options: SupervisorRunCommandOptions): Promise<CliResu
     workspaceId: options.workspace,
     store: new FileEmployeeStore({ root: paths.stateRoot }),
     provider: provider.id,
+    runtime: options.employeeRuntime ? new ProviderEmployeeRuntime({ provider, workspaceId: options.workspace }) : undefined,
   });
   await employees.init();
 
@@ -378,6 +471,27 @@ async function logsCommand(options: { file?: string; workspace: string; state?: 
   };
 }
 
+async function statusCommand(options: { config: string; workspace: string; state?: string; artifacts?: string; log?: string }): Promise<CliResult> {
+  const health = await healthCommand(options);
+  const paths = supervisorPaths(options.workspace, options);
+  const operations = health.ok ? operationsPlan({ ...options, repo: process.cwd() }) : undefined;
+  return {
+    ok: health.ok,
+    summary: health.ok ? "runtime status inspected without live side effects" : "runtime status needs attention",
+    details: {
+      health: health.details,
+      paths,
+      operations: operations ? {
+        serviceName: operations.serviceName,
+        unitPath: operations.unitPath,
+        preflight: operations.commands.preflight,
+        postUpdateSmoke: operations.commands.postUpdateSmoke,
+      } : undefined,
+      liveProcessesStarted: false,
+    },
+  };
+}
+
 interface OperationsCommandOptions {
   config: string;
   workspace: string;
@@ -422,6 +536,33 @@ async function operationsSystemdCommand(options: OperationsCommandOptions): Prom
   };
 }
 
+async function operationsValidateCommand(options: OperationsCommandOptions): Promise<CliResult> {
+  const config = await loadValidConfig(options.config);
+  if (!config.ok || !config.config) return config;
+  if (!config.config.workspaces[options.workspace]) return { ok: false, summary: `workspace not found: ${options.workspace}`, details: { available: Object.keys(config.config.workspaces) } };
+  const plan = operationsPlan(options);
+  const [repo, configFile, stateParent, artifactRoot, logParent, envFile] = await Promise.all([
+    fileMetadata(plan.repoPath),
+    fileMetadata(plan.configPath),
+    fileMetadata(path.dirname(plan.stateRoot)),
+    fileMetadata(plan.artifactRoot),
+    fileMetadata(path.dirname(plan.logPath)),
+    fileMetadata(plan.environmentFile),
+  ]);
+  return {
+    ok: true,
+    summary: "operations readiness validated without deployment side effects",
+    details: {
+      serviceName: plan.serviceName,
+      unitPath: plan.unitPath,
+      metadata: { repo, configFile, stateParent, artifactRoot, logParent, environmentFile: envFile },
+      commandPlan: plan.commands,
+      safety: plan.safety,
+      sideEffects: "none",
+    },
+  };
+}
+
 function operationsPlan(options: OperationsCommandOptions): OperationsPlan {
   const paths = supervisorPaths(options.workspace, options);
   return createOperationsPlan({
@@ -434,6 +575,84 @@ function operationsPlan(options: OperationsCommandOptions): OperationsPlan {
     serviceName: options.serviceName,
     serviceUser: options.serviceUser,
   });
+}
+
+async function webValidateCommand(options: { dir: string }): Promise<CliResult> {
+  try {
+    const validation = await validatePageDirectory(options.dir);
+    return {
+      ok: true,
+      summary: "generated page package is valid",
+      details: {
+        root: validation.root,
+        title: validation.title,
+        files: validation.files,
+        totalBytes: validation.totalBytes,
+        sideEffects: "none",
+      },
+    };
+  } catch (error) {
+    return { ok: false, summary: "generated page package is invalid", details: { error: errorMessage(error), sideEffects: "none" } };
+  }
+}
+
+async function webPublishCommand(options: {
+  dir: string;
+  id?: string;
+  title?: string;
+  runtimeRoot?: string;
+  manifestPath?: string;
+  publicBaseUrl?: string;
+  ttlHours?: number;
+  promoted?: boolean;
+  replace?: boolean;
+  dryRun?: boolean;
+}): Promise<CliResult> {
+  try {
+    const result = await publishPage({
+      sourceDir: options.dir,
+      id: options.id,
+      title: options.title,
+      runtimeRoot: options.runtimeRoot,
+      manifestPath: options.manifestPath,
+      publicBaseUrl: options.publicBaseUrl,
+      ttlHours: options.ttlHours,
+      promoted: options.promoted,
+      replace: options.replace,
+      dryRun: options.dryRun,
+      source: { publisher: "brainctl web publish" },
+    });
+    return { ok: true, summary: result.dryRun ? "generated page publish dry-run passed" : "generated page published", details: result };
+  } catch (error) {
+    return { ok: false, summary: "generated page publish failed", details: { error: errorMessage(error), dryRun: Boolean(options.dryRun) } };
+  }
+}
+
+async function webPruneCommand(options: { runtimeRoot?: string; manifestPath?: string; now?: string; dryRun?: boolean }): Promise<CliResult> {
+  try {
+    const result = await pruneExpiredPages({ runtimeRoot: options.runtimeRoot, manifestPath: options.manifestPath, now: options.now, dryRun: options.dryRun });
+    return { ok: true, summary: result.dryRun ? "generated page prune dry-run complete" : "generated pages pruned", details: result };
+  } catch (error) {
+    return { ok: false, summary: "generated page prune failed", details: { error: errorMessage(error), dryRun: Boolean(options.dryRun) } };
+  }
+}
+
+async function webManifestCommand(options: { manifestPath: string }): Promise<CliResult> {
+  try {
+    const manifest = await readManifest(options.manifestPath);
+    return {
+      ok: true,
+      summary: "generated page manifest inspected",
+      details: {
+        manifestPath: path.resolve(options.manifestPath),
+        pages: Object.keys(manifest.pages).length,
+        updatedAt: manifest.updatedAt,
+        entries: Object.values(manifest.pages).map((page) => ({ id: page.id, title: page.title, url: page.url, status: page.status, expiresAt: page.expiresAt })),
+      },
+    };
+  } catch (error) {
+    return { ok: false, summary: "generated page manifest could not be read", details: { error: errorMessage(error) } };
+  }
 }
 
 async function liveValidateCommand(options: {
@@ -521,8 +740,9 @@ async function createCliEntrypoint(workspaceId: string, primaryEntrypointId: str
     return entrypoint;
   }
   if (kind !== "telegram") throw new Error(`unknown entrypoint: ${options.entrypoint}`);
+  const downloadDir = path.resolve(options.telegramDownloadDir ?? path.join(paths.stateRoot, "..", "artifacts", "telegram-downloads"));
   const apiClient = options.telegramPolling
-    ? await TelegramBotApiClient.fromTokenRef({ tokenEnv: options.telegramTokenEnv, tokenFile: options.telegramTokenFile, required: true })
+    ? await TelegramBotApiClient.fromTokenRef({ tokenEnv: options.telegramTokenEnv, tokenFile: options.telegramTokenFile, required: true, downloadDir: options.telegramDownloads || options.telegramDownloadDir ? downloadDir : undefined })
     : undefined;
   const pairingState = options.telegramPairingState ? path.resolve(options.telegramPairingState) : path.join(paths.stateRoot, "telegram-pairing");
   return new TelegramEntrypointAdapter({
@@ -538,7 +758,22 @@ async function createCliEntrypoint(workspaceId: string, primaryEntrypointId: str
       enabled: true,
       store: new FileTelegramPairingStore(pairingState),
     } : undefined,
+    attachmentHandling: options.telegramDownloads || options.telegramDownloadDir || options.telegramTranscriptionCommand ? {
+      download: Boolean(options.telegramDownloads || options.telegramDownloadDir),
+      transcriber: options.telegramTranscriptionCommand ? commandTranscriber(options.telegramTranscriptionCommand) : undefined,
+    } : undefined,
   });
+}
+
+function commandTranscriber(command: string): TelegramAttachmentTranscriber {
+  return {
+    async transcribe(input) {
+      const result = spawnSync(command, [input.path], { encoding: "utf8", timeout: 120_000 });
+      if (result.error) throw result.error;
+      if ((result.status ?? 0) !== 0) throw new Error(result.stderr || `${command} exited ${result.status}`);
+      return { text: (result.stdout ?? "").trim() };
+    },
+  };
 }
 
 async function appendSupervisorLog(filePath: string, record: BrainSupervisorLogRecord): Promise<void> {
@@ -589,6 +824,10 @@ function redactSecrets(value: unknown): unknown {
 function redactString(value: string): string {
   return value.replace(/\b\d{5,}:[A-Za-z0-9_-]{16,}\b/g, "[redacted-telegram-token]")
     .replace(/\b(sk-[A-Za-z0-9_-]{16,})\b/g, "[redacted-api-key]");
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function setupCommand(options: { workspace: string; path: string; dryRun?: boolean }): Promise<CliResult> {
@@ -703,6 +942,62 @@ async function providerCheckCommand(providerId: string, options: { workspace: st
     };
   } finally {
     await session.stop();
+  }
+}
+
+async function providerSmokeCommand(providerId: string, options: { workspace: string; transport?: string; binary?: string; cwd?: string; appServerUrl?: string; timeoutMs?: number; prompt: string; allowLive?: boolean }): Promise<CliResult> {
+  const transport = options.transport ?? "stub";
+  if (transport !== "stub" && !options.allowLive) {
+    return {
+      ok: true,
+      summary: `${providerId} provider smoke planned but not run; pass --allow-live for non-stub transports`,
+      details: { provider: providerId, transport, taskStarted: false, guard: "non-stub provider turns require --allow-live" },
+    };
+  }
+  const normalized = providerId.toLowerCase();
+  const adapter = normalized === "codex"
+    ? createCodexProvider({ transport: transport as CodexTransportKind, binary: options.binary, cwd: options.cwd, appServerUrl: options.appServerUrl, timeoutMs: options.timeoutMs, appServerStartupTimeoutMs: options.timeoutMs })
+    : normalized === "claude-code" || normalized === "claude"
+      ? createClaudeCodeProvider({ transport: transport as ClaudeCodeTransportKind })
+      : undefined;
+  if (!adapter) return { ok: false, summary: `unknown provider: ${providerId}`, details: { supported: ["codex", "claude-code"] } };
+  const session = await adapter.createSession({ workspaceId: options.workspace, metadata: { check: "brainctl provider smoke" } });
+  const events: ProviderTurnEvent[] = [];
+  try {
+    await session.start();
+    for await (const event of session.sendTurn({
+      id: "brainctl_provider_smoke_turn",
+      sessionId: session.id,
+      inboundEvent: {
+        id: "brainctl_provider_smoke_event",
+        kind: "message",
+        workspaceId: options.workspace,
+        entrypoint: { entrypointId: "brainctl", channelKind: "cli", displayName: "brainctl" },
+        text: options.prompt,
+        receivedAt: new Date().toISOString(),
+      },
+      prompt: options.prompt,
+    })) events.push(event);
+    const finalEvent = [...events].reverse().find((event): event is Extract<ProviderTurnEvent, { type: "final" }> => event.type === "final");
+    const finalText = finalEvent?.text;
+    const errors = events.filter((event) => event.type === "error").map((event) => event.message);
+    return {
+      ok: errors.length === 0 && Boolean(finalText || events.some((event) => event.type === "delta")),
+      summary: errors.length === 0 ? `${adapter.id} provider smoke completed` : `${adapter.id} provider smoke reported errors`,
+      details: {
+        provider: adapter.id,
+        transport,
+        taskStarted: true,
+        eventTypes: events.map((event) => event.type),
+        finalText,
+        errors,
+        resumeHandle: await session.resumeHandle?.(),
+      },
+    };
+  } catch (error) {
+    return { ok: false, summary: `${adapter.id} provider smoke failed`, details: { provider: adapter.id, transport, taskStarted: true, error: errorMessage(error), eventTypes: events.map((event) => event.type) } };
+  } finally {
+    await session.stop().catch(() => undefined);
   }
 }
 
@@ -829,31 +1124,78 @@ async function automationValidateCommand(file: string | undefined, options: { wo
   };
 }
 
-async function automationRunCommand(loopId: string, options: { file: string; workspace: string; dryRun?: boolean; dispatch?: boolean }): Promise<CliResult> {
+async function automationRunCommand(loopId: string, options: { file: string; workspace: string; dryRun?: boolean; dispatch?: boolean; state?: string; artifacts?: string }): Promise<CliResult> {
   const record = await readAutomationConfig(options.file);
-  const runtime = new AutomationRuntime({ workspaceId: options.workspace, loops: record.loops ?? [], monitors: record.monitors ?? [] });
+  const harness = options.dispatch ? await createAutomationHarness(options.workspace, options) : undefined;
+  const runtime = new AutomationRuntime({ workspaceId: options.workspace, loops: record.loops ?? [], monitors: record.monitors ?? [], ...(harness ?? {}) });
   const dryRun = options.dispatch ? false : options.dryRun !== false;
   const result = await runtime.runLoopOnce(loopId, { dryRun });
+  await harness?.subagents.waitForIdle().catch(() => undefined);
   return {
-    ok: result.status === "dry_run" || result.status === "dispatched",
+    ok: ["dry_run", "dispatched", "executed"].includes(result.status),
     summary: result.status === "dry_run" ? "loop dry-run evaluated without cron side effects" : `loop ${result.status}`,
-    details: { result, safeDefault: "no crontab or watcher was installed" },
+    details: { result, stateRoot: harness?.stateRoot, artifactRoot: harness?.artifactRoot, safeDefault: "no crontab or watcher was installed" },
   };
 }
 
-async function automationDueCommand(options: { file: string; workspace: string; now?: string; dryRun?: boolean }): Promise<CliResult> {
+async function automationDueCommand(options: { file: string; workspace: string; now?: string; dryRun?: boolean; dispatch?: boolean; state?: string; artifacts?: string }): Promise<CliResult> {
   const record = await readAutomationConfig(options.file);
+  const harness = options.dispatch ? await createAutomationHarness(options.workspace, options) : undefined;
   const runtime = new AutomationRuntime({
     workspaceId: options.workspace,
     loops: record.loops ?? [],
     monitors: record.monitors ?? [],
+    ...(harness ?? {}),
     now: options.now ? () => new Date(options.now as string) : undefined,
   });
-  const results = await runtime.runDueLoops({ dryRun: options.dryRun !== false, now: options.now ? new Date(options.now) : undefined });
+  const results = await runtime.runDueLoops({ dryRun: options.dispatch ? false : options.dryRun !== false, now: options.now ? new Date(options.now) : undefined });
+  await harness?.subagents.waitForIdle().catch(() => undefined);
   return {
-    ok: results.every((result) => result.status === "dry_run" || result.status === "dispatched"),
+    ok: results.every((result) => ["dry_run", "dispatched", "executed"].includes(result.status)),
     summary: results.length === 0 ? "no loops due; no cron side effects" : "due loops evaluated without cron side effects",
-    details: { results, safeDefault: "no crontab or watcher was installed" },
+    details: { results, stateRoot: harness?.stateRoot, artifactRoot: harness?.artifactRoot, safeDefault: "no crontab or watcher was installed" },
+  };
+}
+
+async function automationMonitorCommand(monitorId: string, options: { file: string; workspace: string; line: string; context?: string; dryRun?: boolean; dispatch?: boolean; state?: string; artifacts?: string }): Promise<CliResult> {
+  const record = await readAutomationConfig(options.file);
+  const harness = options.dispatch ? await createAutomationHarness(options.workspace, options) : undefined;
+  const runtime = new AutomationRuntime({ workspaceId: options.workspace, loops: record.loops ?? [], monitors: record.monitors ?? [], ...(harness ?? {}) });
+  const result = await runtime.runMonitorOnce(monitorId, { line: options.line, context: options.context, dryRun: options.dispatch ? false : options.dryRun !== false });
+  await harness?.subagents.waitForIdle().catch(() => undefined);
+  return {
+    ok: ["dry_run", "dispatched", "notified"].includes(result.status),
+    summary: result.status === "dry_run" ? "monitor dry-run evaluated without watcher side effects" : `monitor ${result.status}`,
+    details: { result, stateRoot: harness?.stateRoot, artifactRoot: harness?.artifactRoot, safeDefault: "no watcher or long-running monitor was installed" },
+  };
+}
+
+async function createAutomationHarness(workspace: string, options: { state?: string; artifacts?: string }) {
+  const paths = supervisorPaths(workspace, options);
+  const store = new FileSubagentJobStore({ root: paths.stateRoot });
+  const subagents = new SubagentLifecycle({
+    workspaceId: workspace,
+    store,
+    executor: new StaticSubagentExecutor({ id: "brainctl-automation-static", outputText: "Automation fake dispatch completed." }),
+    artifactRoot: paths.artifactRoot,
+  });
+  await subagents.init();
+  return {
+    stateRoot: paths.stateRoot,
+    artifactRoot: paths.artifactRoot,
+    subagents,
+    spool: new FileAutomationSpool(paths.stateRoot),
+    locks: new FileAutomationLockStore(paths.stateRoot),
+    notifier: {
+      async notifyAdmins(_text: string) {},
+      async enqueueMain(_text: string) {},
+    },
+    commandRunner: {
+      async run(command: string, args: string[]) {
+        const result = spawnSync(command, args, { encoding: "utf8", timeout: 30_000 });
+        return { exitCode: result.status ?? (result.error ? 1 : 0), stdout: result.stdout ?? "", stderr: result.stderr ?? (result.error?.message ?? "") };
+      },
+    },
   };
 }
 

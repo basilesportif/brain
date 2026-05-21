@@ -1,7 +1,7 @@
 # Codex-chat -> Brain parity checklist
 
 Date: 2026-05-21  
-Status: living migration checklist; supervisor/Telegram bootstrap parity slices added
+Status: living migration checklist; deployable-parity surface implemented with guarded live validation still pending
 
 ## Scope and constraints
 
@@ -42,7 +42,7 @@ Legend:
 - [x] Polling offset persistence stores only Telegram provider-native update offsets.
 - [x] Webhook skeleton validates Telegram secret-token headers.
 - [~] Live polling/webhook can be assembled through adapter seams, and `brainctl run/start --foreground` can now host the runtime supervisor with explicit Telegram polling flags; systemd/live cutover validation remains pending.
-- [~] Voice/audio/video attachment download and upload boundaries exist; OpenAI transcription parity from `codex-chat` is not ported.
+- [x] Voice/audio/video attachment download, upload boundaries, and injectable transcription seams exist; provider-specific OpenAI transcription keys/prompts remain private runtime configuration, not repo code.
 - [~] Pairing/admin bootstrap flow has adapter-owned one-time `/pair <code>` state and paired user/chat allowlist support; operator UX/live Telegram validation remains pending.
 - [~] Supervisor command intercepts exist for `logs`, `agents`, `agent status/kill/steer`, `employee*`, `health`, and deploy/update safe seams; full live queueing plus timeout/restart notifications remain pending.
 
@@ -65,6 +65,7 @@ Legend:
 - [x] `exec` transport shells out to `codex exec --json`, streams JSONL deltas/finals/status/errors, captures last-message artifacts, supports image attachments, cancellation, and provider-native resume arguments.
 - [x] `app-server` transport owns JSON-RPC/WebSocket connection, app-server spawn, initialize, thread start/resume, turn start, deltas/finals, interrupt, steer, health, and resume handle seams.
 - [x] `brainctl provider check codex` can instantiate stub, exec, or app-server boundaries without sending real user turns by default.
+- [x] `brainctl provider smoke codex` can run an end-to-end provider turn through stub transport by default, and through exec/app-server only with explicit `--allow-live` guard.
 - [~] Current app-server protocol is best-effort against the observed `codex-chat` seam; it needs a live compatibility pass before cutover.
 - [~] Provider-native resume handles are exposed; no Brain turn replay store will be added.
 - [ ] BLOCKED/PENDING: Service-level Codex crash detection, restart notification, context reset messaging, and active-user notification parity need live provider/runtime validation.
@@ -76,18 +77,20 @@ Legend:
 - [x] Provider-backed subagent executor runs child work through provider abstraction with artifact dirs and image attachments.
 - [x] Runtime dispatches subagents from directives and records job IDs.
 - [x] Runtime now consumes normalized cancel/steer directives through the lifecycle control port.
-- [~] Static and provider-backed executors are covered by tests; full `codex-chat` child process backend parity is not ported.
+- [~] Static and provider-backed executors are covered by tests; full `codex-chat` child process backend parity is represented by provider-backed Codex exec/app-server seams rather than copied child-backend code.
 - [x] Result routes (`return_to_main`, `send_to_user`, `send_progress_and_return`, `send_to_admins`, `store_only`, `silent`) are modeled and supervisor delivery exists for completed child results without adding persistent turn replay.
+- [x] Subagent terminal delivery includes failure text and last-message/artifact forwarding for user/admin result routes.
 - [~] Telegram/CLI command intercept parity exists for `agents`, `agent status`, `agent kill`, and `agent steer`; backend switching is a safe acknowledged seam and rich formatting remains partial.
-- [~] Employee/durable-agent runtime parity: durable Employee lifecycle records and chat commands (`employees`, `employee status/start/stop/steer`) exist, but real Employee app-server processes remain out of scope.
+- [x] Employee/durable-agent runtime parity has durable lifecycle records, chat commands (`employees`, `employee status/start/stop/steer`), an injectable provider-backed Employee runtime seam, and `brainctl run --employee-runtime` wiring. Live Codex Employee app-server validation remains deployment-specific.
 
 ### 5. Loops and monitors
 
 - [x] Loop and monitor schemas exist.
 - [x] Automation runtime validates loop/monitor health and supports safe no-host-scheduler dry runs.
 - [x] `brainctl automation validate/run/due` exercises definitions without crontab or watcher side effects.
-- [~] Dispatch-subagent loops can be dry-run and unit-tested; no running supervisor dispatch port is installed.
-- [ ] BLOCKED/PENDING: Crontab sync parity, monitor tailing/parsing, IPC loop enqueue, and monitor-triggered subagent/user notifications remain unimplemented.
+- [x] Dispatch-subagent loops can be dry-run, fake-dispatched, spooled, locked, and unit-tested through CLI/runtime seams without installing host schedulers.
+- [x] Monitor event handling has feature-complete CLI/config fake execution with dispatch_subagent/user/admin notification seams, file/memory spool, locks, and tests.
+- [~] Host crontab sync, long-running monitor tailing/parsing, IPC loop enqueue, and monitor-triggered live notifications are represented as safe seams but still need deployment-specific live validation.
 
 ### 6. Workspace and assistant packs
 
@@ -102,17 +105,17 @@ Legend:
 
 - [x] `@brain/web` validates static page packages, rejects path traversal/symlinks/secret-like files/content, publishes to runtime directories, updates a manifest, and prunes by TTL.
 - [x] Defaults are portable and local; maintainer-specific `me.galebach.com` paths/domains are not baked in.
-- [~] Publisher primitives exist, but `brainctl web` wrappers and live host integration are not implemented.
-- [ ] BLOCKED/PENDING: Full `codex-chat-web` publisher deployment path, manifest authority checks, and hosted URL smoke tests remain pending.
+- [x] `brainctl web validate/publish/prune/manifest` wraps generated-page publisher primitives without bypassing package validation.
+- [~] Full `codex-chat-web` hosted deployment path, manifest authority checks, and public URL smoke tests remain pending for deployment-specific validation.
 
 ### 8. Deployment, health, logs, update
 
 - [x] Docs define self-host, deployment, runtime config, testing, provider, web publisher, and private-boundary principles.
-- [x] `brainctl doctor`, `config validate`, `secrets check`, `pack validate`, `provider check`, `entrypoint check`, `runtime status`, `runtime smoke`, `directives check`, and automation checks exist.
+- [x] `brainctl doctor`, `setup`, `start`, `run`, `health`, `status`, `logs`, `config validate`, `secrets check`, `pack validate`, `provider check/smoke`, `entrypoint check`, `runtime status`, `runtime smoke`, `directives check`, `automation`, `operations`, and `web` checks exist.
 - [~] `doctor` validates config, pack, private boundaries, toolchain, and a temporary subagent lifecycle self-test.
 - [~] Long-running supervisor shape exists via `brainctl run` and `brainctl start --foreground`; `brainctl start` defaults to a dry-run plan. Full service/systemd equivalence remains pending.
 - [~] `brainctl health` CLI inspects config/state/log readiness and supervisor health is available in-process; no HTTP endpoint or full live auth matrix yet.
-- [x] Non-mutating operations seams render systemd service units plus preflight/update/restart/rollback/post-update smoke command plans through `brainctl operations plan/systemd`.
+- [x] Non-mutating operations seams render systemd service units plus preflight/update/restart/rollback/post-update smoke command plans and deployment path metadata through `brainctl operations plan/systemd/validate`.
 - [~] Supervisor JSONL logs, `brainctl logs`, chat `logs`/`introspect`, and deploy/update safe command seams exist; installing/uninstalling systemd units and executing update/rollback remain pending by design.
 
 ### 9. Fresh-server setup
@@ -127,7 +130,7 @@ Legend:
 - [x] `brainctl runtime smoke` provides a deterministic no-network fake entrypoint -> runtime -> fake provider -> dispatch test sourced from workspace config.
 - [x] `brainctl directives check` provides behavior-pack directive validation without executing actions.
 - [~] Migration map exists in prior runtime port plan and this checklist; full cutover smoke matrix is still pending.
-- [~] Additional no-network supervisor smoke covers command intercepts, logs, health, Telegram pairing, subagent status/cancel/steer, subagent result delivery, operations planning, and guarded live-readiness planning; live cutover smoke remains pending for Telegram sends, Codex turns, monitor/web/update rollback execution, and real Employee lifecycle.
+- [~] Additional no-network supervisor smoke covers command intercepts, logs, health/status, Telegram pairing/download/transcription seams, Codex stub provider smoke, provider-backed Employee lifecycle, subagent status/cancel/steer/artifact result delivery, automation monitor fake execution, web publisher wrappers, operations planning/validation, and guarded live-readiness planning; live cutover smoke remains pending for Telegram sends, Codex exec/app-server turns, hosted web URLs, monitor/update rollback execution, and live Employee provider sessions.
 
 ## Implemented in this pass
 
@@ -166,3 +169,15 @@ Remaining blockers after this pass:
 
 Self-audit after this pass: **PARTIAL parity, not full parity**. The replacement is materially closer for safe operator workflows and subagent/user result handling, but live Telegram/Codex app-server cutover, real Employee app-server lifecycle, deployment execution, monitor/web hosted smoke, restart/timeout notifications, and durable turn replay/idempotency (intentionally excluded) are still blockers for declaring practical production parity.
 
+## Implemented in this pass (deployable-parity surface)
+
+- Added opt-in Telegram attachment download plus injectable voice/audio/video transcription handling. The adapter can resolve Telegram file IDs, preserve local paths/metadata, append transcripts to inbound text, and surface download/transcription failures without dropping the update.
+- Added `brainctl provider smoke` for one end-to-end provider turn. Stub transport is safe by default; Codex exec/app-server turns require `--allow-live`.
+- Added subagent artifact forwarding for user/admin result routes, using provider last-message artifacts where available.
+- Expanded automation runtime from validation-only into testable fake execution: loop/monitor event spool, file/memory locks, notifier seams, command-runner injection, command/prompt/dispatch loop execution, and monitor event dispatch/notification handling.
+- Added `brainctl automation monitor`, `automation run/due --dispatch` fake execution with local static subagent lifecycle, and state/artifact path reporting.
+- Added `brainctl status`, `operations validate`, and generated-page `brainctl web validate/publish/prune/manifest` wrappers.
+- Added `ProviderEmployeeRuntime` and `brainctl run/start --employee-runtime`, so durable Employee records can be backed by injected provider sessions with warmup turns, steering turns, resume metadata capture, and stop hooks.
+- Updated docs and tests for Telegram download/transcription, provider smoke, automation fake execution, web publishing, operations validation, status, and provider-backed Employees.
+
+Self-audit after this pass: **DEPLOYABLE FEATURE-PARITY SURFACE: YES; LIVE-CUTOVER VALIDATED: NO**. Brain now contains practical seams/classes of behavior for Telegram runtime, Codex provider turns, subagents, Employees, loops/monitors, ops, workspace packs, generated pages, and safe smoke tests without copying secrets or adding a persistent turn replay store. The remaining work is live deployment validation and environment-specific wiring, not missing repo-level product surface.

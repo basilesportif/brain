@@ -3,6 +3,7 @@ import path from "node:path";
 import { z } from "zod";
 import { FileRuntimeStateStore } from "./jobs.js";
 import type { JsonRecord } from "@brain/entrypoint-protocol";
+import type { ProviderAdapter, ProviderResumeHandle, ProviderSession, ProviderTurnEvent } from "./provider.js";
 
 export const employeeStatusSchema = z.enum(["stopped", "running", "failed"]);
 export type EmployeeStatus = z.infer<typeof employeeStatusSchema>;
@@ -69,7 +70,7 @@ export type EmployeeLifecycleResult =
   | { status: "success"; ref: string; message: string; employee: EmployeeRecord; previousStatus?: EmployeeStatus }
   | { status: "not_found"; ref: string; message: string }
   | { status: "ambiguous"; ref: string; message: string; candidates: EmployeeCandidate[] }
-  | { status: "failed"; ref: string; message: string; employee?: EmployeeRecord };
+  | { status: "failed"; ref: string; message: string; employee?: EmployeeRecord; previousStatus?: EmployeeStatus };
 
 export interface EmployeeControlPort {
   listEmployees?(): Promise<EmployeeRecord[]>;
@@ -83,7 +84,21 @@ export interface EmployeeLifecycleOptions {
   workspaceId?: string;
   store: EmployeeStore;
   provider?: string;
+  runtime?: EmployeeRuntimePort;
   now?: () => Date;
+}
+
+export interface EmployeeRuntimeStartResult {
+  provider?: string;
+  sessionId?: string;
+  resumeHandle?: ProviderResumeHandle;
+  events?: ProviderTurnEvent[];
+}
+
+export interface EmployeeRuntimePort {
+  startEmployee(employee: EmployeeRecord, input: EmployeeStartInput): Promise<EmployeeRuntimeStartResult>;
+  stopEmployee(employee: EmployeeRecord, reason?: string): Promise<void>;
+  steerEmployee(employee: EmployeeRecord, text: string): Promise<EmployeeRuntimeStartResult | void>;
 }
 
 export class EmployeeLifecycle implements EmployeeControlPort {
@@ -116,7 +131,7 @@ export class EmployeeLifecycle implements EmployeeControlPort {
     const now = this.nowIso();
     const existing = await this.options.store.get(id);
     const previousStatus = existing?.status;
-    const employee = existing
+    let employee = existing
       ? await this.options.store.update(id, {
         status: "running",
         workspaceId: input.workspaceId ?? existing.workspaceId ?? this.options.workspaceId,
@@ -132,6 +147,26 @@ export class EmployeeLifecycle implements EmployeeControlPort {
         metadata: input.metadata ?? existing.metadata,
       })
       : await this.createEmployee({ ...input, id }, now);
+    if (this.options.runtime) {
+      try {
+        const started = await this.options.runtime.startEmployee(employee, input);
+        employee = await this.options.store.update(employee.id, {
+          provider: started.provider ?? employee.provider,
+          metadata: compactJsonRecord({
+            ...(employee.metadata ?? {}),
+            runtimeSessionId: started.sessionId,
+            resumeHandle: started.resumeHandle,
+            startEventTypes: started.events?.map((event) => event.type),
+          }),
+        });
+      } catch (error) {
+        employee = await this.options.store.update(employee.id, {
+          status: "failed",
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return { status: "failed", ref: input.id, employee, previousStatus, message: `Employee ${employee.id} runtime failed to start: ${employee.error}` };
+      }
+    }
     return {
       status: "success",
       ref: input.id,
@@ -139,7 +174,9 @@ export class EmployeeLifecycle implements EmployeeControlPort {
       previousStatus,
       message: previousStatus === "running"
         ? `Employee ${employee.id} was already running; metadata refreshed.`
-        : `Employee ${employee.id} marked running through the safe lifecycle seam.`,
+        : this.options.runtime
+          ? `Employee ${employee.id} runtime started.`
+          : `Employee ${employee.id} marked running through the safe lifecycle seam.`,
     };
   }
 
@@ -151,6 +188,7 @@ export class EmployeeLifecycle implements EmployeeControlPort {
     if (previousStatus === "stopped") {
       return { status: "success", ref, employee: resolution.employee, previousStatus, message: `Employee ${resolution.employee.id} is already stopped.` };
     }
+    await this.options.runtime?.stopEmployee(resolution.employee, reason).catch(() => undefined);
     const employee = await this.options.store.update(resolution.employee.id, {
       status: "stopped",
       stoppedAt: this.nowIso(),
@@ -168,12 +206,18 @@ export class EmployeeLifecycle implements EmployeeControlPort {
     if (resolution.employee.status !== "running") {
       return { status: "failed", ref, employee: resolution.employee, message: `Employee ${resolution.employee.id} is ${resolution.employee.status}, not running.` };
     }
+    const runtimeResult = await this.options.runtime?.steerEmployee(resolution.employee, instruction);
     const employee = await this.options.store.update(resolution.employee.id, {
       lastInstruction: instruction,
       lastSteeredAt: this.nowIso(),
       steerCount: (resolution.employee.steerCount ?? 0) + 1,
+      metadata: runtimeResult ? compactJsonRecord({
+        ...(resolution.employee.metadata ?? {}),
+        resumeHandle: runtimeResult.resumeHandle,
+        lastSteerEventTypes: runtimeResult.events?.map((event) => event.type),
+      }) : resolution.employee.metadata,
     });
-    return { status: "success", ref, employee, previousStatus: resolution.employee.status, message: `Recorded steering instruction for employee ${employee.id}.` };
+    return { status: "success", ref, employee, previousStatus: resolution.employee.status, message: this.options.runtime ? `Steered employee ${employee.id} runtime.` : `Recorded steering instruction for employee ${employee.id}.` };
   }
 
   private async createEmployee(input: EmployeeStartInput, now: string): Promise<EmployeeRecord> {
@@ -198,6 +242,64 @@ export class EmployeeLifecycle implements EmployeeControlPort {
 
   private nowIso(): string {
     return (this.options.now?.() ?? new Date()).toISOString();
+  }
+}
+
+export interface ProviderEmployeeRuntimeOptions {
+  provider: ProviderAdapter;
+  workspaceId?: string;
+  now?: () => Date;
+}
+
+export class ProviderEmployeeRuntime implements EmployeeRuntimePort {
+  private readonly sessions = new Map<string, ProviderSession>();
+
+  constructor(private readonly options: ProviderEmployeeRuntimeOptions) {}
+
+  async startEmployee(employee: EmployeeRecord, input: EmployeeStartInput): Promise<EmployeeRuntimeStartResult> {
+    const existing = this.sessions.get(employee.id);
+    if (existing) return { provider: existing.provider, sessionId: existing.id, resumeHandle: await existing.resumeHandle?.() };
+    const session = await this.options.provider.createSession({
+      workspaceId: employee.workspaceId ?? input.workspaceId ?? this.options.workspaceId ?? "default",
+      metadata: compactJsonRecord({ employeeId: employee.id, employeeProfile: employee.profile }),
+    });
+    await session.start();
+    this.sessions.set(employee.id, session);
+    const events = input.prompt ? await this.runEmployeeTurn(session, employee, input.prompt) : [];
+    return { provider: session.provider, sessionId: session.id, resumeHandle: await session.resumeHandle?.(), events };
+  }
+
+  async stopEmployee(employee: EmployeeRecord): Promise<void> {
+    const session = this.sessions.get(employee.id);
+    this.sessions.delete(employee.id);
+    await session?.stop();
+  }
+
+  async steerEmployee(employee: EmployeeRecord, text: string): Promise<EmployeeRuntimeStartResult> {
+    const session = this.sessions.get(employee.id);
+    if (!session) throw new Error(`Employee ${employee.id} has no active provider session.`);
+    const events = await this.runEmployeeTurn(session, employee, text);
+    return { provider: session.provider, sessionId: session.id, resumeHandle: await session.resumeHandle?.(), events };
+  }
+
+  private async runEmployeeTurn(session: ProviderSession, employee: EmployeeRecord, text: string): Promise<ProviderTurnEvent[]> {
+    const events: ProviderTurnEvent[] = [];
+    for await (const event of session.sendTurn({
+      id: `employee_${employee.id}_${Date.now()}`,
+      sessionId: session.id,
+      inboundEvent: {
+        id: `employee_${employee.id}`,
+        kind: "message",
+        workspaceId: employee.workspaceId ?? this.options.workspaceId ?? "default",
+        entrypoint: { entrypointId: "employee-runtime", channelKind: "system", displayName: "Employee runtime" },
+        text,
+        receivedAt: (this.options.now?.() ?? new Date()).toISOString(),
+        metadata: compactJsonRecord({ employeeId: employee.id, employeeProfile: employee.profile }),
+      },
+      prompt: text,
+      metadata: compactJsonRecord({ employeeId: employee.id, employeeProfile: employee.profile }),
+    })) events.push(event);
+    return events;
   }
 }
 
@@ -308,4 +410,8 @@ function stripUndefined<T extends Record<string, unknown>>(patch: T): Partial<T>
 
 function cloneEmployee(employee: EmployeeRecord): EmployeeRecord {
   return structuredClone(employee);
+}
+
+function compactJsonRecord(record: Record<string, unknown>): JsonRecord {
+  return Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined)) as JsonRecord;
 }
