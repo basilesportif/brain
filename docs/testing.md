@@ -19,9 +19,11 @@ pnpm run brainctl -- runtime smoke --config examples/config/runtime.yaml --works
 pnpm run brainctl -- run --config examples/config/runtime.yaml --workspace personal --once --fake-text "agents"
 pnpm run brainctl -- health --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl -- logs --file <runtime-jsonl-log> --lines 50
+pnpm run brainctl -- operations plan --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl -- validate live --config examples/config/runtime.yaml --workspace personal --run-safe
 pnpm run brainctl -- directives check <file-or-stdin>
 ```
 
-These checks are safe for fresh checkouts because they do not contact Telegram, do not invoke a real provider, do not deploy services, and do not execute parsed directive actions. `brainctl run --once --fake-text ...` additionally proves the foreground supervisor and command-intercept path without live entrypoints.
+These checks are safe for fresh checkouts because they do not contact Telegram, do not invoke a real provider task, do not deploy services, and do not execute parsed directive actions. `brainctl run --once --fake-text ...` additionally proves the foreground supervisor and command-intercept path without live entrypoints. `operations plan` proves the deployment/update/rollback seams are renderable without mutation. `validate live --run-safe` runs only config, secret-metadata, runtime-smoke, provider-stub, and no-network entrypoint checks unless explicit live flags are supplied.
 
 Restart tests should not expect exact turn replay. Validate provider-native resume handles where an adapter supports them, and otherwise validate graceful degradation of active jobs/runtime state.

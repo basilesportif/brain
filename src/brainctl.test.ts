@@ -80,6 +80,39 @@ test("brainctl start, run, health, and logs expose safe supervisor seams", async
   }
 });
 
+test("brainctl operations and live validation commands are non-mutating by default", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-ops-"));
+  try {
+    const state = path.join(root, "state");
+    const artifacts = path.join(root, "artifacts");
+    const log = path.join(root, "runtime.jsonl");
+
+    const plan = spawnBrainctl(["operations", "plan", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--repo", repoRoot, "--state", state, "--artifacts", artifacts, "--log", log]);
+    assert.equal(plan.status, 0, plan.stderr);
+    const planJson = JSON.parse(plan.stdout) as { ok: boolean; details: { sideEffects: string; plan: { commands: { rollback: string[] } } } };
+    assert.equal(planJson.ok, true);
+    assert.equal(planJson.details.sideEffects, "none");
+    assert.ok(planJson.details.plan.commands.rollback.some((command) => command.includes("git reset --hard")));
+
+    const systemd = spawnBrainctl(["operations", "systemd", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--repo", repoRoot, "--state", state, "--artifacts", artifacts, "--log", log]);
+    assert.equal(systemd.status, 0, systemd.stderr);
+    const systemdJson = JSON.parse(systemd.stdout) as { ok: boolean; details: { unit: string; sideEffects: string } };
+    assert.equal(systemdJson.ok, true);
+    assert.match(systemdJson.details.unit, /ExecStart=pnpm run brainctl -- run/);
+    assert.equal(systemdJson.details.sideEffects, "none");
+
+    const live = spawnBrainctl(["validate", "live", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--codex-transport", "app-server"]);
+    assert.equal(live.status, 0, live.stderr);
+    const liveJson = JSON.parse(live.stdout) as { ok: boolean; details: { plan: { networkStarted: boolean; checks: Array<{ id: string; mode: string }> }; sideEffects: string } };
+    assert.equal(liveJson.ok, true);
+    assert.equal(liveJson.details.sideEffects, "none");
+    assert.equal(liveJson.details.plan.networkStarted, false);
+    assert.equal(liveJson.details.plan.checks.find((check) => check.id === "codex-provider")?.mode, "plan");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 function spawnBrainctl(args: string[]) {
   return spawnSync(process.execPath, [brainctl.pathname, ...args], {
     cwd: repoRoot,

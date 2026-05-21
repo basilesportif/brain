@@ -11,7 +11,7 @@ import YAML from "yaml";
 import { validateAssistantPack } from "@brain/assistant-pack-schema";
 import { FakeEntrypointAdapter } from "@brain/entrypoint-protocol";
 import { validateWorkspaceConfig, type BrainConfig } from "@brain/workspace-schema";
-import { AutomationRuntime, BrainRuntime, BrainSupervisor, EchoProviderAdapter, FakeProviderAdapter, FileSubagentJobStore, RuntimeCommandInterceptor, RuntimeEntrypointBridge, StaticSubagentExecutor, SubagentLifecycle, parseBrainDirectives, type BrainSupervisorLogRecord, type ProviderAdapter, type RuntimeLogEntry } from "@brain/runtime-core";
+import { AutomationRuntime, BrainRuntime, BrainSupervisor, EchoProviderAdapter, EmployeeLifecycle, FakeProviderAdapter, FileEmployeeStore, FileSubagentJobStore, RuntimeCommandInterceptor, RuntimeEntrypointBridge, StaticSubagentExecutor, SubagentLifecycle, createGuardedLiveValidationPlan, createOperationsPlan, parseBrainDirectives, renderSystemdService, type BrainSupervisorLogRecord, type OperationsPlan, type ProviderAdapter, type RuntimeLogEntry } from "@brain/runtime-core";
 import { FileTelegramPairingStore, FileTelegramPollingStateStore, TelegramBotApiClient, TelegramEntrypointAdapter, loadTelegramToken } from "@brain/entrypoint-telegram";
 import { createCodexProvider, type CodexTransportKind } from "@brain/provider-codex";
 import { createClaudeCodeProvider, type ClaudeCodeTransportKind } from "@brain/provider-claude-code";
@@ -106,6 +106,42 @@ program.command("logs")
   .option("--lines <n>", "number of lines to return", parseNumberOption, 100)
   .option("--raw", "include raw payloads")
   .action(async (options) => exitWith(await logsCommand(options)));
+
+const operations = program.command("operations").alias("ops").description("Safe deployment/update/rollback planning commands");
+operations.command("plan")
+  .description("Render a non-mutating systemd/update/rollback operations plan.")
+  .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--state <path>", "runtime state root")
+  .option("--artifacts <path>", "runtime artifact root")
+  .option("--log <path>", "runtime JSONL log path")
+  .option("--service-name <name>", "systemd service name")
+  .option("--service-user <user>", "systemd service user", "brain")
+  .option("--repo <path>", "deployment checkout path", process.cwd())
+  .action(async (options) => exitWith(await operationsPlanCommand(options)));
+operations.command("systemd")
+  .description("Render a systemd service unit to stdout JSON without installing it.")
+  .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--state <path>", "runtime state root")
+  .option("--artifacts <path>", "runtime artifact root")
+  .option("--log <path>", "runtime JSONL log path")
+  .option("--service-name <name>", "systemd service name")
+  .option("--service-user <user>", "systemd service user", "brain")
+  .option("--repo <path>", "deployment checkout path", process.cwd())
+  .action(async (options) => exitWith(await operationsSystemdCommand(options)));
+
+const validate = program.command("validate").description("Guarded validation harnesses");
+validate.command("live")
+  .description("Create or run a no-secret live-readiness smoke plan for Telegram and Codex seams.")
+  .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--telegram-token-env <name>", "Telegram token env var to check by metadata only")
+  .option("--telegram-token-file <path>", "Telegram token file to check by metadata only")
+  .option("--codex-transport <kind>", "Codex transport to include in the plan", "stub")
+  .option("--allow-live", "allow live health-only provider checks; still sends no user tasks")
+  .option("--run-safe", "run only checks marked safe for no-network/no-secret mode")
+  .action(async (options) => exitWith(await liveValidateCommand(options)));
 
 const config = program.command("config").description("Runtime configuration commands");
 config.command("validate")
@@ -244,24 +280,34 @@ async function runCommand(options: SupervisorRunCommandOptions): Promise<CliResu
 
   const paths = supervisorPaths(options.workspace, options);
   await mkdir(path.dirname(paths.logPath), { recursive: true, mode: 0o700 });
+  const provider = createCliProvider(options);
+  let supervisor: BrainSupervisor | undefined;
   const store = new FileSubagentJobStore({ root: paths.stateRoot });
   const subagents = new SubagentLifecycle({
     workspaceId: options.workspace,
     store,
     executor: new StaticSubagentExecutor({ id: "brainctl-static", outputText: "Static subagent completed." }),
     artifactRoot: paths.artifactRoot,
+    onTerminal: async (job, result) => {
+      await supervisor?.deliverSubagentResult(job, result);
+    },
   });
   const hydration = await subagents.init();
+  const employees = new EmployeeLifecycle({
+    workspaceId: options.workspace,
+    store: new FileEmployeeStore({ root: paths.stateRoot }),
+    provider: provider.id,
+  });
+  await employees.init();
 
-  const provider = createCliProvider(options);
   const entrypoint = await createCliEntrypoint(options.workspace, workspace.primaryEntrypointId, options, paths);
   const runtime = new BrainRuntime({ workspaceId: options.workspace, workspace, provider, subagents });
   const logReader = new FileRuntimeLogReader(paths.logPath);
-  let supervisor: BrainSupervisor;
   const commandInterceptor = new RuntimeCommandInterceptor({
     subagents,
+    employees,
     logs: logReader,
-    health: { health: () => supervisor.health() },
+    health: { health: () => supervisor?.health() ?? { ok: false, detail: "supervisor not constructed" } },
   });
   supervisor = new BrainSupervisor({
     runtime,
@@ -330,6 +376,116 @@ async function logsCommand(options: { file?: string; workspace: string; state?: 
     summary: entries.length === 0 ? "no runtime logs found" : "runtime logs tailed",
     details: { path: paths.logPath, lines: entries.length, entries },
   };
+}
+
+interface OperationsCommandOptions {
+  config: string;
+  workspace: string;
+  state?: string;
+  artifacts?: string;
+  log?: string;
+  serviceName?: string;
+  serviceUser?: string;
+  repo?: string;
+}
+
+async function operationsPlanCommand(options: OperationsCommandOptions): Promise<CliResult> {
+  const config = await loadValidConfig(options.config);
+  if (!config.ok || !config.config) return config;
+  if (!config.config.workspaces[options.workspace]) return { ok: false, summary: `workspace not found: ${options.workspace}`, details: { available: Object.keys(config.config.workspaces) } };
+  const plan = operationsPlan(options);
+  return {
+    ok: true,
+    summary: "operations plan rendered without deployment side effects",
+    details: {
+      plan,
+      sideEffects: "none",
+    },
+  };
+}
+
+async function operationsSystemdCommand(options: OperationsCommandOptions): Promise<CliResult> {
+  const config = await loadValidConfig(options.config);
+  if (!config.ok || !config.config) return config;
+  if (!config.config.workspaces[options.workspace]) return { ok: false, summary: `workspace not found: ${options.workspace}`, details: { available: Object.keys(config.config.workspaces) } };
+  const plan = operationsPlan(options);
+  return {
+    ok: true,
+    summary: "systemd unit rendered without installing or restarting services",
+    details: {
+      unitPath: plan.unitPath,
+      serviceName: plan.serviceName,
+      serviceUser: plan.serviceUser,
+      unit: renderSystemdService(plan),
+      sideEffects: "none",
+    },
+  };
+}
+
+function operationsPlan(options: OperationsCommandOptions): OperationsPlan {
+  const paths = supervisorPaths(options.workspace, options);
+  return createOperationsPlan({
+    workspaceId: options.workspace,
+    repoPath: options.repo ?? process.cwd(),
+    configPath: options.config,
+    stateRoot: paths.stateRoot,
+    artifactRoot: paths.artifactRoot,
+    logPath: paths.logPath,
+    serviceName: options.serviceName,
+    serviceUser: options.serviceUser,
+  });
+}
+
+async function liveValidateCommand(options: {
+  config: string;
+  workspace: string;
+  telegramTokenEnv?: string;
+  telegramTokenFile?: string;
+  codexTransport: string;
+  allowLive?: boolean;
+  runSafe?: boolean;
+}): Promise<CliResult> {
+  const config = await loadValidConfig(options.config);
+  if (!config.ok || !config.config) return config;
+  if (!config.config.workspaces[options.workspace]) return { ok: false, summary: `workspace not found: ${options.workspace}`, details: { available: Object.keys(config.config.workspaces) } };
+  const telegramTokenRef = options.telegramTokenEnv ? `env:${options.telegramTokenEnv}` : options.telegramTokenFile ? `file:${options.telegramTokenFile}` : undefined;
+  const plan = createGuardedLiveValidationPlan({
+    workspaceId: options.workspace,
+    configPath: options.config,
+    codexTransport: options.codexTransport,
+    telegramTokenRef,
+    allowLive: options.allowLive,
+  });
+  const safeResults = options.runSafe ? await runSafeValidationChecks(options, plan.checks.filter((check) => check.mode === "run")) : [];
+  const ok = safeResults.every((result) => result.ok !== false);
+  return {
+    ok,
+    summary: options.runSafe ? "guarded validation safe checks executed" : "guarded validation plan rendered without live side effects",
+    details: {
+      plan,
+      results: safeResults,
+      sideEffects: options.runSafe ? "safe local checks only" : "none",
+    },
+  };
+}
+
+async function runSafeValidationChecks(
+  options: { config: string; workspace: string; telegramTokenEnv?: string; telegramTokenFile?: string; codexTransport: string; allowLive?: boolean },
+  checks: Array<{ id: string }>,
+): Promise<Array<{ id: string; ok: boolean; summary: string; details?: unknown }>> {
+  const results = [];
+  for (const check of checks) {
+    if (check.id === "config") results.push({ id: check.id, ...await configValidateCommand(options.config) });
+    else if (check.id === "secrets") results.push({ id: check.id, ...await secretsCheckCommand(options.config) });
+    else if (check.id === "runtime-smoke") results.push({ id: check.id, ...await runtimeSmokeCommand({ config: options.config, workspace: options.workspace, text: "ping" }) });
+    else if (check.id === "codex-provider") {
+      const transport = options.allowLive ? options.codexTransport : "stub";
+      results.push({ id: check.id, ...await providerCheckCommand("codex", { workspace: options.workspace, transport }) });
+    } else if (check.id === "telegram-entrypoint") {
+      results.push({ id: check.id, ...await entrypointCheckCommand("telegram", { workspace: options.workspace, tokenEnv: options.telegramTokenEnv, tokenFile: options.telegramTokenFile }) });
+    }
+  }
+  return results;
 }
 
 function supervisorPaths(workspace: string, options: { state?: string; artifacts?: string; log?: string }): { stateRoot: string; artifactRoot: string; logPath: string } {

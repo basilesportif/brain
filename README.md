@@ -2,7 +2,7 @@
 
 `brain` is a new local skeleton monorepo for consolidating a self-hosted assistant runtime, entrypoint adapters, web shell, reusable assistant logic, and self-host setup guidance.
 
-Status: **skeleton only**. No private assistant data, secrets, logs, generated artifacts, or current runtime code has been copied here.
+Status: **safe parity scaffold**. Runtime, entrypoint, provider, supervisor, operations, and web-publisher seams exist for no-network validation, but no private assistant data, secrets, logs, generated artifacts, or real deployment state has been copied here.
 
 ## Intended layout
 
@@ -27,11 +27,14 @@ The check currently validates that the skeleton structure exists, that runtime c
 
 ## brainctl
 
-`brainctl` is the operator CLI skeleton for Brain. It currently validates runtime config, assistant-pack manifests, private-boundary hygiene, provider/entrypoint health seams, automation definitions, and secret reference metadata without deploying services or printing secret values. See `docs/brainctl.md`.
+`brainctl` is the operator CLI for Brain. It validates runtime config, assistant-pack manifests, private-boundary hygiene, provider/entrypoint health seams, automation definitions, secret reference metadata, foreground fake supervisor smoke, non-mutating operations plans, and guarded live-readiness plans without deploying services or printing secret values. See `docs/brainctl.md`.
 
 ```bash
 pnpm run build
 pnpm run brainctl -- doctor --config examples/config/runtime.yaml --pack assistant-packs/core
+pnpm run brainctl -- runtime smoke --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl -- operations plan --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl -- validate live --config examples/config/runtime.yaml --workspace personal --run-safe
 ```
 
 ## Design goals

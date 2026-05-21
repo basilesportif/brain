@@ -1,6 +1,6 @@
 # Deployment skeleton
 
-No live deployment is configured in this skeleton phase.
+No live deployment is executed by this repository by default. Brain now includes non-mutating operations seams that render the commands and unit files an operator can review before installing anything.
 
 Future deployment docs should define:
 
@@ -24,11 +24,15 @@ can be configured later after Telegram admin pairing is working.
 
 ## Current safe operations seams
 
-The repository now has CLI seams for future deployment automation, but they remain non-deploying by default:
+The repository now has CLI seams for deployment automation, but they remain non-deploying by default:
 
 - `brainctl start` prints a dry-run supervisor plan unless `--foreground` is supplied.
 - `brainctl health` inspects config/state/log readiness without starting live providers or Telegram.
 - `brainctl logs` tails Brain JSONL logs with redaction.
-- Runtime chat commands such as `update`, `deploy`, `agent backend`, and `employees` are recognized by the supervisor command interceptor, but they only return safe status text in this parity slice. They do not pull git, rebuild, restart systemd, mutate crontabs, or start Employee runtimes.
+- `brainctl operations plan` renders preflight, update, restart, rollback, and post-update smoke command lists.
+- `brainctl operations systemd` renders a systemd unit with explicit state/log/artifact paths. It does not write `/etc/systemd/system`, call `systemctl`, or restart anything.
+- `brainctl validate live` renders a guarded Telegram/Codex readiness plan. `--run-safe` executes only no-network/no-secret checks by default.
+- Runtime chat commands such as `update`, `deploy`, and `agent backend` are recognized by the supervisor command interceptor, but they only return safe status text in this parity slice. They do not pull git, rebuild, restart systemd, or mutate crontabs.
+- Runtime `employees` and `employee status/start/stop/steer` commands update durable lifecycle records only; they do not start a real Employee app-server process.
 
-Future systemd/update work should attach to these seams and keep deployment scripts outside provider/entrypoint packages.
+Future deployment work should attach execution wrappers to these reviewed plans and keep secrets/env files in the private workspace or host secret store.

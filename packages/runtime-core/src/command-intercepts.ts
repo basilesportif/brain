@@ -1,6 +1,7 @@
 import type { BrainOutboundAction, EntryPointInboundEvent, JsonRecord } from "@brain/entrypoint-protocol";
 import type { SubagentJob, SubagentJobStatus } from "./jobs.js";
 import type { ActiveSubagentSnapshot, CancelSubagentJobResult, JobRefResolution, SteerSubagentJobResult, SubagentControlPort } from "./subagents.js";
+import type { EmployeeControlPort, EmployeeLifecycleResult, EmployeeRecord } from "./employees.js";
 
 export interface RuntimeLogEntry {
   at?: string;
@@ -26,6 +27,7 @@ export interface SubagentInspectionPort extends SubagentControlPort {
 
 export interface RuntimeCommandInterceptorOptions {
   subagents?: SubagentInspectionPort;
+  employees?: EmployeeControlPort;
   logs?: RuntimeLogReader;
   health?: RuntimeHealthProvider;
   maxLogLines?: number;
@@ -53,7 +55,11 @@ export const BRAIN_SERVICE_HELP_TEXT = `Brain service commands (handled before p
   agent kill <ref>        — cancel a subagent by full ID, displayed ref, or hex prefix
   agent steer <ref> <text> — steer a running steerable subagent
   agent backend           — show backend seam status (configuration-only in Brain)
-  employees               — Employee runtime seam status (real lifecycle not wired yet)
+  employees               — list durable Employee lifecycle records
+  employee status <id>    — inspect one Employee lifecycle record
+  employee start <id>     — mark an Employee running through the safe seam
+  employee stop <id>      — mark an Employee stopped through the safe seam
+  employee steer <id> <text> — record a steering instruction for a running Employee
   update / deploy         — safe seam only; Brain does not self-deploy from chat`;
 
 export class RuntimeCommandInterceptor {
@@ -73,7 +79,7 @@ export class RuntimeCommandInterceptor {
     if (backend.isBackend) return this.textResult("agent backend", this.formatBackendSeam(backend));
 
     const employee = parseEmployeeCommand(text);
-    if (employee.isEmployee) return this.textResult("employees", this.formatEmployeeSeam(employee));
+    if (employee.isEmployee) return this.textResult("employees", await this.handleEmployeeCommand(employee));
 
     if (parseDeployCommand(text)) return this.textResult("deploy", "Deploy/update commands are recognized, but Brain will not pull, rebuild, restart, or mutate services from chat in this parity slice. Use documented operator scripts/systemd outside the runtime.");
 
@@ -175,9 +181,24 @@ export class RuntimeCommandInterceptor {
     return `Subagent backend command recognized (${command.action}${command.backend ? ` ${command.backend}` : ""}), but chat-time backend mutation is disabled in Brain. Restart with the desired provider/executor configuration.`;
   }
 
-  private formatEmployeeSeam(command: Extract<EmployeeCommand, { isEmployee: true }>): string {
-    if (command.action === "list") return "Employee runtime seam: scaffold/status commands are recognized, but real durable Employee app-server lifecycle is not wired in Brain yet.";
-    return `Employee command recognized (${command.action}${command.employeeId ? ` ${command.employeeId}` : ""}), but Employee lifecycle/steering is intentionally out of scope for this parity slice.`;
+  private async handleEmployeeCommand(command: Extract<EmployeeCommand, { isEmployee: true }>): Promise<string> {
+    const employees = this.options.employees;
+    if (!employees) {
+      if (command.action === "list") return "Employee runtime seam: no Employee lifecycle store is configured for this supervisor.";
+      return `Employee command recognized (${command.action}${command.employeeId ? ` ${command.employeeId}` : ""}), but no Employee lifecycle store is configured for this supervisor.`;
+    }
+    if (command.action === "list") return formatEmployees(await employees.listEmployees?.() ?? []);
+    if (!command.employeeId) return "Employee id is required.";
+    if (command.action === "status") {
+      const resolved = employees.resolveEmployeeRef ? await employees.resolveEmployeeRef(command.employeeId) : await resolveEmployeeFromList(employees, command.employeeId);
+      if (resolved.status === "not_found") return `No employee matched "${command.employeeId}".`;
+      if (resolved.status === "ambiguous") return [`Ambiguous employee ref "${command.employeeId}". Use a longer ref.`, ...resolved.candidates.map((candidate) => `- ${candidate.id} ${candidate.status} ${candidate.profile}${candidate.label ? ` — ${candidate.label}` : ""}`)].join("\n");
+      return formatEmployeeDetail(resolved.employee);
+    }
+    if (command.action === "start") return formatEmployeeLifecycleResult(await employees.startEmployee({ id: command.employeeId }));
+    if (command.action === "stop") return formatEmployeeLifecycleResult(await employees.stopEmployee(command.employeeId, "service command"));
+    if (command.action === "steer") return formatEmployeeLifecycleResult(await employees.steerEmployee(command.employeeId, command.text ?? ""));
+    return "Unsupported employee command.";
   }
 }
 
@@ -304,6 +325,49 @@ function formatSteerJobResult(result: SteerSubagentJobResult): string {
   if (result.status === "failed") return `Failed to steer subagent "${result.ref}": ${result.message}`;
   if (result.status === "ambiguous") return [`Ambiguous subagent ref "${result.ref}". Use a longer ref.`, ...result.candidates.map((candidate) => `- ${candidate.ref} ${candidate.status} ${candidate.profile}`)].join("\n");
   return `No subagent job matched "${result.ref}". Use "agents" to list usable refs.`;
+}
+
+function formatEmployees(employees: EmployeeRecord[]): string {
+  if (employees.length === 0) return "No Employee lifecycle records. Use `employee start <id>` to create a safe runtime record.";
+  return [
+    `Employees (${employees.length}):`,
+    ...employees.map((employee) => `- ${employee.status} ${employee.id} profile=${employee.profile}${employee.label ? ` label=${JSON.stringify(employee.label)}` : ""}${employee.startedAt ? ` started=${employee.startedAt}` : ""}${employee.steerCount ? ` steers=${employee.steerCount}` : ""}`),
+  ].join("\n");
+}
+
+function formatEmployeeDetail(employee: EmployeeRecord): string {
+  const lines = [
+    `Employee ${employee.id}`,
+    `status: ${employee.status}`,
+    `profile: ${employee.profile}`,
+    `provider: ${employee.provider ?? "configured-at-runtime"}`,
+  ];
+  if (employee.label) lines.push(`label: ${employee.label}`);
+  if (employee.model || employee.effort) lines.push(`model/effort: ${[employee.model, employee.effort].filter(Boolean).join("/")}`);
+  lines.push(`created: ${employee.createdAt}`);
+  if (employee.startedAt) lines.push(`started: ${employee.startedAt}`);
+  if (employee.stoppedAt) lines.push(`stopped: ${employee.stoppedAt}`);
+  if (employee.lastSteeredAt) lines.push(`lastSteered: ${employee.lastSteeredAt}`);
+  if (employee.lastInstruction) lines.push(`lastInstruction: ${truncate(employee.lastInstruction, 600)}`);
+  if (employee.error) lines.push(`note: ${employee.error}`);
+  return lines.join("\n");
+}
+
+function formatEmployeeLifecycleResult(result: EmployeeLifecycleResult): string {
+  if (result.status === "success") return result.message;
+  if (result.status === "ambiguous") return [result.message, ...result.candidates.map((candidate) => `- ${candidate.id} ${candidate.status} ${candidate.profile}`)].join("\n");
+  return result.message;
+}
+
+async function resolveEmployeeFromList(employees: EmployeeControlPort, ref: string) {
+  const records = await employees.listEmployees?.() ?? [];
+  const normalized = normalizeRef(ref);
+  const exact = records.find((employee) => employee.id.toLowerCase() === normalized.toLowerCase());
+  if (exact) return { status: "matched" as const, ref, employee: exact };
+  const candidates = records.filter((employee) => employee.id.toLowerCase().startsWith(normalized.toLowerCase()));
+  if (candidates.length === 0) return { status: "not_found" as const, ref };
+  if (candidates.length === 1 && candidates[0]) return { status: "matched" as const, ref, employee: candidates[0] };
+  return { status: "ambiguous" as const, ref, candidates: candidates.map((employee) => ({ id: employee.id, status: employee.status, profile: employee.profile, label: employee.label })) };
 }
 
 async function resolveFromList(subagents: SubagentInspectionPort, ref: string): Promise<JobRefResolution> {

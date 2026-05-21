@@ -7,3 +7,5 @@ export * from "./subagents.js";
 export * from "./automation.js";
 export * from "./command-intercepts.js";
 export * from "./supervisor.js";
+export * from "./employees.js";
+export * from "./operations.js";

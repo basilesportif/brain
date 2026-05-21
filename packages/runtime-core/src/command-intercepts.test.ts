@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { FakeEntrypointAdapter } from "@brain/entrypoint-protocol";
-import { BrainRuntime, BrainSupervisor, FakeProviderAdapter, InMemorySubagentJobStore, RuntimeCommandInterceptor, StaticSubagentExecutor, SubagentLifecycle } from "./index.js";
+import { BrainRuntime, BrainSupervisor, EmployeeLifecycle, FakeProviderAdapter, InMemoryEmployeeStore, InMemorySubagentJobStore, RuntimeCommandInterceptor, StaticSubagentExecutor, SubagentLifecycle } from "./index.js";
 
 test("RuntimeCommandInterceptor handles logs and deploy/update as safe service commands", async () => {
   const interceptor = new RuntimeCommandInterceptor({
@@ -40,6 +40,32 @@ test("RuntimeCommandInterceptor formats and controls subagent jobs", async () =>
   const kill = await interceptor.handle(event("agent kill abcdef12"));
   assert.match(kill?.actions[0]?.type === "send_text" ? kill.actions[0].text : "", /Cancellation requested|Cancelled queued/);
   await lifecycle.shutdown("test done").catch(() => undefined);
+});
+
+test("RuntimeCommandInterceptor records safe Employee lifecycle commands", async () => {
+  const employees = new EmployeeLifecycle({
+    workspaceId: "personal",
+    store: new InMemoryEmployeeStore(),
+    provider: "fake",
+    now: () => new Date("2026-05-21T00:00:00.000Z"),
+  });
+  await employees.init();
+  const interceptor = new RuntimeCommandInterceptor({ employees });
+
+  const start = await interceptor.handle(event("employee start analyst"));
+  assert.match(start?.actions[0]?.type === "send_text" ? start.actions[0].text : "", /marked running/);
+
+  const steer = await interceptor.handle(event("employee steer analyst watch the queue"));
+  assert.match(steer?.actions[0]?.type === "send_text" ? steer.actions[0].text : "", /Recorded steering/);
+
+  const list = await interceptor.handle(event("employees"));
+  assert.match(list?.actions[0]?.type === "send_text" ? list.actions[0].text : "", /analyst/);
+
+  const status = await interceptor.handle(event("employee status analyst"));
+  assert.match(status?.actions[0]?.type === "send_text" ? status.actions[0].text : "", /lastInstruction: watch the queue/);
+
+  const stop = await interceptor.handle(event("employee stop analyst"));
+  assert.match(stop?.actions[0]?.type === "send_text" ? stop.actions[0].text : "", /marked stopped/);
 });
 
 test("BrainSupervisor intercepts service commands before provider turns", async () => {

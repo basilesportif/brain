@@ -1,7 +1,9 @@
-import { routeOutboundToOrigin, type BrainEntrypointAdapter, type BrainOutboundAction, type EntryPointHealth, type EntryPointInboundEvent, type OutboundDispatchResult } from "@brain/entrypoint-protocol";
+import { routeOutboundToOrigin, type BrainEntrypointAdapter, type BrainOutboundAction, type EntryPointHealth, type EntryPointInboundEvent, type OutboundDispatchResult, type OutboundTarget } from "@brain/entrypoint-protocol";
 import type { ProviderHealth } from "./provider.js";
 import type { BrainRuntime, RuntimeTurnResult } from "./runtime.js";
 import { RuntimeCommandInterceptor, type RuntimeCommandInterceptResult } from "./command-intercepts.js";
+import type { SubagentJob } from "./jobs.js";
+import type { SubagentRunResult } from "./subagents.js";
 
 export interface BrainSupervisorLogRecord {
   at: string;
@@ -27,6 +29,7 @@ export interface BrainSupervisorEventResult {
   intercepted?: RuntimeCommandInterceptResult;
   turn?: RuntimeTurnResult;
   dispatchResults: OutboundDispatchResult[];
+  streamingDispatchResults?: OutboundDispatchResult[];
 }
 
 export interface BrainSupervisorRunOptions {
@@ -50,6 +53,14 @@ export interface BrainSupervisorHealth {
   provider?: ProviderHealth;
 }
 
+export interface BrainSupervisorSubagentDeliveryResult {
+  jobId: string;
+  route: SubagentJob["route"];
+  actions: BrainOutboundAction[];
+  dispatchResults: OutboundDispatchResult[];
+  returnToMain?: RuntimeTurnResult;
+}
+
 export class BrainSupervisor {
   private started = false;
   private startedAt?: string;
@@ -57,6 +68,7 @@ export class BrainSupervisor {
   private lastEventId?: string;
   private lastError?: string;
   private stopping = false;
+  private runtimeQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: BrainSupervisorOptions) {}
 
@@ -101,28 +113,56 @@ export class BrainSupervisor {
   async handleEvent(event: EntryPointInboundEvent): Promise<BrainSupervisorEventResult> {
     this.lastEventId = event.id;
     await this.log("info", "entrypoint", `Inbound ${event.kind} event received`, event.id, { command: event.command, hasText: Boolean(event.text), attachmentCount: event.attachments?.length ?? 0 });
+    const streamingDispatchResults: OutboundDispatchResult[] = [];
     try {
       const intercepted = await this.options.commandInterceptor?.handle(event);
       if (intercepted?.handled) {
         const dispatchResults = await this.dispatchActions(event, intercepted.actions);
         this.processedEvents++;
         await this.log("info", "commands", `Intercepted service command: ${intercepted.command}`, event.id);
-        return { event, intercepted, dispatchResults };
+        return { event, intercepted, dispatchResults, streamingDispatchResults };
       }
 
-      const turn = await this.options.runtime.handleInboundEvent(event);
+      const turn = await this.runRuntimeTurn(() => this.options.runtime.handleInboundEvent(event, {
+        onStreamingAction: async (action) => {
+          streamingDispatchResults.push(...await this.dispatchActions(event, [action]));
+        },
+      }));
       const dispatchResults = await this.dispatchActions(event, turn.actions);
       this.processedEvents++;
-      await this.log("info", "runtime", "Provider turn completed", event.id, { actions: turn.actions.length, directiveErrors: turn.directiveErrors });
-      return { event, turn, dispatchResults };
+      await this.log("info", "runtime", "Provider turn completed", event.id, { actions: turn.actions.length, streamingActions: turn.streamingActions.length, directiveErrors: turn.directiveErrors });
+      return { event, turn, dispatchResults, streamingDispatchResults };
     } catch (error) {
       this.lastError = errorMessage(error);
       await this.log("error", "supervisor", `Event handling failed: ${this.lastError}`, event.id);
       const fallback = routeOutboundToOrigin(event, { type: "send_text", text: `⚠️ Brain runtime error: ${this.lastError}`, format: "markdown" });
       const dispatchResults = await this.dispatchActions(event, [fallback]).catch(() => []);
       this.processedEvents++;
-      return { event, dispatchResults };
+      return { event, dispatchResults, streamingDispatchResults };
     }
+  }
+
+  async deliverSubagentResult(job: SubagentJob, result: SubagentRunResult): Promise<BrainSupervisorSubagentDeliveryResult> {
+    const actions = subagentDeliveryActions(job, result);
+    const dispatchResults: OutboundDispatchResult[] = [];
+    let returnToMain: RuntimeTurnResult | undefined;
+    const originEvent = subagentOriginEvent(job, result, this.options.entrypoint.ref, this.nowIso());
+
+    if (job.route === "return_to_main" || job.route === "dispatch_subagent" || job.route === "send_progress_and_return") {
+      returnToMain = await this.runRuntimeTurn(() => this.options.runtime.handleInboundEvent(originEvent, {
+        onStreamingAction: async (action) => {
+          dispatchResults.push(...await this.dispatchActions(originEvent, [action]));
+        },
+      }));
+      dispatchResults.push(...await this.dispatchActions(originEvent, returnToMain.actions));
+    }
+
+    if (actions.length > 0) {
+      dispatchResults.push(...await this.dispatchActions(originEvent, actions));
+    }
+
+    await this.log("info", "subagents", `Subagent result delivered: ${job.id}`, originEvent.id, { route: job.route, status: job.status, dispatches: dispatchResults.length });
+    return { jobId: job.id, route: job.route, actions, dispatchResults, returnToMain };
   }
 
   async run(options: BrainSupervisorRunOptions = {}): Promise<BrainSupervisorRunResult> {
@@ -164,8 +204,104 @@ export class BrainSupervisor {
   private nowIso(): string {
     return (this.options.now?.() ?? new Date()).toISOString();
   }
+
+  private async runRuntimeTurn<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.runtimeQueue;
+    let release: () => void = () => undefined;
+    this.runtimeQueue = previous.then(() => new Promise<void>((resolve) => {
+      release = resolve;
+    }));
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function subagentDeliveryActions(job: SubagentJob, result: SubagentRunResult): BrainOutboundAction[] {
+  if (job.route === "store_only" || job.route === "silent" || job.route === "return_to_main" || job.route === "dispatch_subagent") return [];
+  const text = formatSubagentResult(job, result);
+  if (job.route === "send_to_admins" || job.resultTarget === "admins") {
+    return [{ type: "send_text", text, format: "markdown", target: { route: "admins" } }];
+  }
+  if (job.route === "send_to_user" || job.route === "send_progress_and_return" || job.resultTarget === "user") {
+    return [{ type: "send_text", text, format: "markdown", target: originTargetFromJob(job) }];
+  }
+  return [];
+}
+
+function subagentOriginEvent(job: SubagentJob, result: SubagentRunResult, fallbackEntrypoint: EntryPointInboundEvent["entrypoint"], nowIso: string): EntryPointInboundEvent {
+  const origin = originRecord(job);
+  return {
+    id: `subagent_result_${job.id}`,
+    kind: "delivery",
+    workspaceId: job.workspaceId ?? "default",
+    entrypoint: {
+      entrypointId: stringValue(origin.entrypointId) ?? fallbackEntrypoint.entrypointId,
+      channelKind: stringValue(origin.channelKind) ?? fallbackEntrypoint.channelKind,
+      displayName: fallbackEntrypoint.displayName,
+      capabilities: fallbackEntrypoint.capabilities,
+    },
+    text: [
+      `Subagent ${job.profile} (${job.id}) finished with status ${job.status}.`,
+      job.summary ? `Summary: ${job.summary}` : undefined,
+      result.outputText ?? job.resultText ? `Result:\n${result.outputText ?? job.resultText}` : undefined,
+      result.error ?? job.error ? `Error: ${result.error ?? job.error}` : undefined,
+    ].filter(Boolean).join("\n\n"),
+    conversation: stringValue(origin.conversationId) ? {
+      id: stringValue(origin.conversationId),
+      threadId: stringValue(origin.threadId),
+    } : undefined,
+    receivedAt: nowIso,
+    correlationId: job.parentTurnId,
+    metadata: compactJsonRecord({
+      subagentJobId: job.id,
+      subagentRoute: job.route,
+      parentTurnId: job.parentTurnId,
+    }),
+  };
+}
+
+function formatSubagentResult(job: SubagentJob, result: SubagentRunResult): string {
+  const status = result.status ?? job.status;
+  const header = status === "completed"
+    ? `✅ Subagent ${job.profile} completed`
+    : `⚠️ Subagent ${job.profile} ${status}`;
+  const lines = [header, `id: ${job.id}`];
+  if (job.summary) lines.push(`summary: ${job.summary}`);
+  const body = result.outputText ?? job.resultText;
+  if (body) lines.push("", body);
+  const error = result.error ?? job.error;
+  if (error) lines.push("", `Error: ${error}`);
+  return lines.join("\n");
+}
+
+function originTargetFromJob(job: SubagentJob): OutboundTarget {
+  const origin = originRecord(job);
+  return {
+    route: "originating-entrypoint",
+    entrypointId: stringValue(origin.entrypointId),
+    conversationId: stringValue(origin.conversationId),
+    threadId: stringValue(origin.threadId),
+    replyToExternalMessageId: stringValue(origin.replyToExternalMessageId),
+  };
+}
+
+function originRecord(job: SubagentJob): Record<string, unknown> {
+  const origin = job.metadata?.origin;
+  return origin && typeof origin === "object" && !Array.isArray(origin) ? origin as Record<string, unknown> : {};
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function compactJsonRecord(record: Record<string, unknown>): Record<string, string> {
+  return Object.fromEntries(Object.entries(record).filter(([, value]) => typeof value === "string" && value.length > 0)) as Record<string, string>;
 }

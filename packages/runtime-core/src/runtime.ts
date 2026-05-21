@@ -16,6 +16,7 @@ export interface RuntimeTurnResult {
   cleanText: string;
   finalText?: string;
   actions: BrainOutboundAction[];
+  streamingActions: BrainOutboundAction[];
   subagentJobIds: string[];
   controlResults: RuntimeControlResult[];
   providerEvents: ProviderTurnEvent[];
@@ -27,6 +28,14 @@ export interface BrainRuntimeOptions {
   workspace: WorkspaceConfig;
   provider: ProviderAdapter;
   subagents?: SubagentControlPort;
+}
+
+export interface BrainRuntimeHandleOptions {
+  /**
+   * Called while a provider turn is still streaming for transient user-visible
+   * actions that are safe to execute before final text is known.
+   */
+  onStreamingAction?(action: BrainOutboundAction): Promise<void> | void;
 }
 
 export class BrainRuntime {
@@ -56,7 +65,7 @@ export class BrainRuntime {
     return this.session?.resumeHandle?.();
   }
 
-  async handleInboundEvent(event: EntryPointInboundEvent): Promise<RuntimeTurnResult> {
+  async handleInboundEvent(event: EntryPointInboundEvent, handleOptions: BrainRuntimeHandleOptions = {}): Promise<RuntimeTurnResult> {
     if (event.workspaceId !== this.options.workspaceId) {
       throw new Error(`Inbound event workspace mismatch: ${event.workspaceId} !== ${this.options.workspaceId}`);
     }
@@ -66,6 +75,7 @@ export class BrainRuntime {
 
     const providerEvents: ProviderTurnEvent[] = [];
     const actions: BrainOutboundAction[] = [];
+    const streamingActions: BrainOutboundAction[] = [];
     const subagentJobIds: string[] = [];
     const controlResults: RuntimeControlResult[] = [];
     let finalText: string | undefined;
@@ -77,7 +87,17 @@ export class BrainRuntime {
       attachments: event.attachments,
     })) {
       providerEvents.push(providerEvent);
-      if (providerEvent.type === "action") await this.collectRuntimeAction(event, providerEvent.action, actions, subagentJobIds, controlResults);
+      if (providerEvent.type === "action") {
+        const collected = await this.collectRuntimeAction(event, providerEvent.action, actions, subagentJobIds, controlResults);
+        const preDispatchable = collected.filter(isStreamingPreDispatchAction);
+        if (preDispatchable.length > 0) {
+          for (const action of preDispatchable) {
+            removeActionByIdentity(actions, action);
+            streamingActions.push(action);
+            await handleOptions.onStreamingAction?.(action);
+          }
+        }
+      }
       if (providerEvent.type === "final") finalText = providerEvent.text;
     }
 
@@ -94,6 +114,7 @@ export class BrainRuntime {
       cleanText: parsed.cleanText,
       finalText,
       actions,
+      streamingActions,
       subagentJobIds,
       controlResults,
       providerEvents,
@@ -107,7 +128,7 @@ export class BrainRuntime {
     actions: BrainOutboundAction[],
     subagentJobIds: string[],
     controlResults: RuntimeControlResult[],
-  ): Promise<void> {
+  ): Promise<BrainOutboundAction[]> {
     const routed = routeOutboundToOrigin(event, action);
     if (routed.type === "dispatch_subagent" && this.options.subagents) {
       subagentJobIds.push(await this.options.subagents.dispatch({
@@ -126,29 +147,31 @@ export class BrainRuntime {
         metadata: {
           originatingEventId: routed.originatingEventId ?? event.id,
           actionId: routed.id ?? routed.idempotencyKey ?? "",
+          origin: originMetadata(event),
         },
       }));
-      return;
+      return [];
     }
     if (routed.type === "cancel_subagent") {
       if (!this.options.subagents?.requestCancel) {
         controlResults.push({ action: routed, status: "unsupported", message: "Subagent cancellation is not configured for this runtime." });
-        return;
+        return [];
       }
       const result = await this.options.subagents.requestCancel(routed.jobId, routed.reason ?? "runtime directive");
       controlResults.push({ action: routed, status: result.status, message: result.message, raw: summarizeControlResult(result) });
-      return;
+      return [];
     }
     if (routed.type === "steer_subagent") {
       if (!this.options.subagents?.steerJob) {
         controlResults.push({ action: routed, status: "unsupported", message: "Subagent steering is not configured for this runtime." });
-        return;
+        return [];
       }
       const result = await this.options.subagents.steerJob(routed.jobId, routed.text);
       controlResults.push({ action: routed, status: result.status, message: result.message, raw: summarizeControlResult(result) });
-      return;
+      return [];
     }
     actions.push(routed);
+    return [routed];
   }
 }
 
@@ -181,4 +204,24 @@ function summarizeControlResult(result: unknown): unknown {
     previousStatus: record.previousStatus,
     candidates: record.candidates,
   };
+}
+
+function isStreamingPreDispatchAction(action: BrainOutboundAction): boolean {
+  return action.type === "react" || action.type === "show_status";
+}
+
+function removeActionByIdentity(actions: BrainOutboundAction[], action: BrainOutboundAction): void {
+  const index = actions.findIndex((candidate) => candidate === action);
+  if (index >= 0) actions.splice(index, 1);
+}
+
+function originMetadata(event: EntryPointInboundEvent): Record<string, string> {
+  return Object.fromEntries(Object.entries({
+    eventId: event.id,
+    entrypointId: event.entrypoint.entrypointId,
+    channelKind: event.entrypoint.channelKind,
+    conversationId: event.conversation?.id,
+    threadId: event.conversation?.threadId,
+    replyToExternalMessageId: event.kind === "message" ? event.conversation?.metadata?.messageId?.toString() : undefined,
+  }).filter(([, value]) => value !== undefined)) as Record<string, string>;
 }
