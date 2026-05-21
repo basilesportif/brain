@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import type { DispatchSubagentAction, EntryPointInboundEvent, JsonRecord } from "@brain/entrypoint-protocol";
+import type { BrainAttachment, DispatchSubagentAction, EntryPointInboundEvent, JsonRecord } from "@brain/entrypoint-protocol";
 import {
   activeSubagentJobStatuses,
   isActiveSubagentJobStatus,
@@ -13,6 +13,7 @@ import {
   type SubagentJobStatus,
   type SubagentJobStore,
 } from "./jobs.js";
+import type { ProviderAdapter, ProviderSession, ProviderTurnEvent } from "./provider.js";
 
 export interface SubagentDispatchInput {
   id?: string;
@@ -407,6 +408,7 @@ export class SubagentLifecycle implements SubagentDispatchPort {
       completedAt: this.nowIso(),
       resultText: result.outputText,
       error: result.error,
+      lastMessagePath: lastArtifactPathFromResult(result),
     };
     const updated = await this.options.store.update(jobId, patch);
     await this.options.onTerminal?.(updated, result);
@@ -500,12 +502,156 @@ export class StaticSubagentExecutor implements SubagentExecutor {
   }
 }
 
+export interface ProviderSubagentExecutorOptions {
+  id?: string;
+  provider: ProviderAdapter;
+  workspaceId?: string;
+  entrypointId?: string;
+  entrypointDisplayName?: string;
+  sessionMetadata?: JsonRecord;
+  now?: () => Date;
+}
+
+export class ProviderSubagentExecutor implements SubagentExecutor {
+  readonly id: string;
+
+  constructor(private readonly options: ProviderSubagentExecutorOptions) {
+    this.id = options.id ?? `provider:${options.provider.id}`;
+  }
+
+  async start(job: SubagentJob, input: SubagentExecutorStartInput): Promise<StartedSubagentRun> {
+    const workspaceId = job.workspaceId ?? this.options.workspaceId ?? "default";
+    const session = await this.options.provider.createSession({
+      workspaceId,
+      metadata: compactJsonRecord({
+        ...(this.options.sessionMetadata ?? {}),
+        subagentJobId: job.id,
+        subagentProfile: job.profile,
+      }),
+    });
+    await session.start();
+
+    let alive = true;
+    const turnId = `turn_${job.id}`;
+    const finished = this.runProviderTurn(session, job, input, workspaceId, turnId)
+      .finally(async () => {
+        alive = false;
+        await session.stop().catch(() => undefined);
+      });
+
+    input.signal.addEventListener("abort", () => {
+      void session.cancelTurn?.(turnId, String(input.signal.reason ?? "cancelled")).catch(() => undefined);
+    }, { once: true });
+
+    const steer = session.steerTurn ? async (text: string): Promise<void> => {
+      await session.steerTurn?.(turnId, text);
+    } : undefined;
+
+    return {
+      provider: this.id,
+      finished,
+      cancel: async (reason) => {
+        await session.cancelTurn?.(turnId, reason);
+        await session.stop();
+      },
+      steer,
+      isAlive: () => alive,
+    };
+  }
+
+  private async runProviderTurn(
+    session: ProviderSession,
+    job: SubagentJob,
+    input: SubagentExecutorStartInput,
+    workspaceId: string,
+    turnId: string,
+  ): Promise<SubagentRunResult> {
+    const events: ProviderTurnEvent[] = [];
+    let finalText: string | undefined;
+    let error: string | undefined;
+    let lastArtifactPath: string | undefined;
+
+    try {
+      for await (const event of session.sendTurn({
+        id: turnId,
+        sessionId: session.id,
+        inboundEvent: providerSubagentInboundEvent(job, workspaceId, this.options, turnId),
+        prompt: job.prompt,
+        attachments: imageAttachments(input.images),
+        artifactDir: input.artifactDir,
+        abortSignal: input.signal,
+        metadata: compactJsonRecord({
+          ...(job.metadata ?? {}),
+          subagentJobId: job.id,
+          subagentProfile: job.profile,
+          route: job.route,
+        }),
+      })) {
+        events.push(event);
+        if (event.type === "final") finalText = event.text;
+        if (event.type === "error") error = event.message;
+        if (event.type === "artifact" && event.artifact.localPath) {
+          lastArtifactPath = event.artifact.localPath;
+        }
+      }
+    } catch (caught) {
+      if (input.signal.aborted) {
+        return { status: "cancelled", error: String(input.signal.reason ?? "cancelled"), raw: { providerEvents: events } };
+      }
+      return { status: "failed", error: caught instanceof Error ? caught.message : String(caught), raw: { providerEvents: events } };
+    }
+
+    if (input.signal.aborted) {
+      return { status: "cancelled", error: String(input.signal.reason ?? "cancelled"), raw: { providerEvents: events, lastArtifactPath } };
+    }
+    if (error && !finalText) {
+      return { status: "failed", error, raw: { providerEvents: events, lastArtifactPath } };
+    }
+    return {
+      status: "completed",
+      outputText: finalText ?? events.filter((event) => event.type === "delta").map((event) => event.text).join("").trim(),
+      error,
+      raw: { providerEvents: events, lastArtifactPath },
+    };
+  }
+}
+
 function resultTargetForRoute(route: SubagentJob["route"]): SubagentJob["resultTarget"] {
   if (route === "send_to_user") return "user";
   if (route === "send_to_admins") return "admins";
   if (route === "store_only") return "store_only";
   if (route === "silent") return "silent";
   return "main";
+}
+
+function providerSubagentInboundEvent(job: SubagentJob, workspaceId: string, options: ProviderSubagentExecutorOptions, turnId: string): EntryPointInboundEvent {
+  return {
+    id: `subagent_${job.id}`,
+    kind: "message",
+    workspaceId,
+    entrypoint: {
+      entrypointId: options.entrypointId ?? "subagent-runtime",
+      channelKind: "system",
+      displayName: options.entrypointDisplayName ?? "Subagent runtime",
+    },
+    text: job.prompt,
+    receivedAt: (options.now?.() ?? new Date()).toISOString(),
+    correlationId: turnId,
+    metadata: compactJsonRecord({
+      subagentJobId: job.id,
+      profile: job.profile,
+      ownerType: job.ownerType,
+      ownerId: job.ownerId,
+    }),
+  };
+}
+
+function imageAttachments(images: string[]): BrainAttachment[] {
+  return images.map((localPath, index) => ({
+    id: `image_${index + 1}`,
+    kind: "image",
+    localPath,
+  }));
 }
 
 function terminalStatusFor(job: SubagentJob, result: SubagentRunResult): SubagentJobStatus {
@@ -515,6 +661,13 @@ function terminalStatusFor(job: SubagentJob, result: SubagentRunResult): Subagen
   if (result.status === "timed_out") return "timed_out";
   if (result.error) return "failed";
   return "completed";
+}
+
+function lastArtifactPathFromResult(result: SubagentRunResult): string | undefined {
+  const raw = result.raw;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const value = (raw as { lastArtifactPath?: unknown }).lastArtifactPath;
+  return typeof value === "string" && value ? value : undefined;
 }
 
 function makeSubagentJobId(): string {

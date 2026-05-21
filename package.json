@@ -21,6 +21,9 @@
   },
   "dependencies": {
     "@brain/assistant-pack-schema": "workspace:*",
+    "@brain/entrypoint-telegram": "workspace:*",
+    "@brain/provider-claude-code": "workspace:*",
+    "@brain/provider-codex": "workspace:*",
     "@brain/runtime-core": "workspace:*",
     "@brain/workspace-schema": "workspace:*",
     "commander": "^14.0.1",

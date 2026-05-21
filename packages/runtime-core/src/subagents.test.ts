@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { FileSubagentJobStore, InMemorySubagentJobStore, subagentJobSchema } from "./jobs.js";
-import { StaticSubagentExecutor, SubagentLifecycle, type StartedSubagentRun, type SubagentExecutor, type SubagentExecutorStartInput, type SubagentJob } from "./index.js";
+import { FakeProviderAdapter, ProviderSubagentExecutor, StaticSubagentExecutor, SubagentLifecycle, type StartedSubagentRun, type SubagentExecutor, type SubagentExecutorStartInput, type SubagentJob } from "./index.js";
 
 test("SubagentLifecycle dispatches and completes jobs through an executor", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "brain-subagents-"));
@@ -114,6 +114,38 @@ test("SubagentLifecycle hydration abandons active persisted jobs", async () => {
   assert.equal(hydrated.loaded, 1);
   assert.equal(hydrated.abandoned, 1);
   assert.equal((await store.get("job_old_running"))?.status, "abandoned");
+});
+
+test("ProviderSubagentExecutor routes child work through provider abstraction", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "brain-provider-subagent-"));
+  try {
+    const store = new InMemorySubagentJobStore();
+    const lifecycle = new SubagentLifecycle({
+      workspaceId: "personal",
+      store,
+      executor: new ProviderSubagentExecutor({
+        provider: new FakeProviderAdapter(function* (turn) {
+          yield { type: "status", message: `artifact dir ${turn.artifactDir}` };
+          yield { type: "artifact", artifact: { kind: "document", localPath: path.join(turn.artifactDir ?? root, "last.md") } };
+          yield { type: "final", text: `provider completed ${turn.inboundEvent.metadata?.subagentJobId}` };
+        }),
+        workspaceId: "personal",
+        now: () => new Date("2026-05-21T00:00:00.000Z"),
+      }),
+      artifactRoot: path.join(root, "artifacts"),
+      idFactory: () => "job_provider_subagent",
+    });
+
+    const id = await lifecycle.dispatch({ profile: "implementer", prompt: "Do provider work", images: [path.join(root, "image.png")] });
+    await lifecycle.waitForIdle();
+    const job = await store.get(id);
+    assert.equal(job?.status, "completed");
+    assert.equal(job?.provider, "provider:fake");
+    assert.equal(job?.resultText, "provider completed job_provider_subagent");
+    assert.match(job?.lastMessagePath ?? "", /last\.md$/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 class BlockingExecutor implements SubagentExecutor {

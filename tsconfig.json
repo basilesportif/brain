@@ -11,6 +11,9 @@
     { "path": "packages/entrypoint-protocol" },
     { "path": "packages/config/workspace-schema" },
     { "path": "packages/assistant-pack-schema" },
-    { "path": "packages/runtime-core" }
+    { "path": "packages/runtime-core" },
+    { "path": "packages/providers/codex" },
+    { "path": "packages/providers/claude-code" },
+    { "path": "entrypoints/telegram" }
   ]
 }

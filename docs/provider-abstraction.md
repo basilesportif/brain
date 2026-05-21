@@ -16,7 +16,11 @@ Runtime apps and entrypoints should depend on `runtime-core` contracts and selec
 - `ProviderAdapter` / `ProviderSession` for main runtime turns.
 - `SubagentExecutor` / `SubagentLifecycle` for queued child work, cancellation, steering, and persisted job state.
 
-`@brain/provider-codex` has a working `stub` transport, an initial real `exec` transport that shells out to `codex exec --json`, and an `app-server` seam that can be wired by injecting a Codex app-server protocol client. Cancellation, artifact handoff, and full app-server protocol support still need to be implemented inside the provider package, not in entrypoints or runtime apps.
+`@brain/provider-codex` has a working `stub` transport, a real `exec` transport that shells out to `codex exec --json`, and an `app-server` seam that can be wired by injecting a Codex app-server protocol client. The exec transport now supports cancellation, last-message artifact capture, image attachment handoff, JSONL event mapping, and small provider-native resume handles. Full app-server protocol support still belongs inside the provider package, not in entrypoints or runtime apps.
+
+`@brain/provider-claude-code` now exposes typed `sdk` and `subagent` seams. The package can delegate to injected clients and maps streaming/cancel/steer boundaries into runtime-core provider events, but it intentionally does not bundle a concrete Claude Code SDK/subagent dependency yet.
+
+Subagent jobs can run through any provider via `ProviderSubagentExecutor`, so process lifecycle concerns such as artifact directories, provider cancellation, steering, timeout-triggered abort, and terminal result capture stay behind the provider abstraction.
 
 ## Crash/restart and resume policy
 

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { TelegramEntrypointAdapter, outboundActionToTelegramIntent, telegramUpdateToInboundEvent, type TelegramCallIntent } from "./index.js";
+import { TelegramBotApiClient, TelegramEntrypointAdapter, handleTelegramWebhookUpdate, outboundActionToTelegramIntent, pollTelegramUpdates, resolveTelegramAttachmentDownload, telegramUpdateToInboundEvent, type TelegramBotApi, type TelegramCallIntent } from "./index.js";
 
 test("maps Telegram message-like updates into Brain inbound events", () => {
   const event = telegramUpdateToInboundEvent({
@@ -61,4 +61,77 @@ test("TelegramEntrypointAdapter exposes no-network inbound and outbound protocol
   const result = await adapter.dispatch({ type: "send_text", text: "hi", target: { conversationId: "123" } });
   assert.equal(result.status, "sent");
   assert.equal(intents[0]?.method, "sendMessage");
+});
+
+test("Telegram admin allowlist filters unauthorized updates", () => {
+  const blocked = telegramUpdateToInboundEvent({
+    update_id: 102,
+    message: { message_id: 44, date: 1779321600, text: "hello", chat: { id: 123, type: "private" }, from: { id: 8, username: "intruder" } },
+  }, { workspaceId: "personal", adminAllowlist: { userIds: [7], chatIds: [123] } });
+  assert.equal(blocked, undefined);
+
+  const allowed = telegramUpdateToInboundEvent({
+    update_id: 103,
+    message: { message_id: 45, date: 1779321600, text: "hello", chat: { id: 123, type: "private" }, from: { id: 7, username: "admin" } },
+  }, { workspaceId: "personal", adminAllowlist: { userIds: [7], chatIds: [123] } });
+  assert.equal(allowed?.actor?.id, "7");
+});
+
+test("Telegram polling skeleton maps getUpdates without a real token", async () => {
+  const calls: string[] = [];
+  const api: TelegramBotApi = {
+    async call(method, payload) {
+      calls.push(`${method}:${String(payload?.offset ?? "none")}`);
+      return {
+        ok: true,
+        result: [
+          { update_id: 200, message: { message_id: 50, date: 1779321600, text: "poll", chat: { id: 123 }, from: { id: 7 } } },
+        ],
+      };
+    },
+  };
+
+  const updates = [];
+  for await (const update of pollTelegramUpdates(api, { maxPolls: 1 })) updates.push(update);
+  assert.equal(updates.length, 1);
+  assert.deepEqual(calls, ["getUpdates:none"]);
+});
+
+test("Telegram API dispatch and file download boundaries are injectable", async () => {
+  const api: TelegramBotApi = {
+    async call(method, payload) {
+      if (method === "sendMessage") return { ok: true, result: { message_id: 99, payload } };
+      if (method === "getFile") return { ok: true, result: { file_id: payload?.file_id, file_unique_id: "uniq", file_size: 123, file_path: "docs/file.txt" } };
+      throw new Error(`unexpected method ${method}`);
+    },
+    async downloadFile(filePath) {
+      return { uri: `mock://telegram/${filePath}`, filePath };
+    },
+  };
+  const adapter = new TelegramEntrypointAdapter({ workspaceId: "personal", apiClient: api });
+  const sent = await adapter.dispatch({ type: "send_text", text: "hi", target: { conversationId: "123" } });
+  assert.equal(sent.status, "sent");
+  assert.equal(sent.externalMessageId, "99");
+
+  const attachment = await resolveTelegramAttachmentDownload({ kind: "document", uri: "file_1", metadata: { telegramFileId: "file_1" } }, api);
+  assert.equal(attachment.uri, "mock://telegram/docs/file.txt");
+  assert.equal(attachment.sizeBytes, 123);
+});
+
+test("Telegram webhook skeleton validates secret token", () => {
+  assert.throws(() => handleTelegramWebhookUpdate({
+    update_id: 300,
+    message: { message_id: 60, date: 1779321600, text: "hook", chat: { id: 123 }, from: { id: 7 } },
+  }, { workspaceId: "personal", expectedSecretToken: "secret" }, "wrong"), /secret token/);
+
+  const event = handleTelegramWebhookUpdate({
+    update_id: 301,
+    message: { message_id: 61, date: 1779321600, text: "hook", chat: { id: 123 }, from: { id: 7 } },
+  }, { workspaceId: "personal", expectedSecretToken: "secret" }, "secret");
+  assert.equal(event?.text, "hook");
+});
+
+test("TelegramBotApiClient reports missing token without exposing secrets", async () => {
+  const client = new TelegramBotApiClient({});
+  await assert.rejects(client.call("getMe"), /token is not configured/);
 });

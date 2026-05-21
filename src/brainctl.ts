@@ -10,7 +10,10 @@ import { parse as parseToml } from "smol-toml";
 import YAML from "yaml";
 import { validateAssistantPack } from "@brain/assistant-pack-schema";
 import { validateWorkspaceConfig, type BrainConfig } from "@brain/workspace-schema";
-import { FileSubagentJobStore, StaticSubagentExecutor, SubagentLifecycle } from "@brain/runtime-core";
+import { AutomationRuntime, FileSubagentJobStore, StaticSubagentExecutor, SubagentLifecycle } from "@brain/runtime-core";
+import { TelegramEntrypointAdapter } from "@brain/entrypoint-telegram";
+import { createCodexProvider, type CodexTransportKind } from "@brain/provider-codex";
+import { createClaudeCodeProvider, type ClaudeCodeTransportKind } from "@brain/provider-claude-code";
 
 interface CliResult {
   ok: boolean;
@@ -54,6 +57,37 @@ pack.command("validate")
   .description("Validate an assistant pack manifest and public-safety hygiene.")
   .argument("[dir]", "assistant pack directory", "assistant-packs/core")
   .action(async (dir) => exitWith(await packValidateCommand(dir)));
+
+const provider = program.command("provider").description("Provider boundary checks");
+provider.command("check")
+  .description("Check a provider adapter without running a real task.")
+  .argument("<provider>", "provider id: codex or claude-code")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--transport <kind>", "provider transport to instantiate")
+  .option("--binary <path>", "provider CLI binary for exec health checks")
+  .option("--cwd <path>", "provider working directory for CLI health checks")
+  .action(async (providerId, options) => exitWith(await providerCheckCommand(providerId, options)));
+
+const entrypoint = program.command("entrypoint").description("Entrypoint boundary checks");
+entrypoint.command("check")
+  .description("Check an entrypoint adapter without requiring live credentials.")
+  .argument("<entrypoint>", "entrypoint id: telegram")
+  .option("--workspace <id>", "workspace id", "personal")
+  .action(async (entrypointId, options) => exitWith(await entrypointCheckCommand(entrypointId, options)));
+
+const runtime = program.command("runtime").description("Runtime state inspection commands");
+runtime.command("status")
+  .description("Inspect runtime job state without starting providers or entrypoints.")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--state <path>", "runtime state root", path.join(process.env.HOME ?? ".", ".brain", "workspaces", "personal", "state"))
+  .action(async (options) => exitWith(await runtimeStatusCommand(options)));
+
+const automation = program.command("automation").description("Loop and monitor validation commands");
+automation.command("validate")
+  .description("Validate loop/monitor skeleton definitions from a small JSON/YAML file.")
+  .argument("[file]", "automation JSON/YAML file with loops/monitors arrays")
+  .option("--workspace <id>", "workspace id", "personal")
+  .action(async (file, options) => exitWith(await automationValidateCommand(file, options)));
 
 await program.parseAsync(process.argv);
 
@@ -129,6 +163,81 @@ async function packValidateCommand(dir: string): Promise<CliResult> {
     ok: result.ok,
     summary: result.ok ? "assistant pack valid" : "assistant pack invalid",
     details: result.ok ? { id: result.manifest?.id, skills: result.manifest?.skills.length ?? 0, prompts: result.manifest?.prompts.length ?? 0, workflows: result.manifest?.workflows.length ?? 0 } : { issues: result.issues },
+  };
+}
+
+async function providerCheckCommand(providerId: string, options: { workspace: string; transport?: string; binary?: string; cwd?: string }): Promise<CliResult> {
+  const normalized = providerId.toLowerCase();
+  const adapter = normalized === "codex"
+    ? createCodexProvider({ transport: (options.transport as CodexTransportKind | undefined) ?? "stub", binary: options.binary, cwd: options.cwd })
+    : normalized === "claude-code" || normalized === "claude"
+      ? createClaudeCodeProvider({ transport: (options.transport as ClaudeCodeTransportKind | undefined) ?? "stub" })
+      : undefined;
+  if (!adapter) return { ok: false, summary: `unknown provider: ${providerId}`, details: { supported: ["codex", "claude-code"] } };
+  const session = await adapter.createSession({ workspaceId: options.workspace, metadata: { check: "brainctl provider check" } });
+  await session.start();
+  try {
+    const health = await session.health();
+    return {
+      ok: health.ok,
+      summary: health.ok ? `${adapter.id} provider check passed` : `${adapter.id} provider check failed`,
+      details: { health, transport: options.transport ?? "stub", taskStarted: false },
+    };
+  } finally {
+    await session.stop();
+  }
+}
+
+async function entrypointCheckCommand(entrypointId: string, options: { workspace: string }): Promise<CliResult> {
+  if (entrypointId !== "telegram") {
+    return { ok: false, summary: `unknown entrypoint: ${entrypointId}`, details: { supported: ["telegram"] } };
+  }
+  const adapter = new TelegramEntrypointAdapter({ workspaceId: options.workspace, updates: [] });
+  await adapter.start();
+  try {
+    const health = await adapter.health();
+    return {
+      ok: health.ok,
+      summary: "telegram entrypoint boundary check passed",
+      details: { health, liveTokenRequired: false, pollingStarted: false, webhookStarted: false },
+    };
+  } finally {
+    await adapter.stop();
+  }
+}
+
+async function runtimeStatusCommand(options: { workspace: string; state: string }): Promise<CliResult> {
+  const store = new FileSubagentJobStore({ root: path.resolve(options.state) });
+  await store.init();
+  const jobs = await store.list({ workspaceId: options.workspace });
+  const byStatus = jobs.reduce<Record<string, number>>((acc, job) => {
+    acc[job.status] = (acc[job.status] ?? 0) + 1;
+    return acc;
+  }, {});
+  const active = jobs.filter((job) => ["queued", "running", "cancelling"].includes(job.status)).map((job) => ({
+    id: job.id,
+    status: job.status,
+    profile: job.profile,
+    provider: job.provider,
+    route: job.route,
+    summary: job.summary,
+  }));
+  return {
+    ok: true,
+    summary: jobs.length === 0 ? "runtime state is initialized with no jobs" : "runtime state inspected",
+    details: { workspace: options.workspace, stateRoot: path.resolve(options.state), jobs: jobs.length, byStatus, active },
+  };
+}
+
+async function automationValidateCommand(file: string | undefined, options: { workspace: string }): Promise<CliResult> {
+  const parsed = file ? parseConfigText(file, await readFile(file, "utf8")) : {};
+  const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as { loops?: unknown[]; monitors?: unknown[] } : {};
+  const runtime = new AutomationRuntime({ workspaceId: options.workspace, loops: record.loops ?? [], monitors: record.monitors ?? [] });
+  const health = runtime.health();
+  return {
+    ok: health.ok,
+    summary: health.ok ? "automation definitions valid" : "automation definitions need runtime implementation or fixes",
+    details: health,
   };
 }
 

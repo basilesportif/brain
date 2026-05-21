@@ -1,5 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { EchoProviderSession, type ProviderAdapter, type ProviderHealth, type ProviderSession, type ProviderTurn, type ProviderTurnEvent } from "@brain/runtime-core";
+import { mkdir, readFile } from "node:fs/promises";
+import path from "node:path";
+import { EchoProviderSession, type ProviderAdapter, type ProviderHealth, type ProviderResumeHandle, type ProviderSession, type ProviderTurn, type ProviderTurnEvent } from "@brain/runtime-core";
 
 export type CodexTransportKind = "app-server" | "exec" | "stub";
 
@@ -19,6 +21,13 @@ export interface CodexProviderOptions {
   execArgs?: string[];
   /** Keep Codex's own session files by default so provider resume remains possible. */
   ephemeral?: boolean;
+  /** Resume a provider-native Codex exec session by id when sending turns. */
+  resumeSessionId?: string;
+  /** Resume the most recent provider-native Codex exec session when no explicit id is available. */
+  resumeLast?: boolean;
+  /** Capture Codex's last assistant message as a file in the turn artifact dir. */
+  captureLastMessage?: boolean;
+  lastMessageFilename?: string;
   timeoutMs?: number;
   maxOutputBytes?: number;
   appServerClient?: CodexAppServerClient;
@@ -158,6 +167,8 @@ export class CodexTransportShellSession extends CodexAppServerShellSession {
 export class CodexExecSession implements ProviderSession {
   readonly provider = "codex";
   private started = false;
+  private readonly activeTurns = new Map<string, ChildProcess>();
+  private currentResumeHandle?: ProviderResumeHandle;
 
   constructor(
     readonly id: string,
@@ -171,6 +182,24 @@ export class CodexExecSession implements ProviderSession {
 
   async stop(): Promise<void> {
     this.started = false;
+    for (const [turnId, child] of this.activeTurns) {
+      child.kill("SIGTERM");
+      this.activeTurns.delete(turnId);
+    }
+  }
+
+  async resumeHandle(): Promise<ProviderResumeHandle | undefined> {
+    return this.currentResumeHandle;
+  }
+
+  async cancelTurn(turnId: string, reason = "cancelled"): Promise<void> {
+    const child = this.activeTurns.get(turnId);
+    if (!child) return;
+    child.kill("SIGTERM");
+    setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }, 2_000).unref?.();
+    void reason;
   }
 
   async health(): Promise<ProviderHealth> {
@@ -193,17 +222,20 @@ export class CodexExecSession implements ProviderSession {
   async *sendTurn(turn: ProviderTurn): AsyncIterable<ProviderTurnEvent> {
     if (!this.started) await this.start();
     const binary = this.options.binary ?? "codex";
-    const args = buildCodexExecArgs(this.options, turn);
+    const invocation = await buildCodexExecInvocation(this.options, turn);
+    const args = invocation.args;
     const queue = new AsyncEventQueue<ProviderTurnEvent>();
-    const state: CodexExecEventState = { accumulatedText: "", sawFinal: false };
+    const state: CodexExecEventState = { accumulatedText: "", sawFinal: false, provider: this.provider };
     let stdoutRemainder = "";
     let stdoutText = "";
     let stderrText = "";
     let outputBytes = 0;
     let timedOut = false;
+    let cancelled = false;
+    let outputLimited = false;
     const maxOutputBytes = this.options.maxOutputBytes ?? 4_000_000;
 
-    queue.push({ type: "status", message: "starting Codex exec transport", raw: { binary, args: redactPromptArgs(args, turn.prompt), metadata: this.metadata } });
+    queue.push({ type: "status", message: "starting Codex exec transport", raw: { binary, args: redactPromptArgs(args, turn.prompt), metadata: this.metadata, artifactDir: turn.artifactDir } });
 
     let child: ChildProcess;
     try {
@@ -214,6 +246,19 @@ export class CodexExecSession implements ProviderSession {
       yield* queue;
       return;
     }
+    this.activeTurns.set(turn.id, child);
+
+    const abortTurn = () => {
+      if (cancelled) return;
+      cancelled = true;
+      queue.push({ type: "error", message: `Codex exec turn cancelled: ${String(turn.abortSignal?.reason ?? "cancelled")}` });
+      child.kill("SIGTERM");
+      setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      }, 2_000).unref?.();
+    };
+    if (turn.abortSignal?.aborted) abortTurn();
+    else turn.abortSignal?.addEventListener("abort", abortTurn, { once: true });
 
     const timeout = setTimeout(() => {
       timedOut = true;
@@ -224,6 +269,7 @@ export class CodexExecSession implements ProviderSession {
     child.stdout?.on("data", (chunk: Buffer) => {
       outputBytes += chunk.byteLength;
       if (outputBytes > maxOutputBytes) {
+        outputLimited = true;
         child.kill("SIGTERM");
         queue.push({ type: "error", message: `Codex exec output exceeded maxOutputBytes (${maxOutputBytes})` });
         return;
@@ -238,6 +284,7 @@ export class CodexExecSession implements ProviderSession {
         state.accumulatedText += parsed.unparsedText;
         queue.push({ type: "delta", text: parsed.unparsedText });
       }
+      if (state.resumeHandle) this.currentResumeHandle = state.resumeHandle;
     });
 
     child.stderr?.on("data", (chunk: Buffer) => {
@@ -251,23 +298,44 @@ export class CodexExecSession implements ProviderSession {
     });
 
     child.on("close", (code, signal) => {
-      clearTimeout(timeout);
-      if (stdoutRemainder.trim()) {
-        try {
-          for (const event of codexJsonToProviderEvents(JSON.parse(stdoutRemainder), state)) queue.push(event);
-        } catch {
-          state.accumulatedText += stdoutRemainder;
-          queue.push({ type: "delta", text: stdoutRemainder });
+      void (async () => {
+        clearTimeout(timeout);
+        this.activeTurns.delete(turn.id);
+        turn.abortSignal?.removeEventListener("abort", abortTurn);
+        if (stdoutRemainder.trim()) {
+          try {
+            for (const event of codexJsonToProviderEvents(JSON.parse(stdoutRemainder), state)) queue.push(event);
+          } catch {
+            state.accumulatedText += stdoutRemainder;
+            queue.push({ type: "delta", text: stdoutRemainder });
+          }
         }
-      }
-      if (code && code !== 0 && !timedOut) {
-        queue.push({ type: "error", message: `Codex exec exited with code ${code}`, raw: { stderr: stderrText.trim(), stdout: stdoutText.trim().slice(-4_000), signal } });
-      } else if (!state.sawFinal) {
-        const text = state.accumulatedText.trim() || stdoutText.trim();
-        if (text) queue.push({ type: "final", text });
-        else if (!timedOut) queue.push({ type: "status", message: "Codex exec completed without assistant text" });
-      }
-      queue.close();
+        if (state.resumeHandle) this.currentResumeHandle = state.resumeHandle;
+        if (invocation.lastMessagePath) {
+          const lastText = await readOptionalText(invocation.lastMessagePath);
+          if (lastText && !state.sawFinal) {
+            state.sawFinal = true;
+            queue.push({ type: "final", text: lastText.trimEnd() });
+          }
+          queue.push({
+            type: "artifact",
+            artifact: {
+              kind: "document",
+              localPath: invocation.lastMessagePath,
+              mimeType: "text/markdown",
+              originalName: path.basename(invocation.lastMessagePath),
+            },
+          });
+        }
+        if (code && code !== 0 && !timedOut && !cancelled && !outputLimited) {
+          queue.push({ type: "error", message: `Codex exec exited with code ${code}`, raw: { stderr: stderrText.trim(), stdout: stdoutText.trim().slice(-4_000), signal } });
+        } else if (!state.sawFinal && !cancelled) {
+          const text = state.accumulatedText.trim() || stdoutText.trim();
+          if (text) queue.push({ type: "final", text });
+          else if (!timedOut) queue.push({ type: "status", message: "Codex exec completed without assistant text" });
+        }
+        queue.close();
+      })();
     });
 
     child.stdin?.end(turn.prompt);
@@ -286,26 +354,58 @@ export function createCodexProvider(options: CodexProviderOptions = {}): Provide
 }
 
 export function buildCodexExecArgs(options: CodexProviderOptions, turn: ProviderTurn): string[] {
-  if (options.execArgs) return options.execArgs.map((arg) => arg === "{prompt}" ? turn.prompt : arg);
+  return buildCodexExecInvocationSync(options, turn).args;
+}
 
-  const args = ["exec", "--json", "--color", "never"];
+interface CodexExecInvocation {
+  args: string[];
+  lastMessagePath?: string;
+}
+
+async function buildCodexExecInvocation(options: CodexProviderOptions, turn: ProviderTurn): Promise<CodexExecInvocation> {
+  const invocation = buildCodexExecInvocationSync(options, turn);
+  if (invocation.lastMessagePath) await mkdir(path.dirname(invocation.lastMessagePath), { recursive: true, mode: 0o700 });
+  return invocation;
+}
+
+function buildCodexExecInvocationSync(options: CodexProviderOptions, turn: ProviderTurn): CodexExecInvocation {
+  if (options.execArgs) return { args: options.execArgs.map((arg) => arg === "{prompt}" ? turn.prompt : arg) };
+
+  const resumeSessionId = options.resumeSessionId ?? turn.resumeHandle?.sessionId ?? turn.resumeHandle?.handle;
+  const useResume = Boolean(options.resumeLast || resumeSessionId);
+  const args = useResume ? ["exec", "resume", "--json"] : ["exec", "--json", "--color", "never"];
   if (options.model) args.push("--model", options.model);
-  if (options.cwd) args.push("--cd", options.cwd);
-  if (options.sandbox) args.push("--sandbox", options.sandbox);
-  if (options.approvalPolicy) args.push("--ask-for-approval", options.approvalPolicy);
+  if (!useResume && options.cwd) args.push("--cd", options.cwd);
+  if (!useResume && options.sandbox) args.push("--sandbox", options.sandbox);
+  if (options.approvalPolicy) args.push("--config", `approval_policy=${JSON.stringify(options.approvalPolicy)}`);
   if (options.ephemeral) args.push("--ephemeral");
   for (const config of options.extraConfig ?? []) args.push("--config", config);
   if (options.effort) args.push("--config", `model_reasoning_effort=${JSON.stringify(options.effort)}`);
   for (const attachment of turn.attachments ?? []) {
     if (attachment.kind === "image" && attachment.localPath) args.push("--image", attachment.localPath);
   }
+  const lastMessagePath = lastMessagePathFor(options, turn);
+  if (lastMessagePath) args.push("--output-last-message", lastMessagePath);
+  if (useResume) {
+    if (options.resumeLast && !resumeSessionId) args.push("--last");
+    else if (resumeSessionId) args.push(resumeSessionId);
+  }
   args.push("-");
-  return args;
+  return { args, lastMessagePath };
+}
+
+function lastMessagePathFor(options: CodexProviderOptions, turn: ProviderTurn): string | undefined {
+  if (options.captureLastMessage === false) return undefined;
+  const artifactDir = turn.artifactDir;
+  if (!artifactDir) return undefined;
+  return path.join(artifactDir, options.lastMessageFilename ?? "codex-last-message.md");
 }
 
 interface CodexExecEventState {
   accumulatedText: string;
   sawFinal: boolean;
+  provider: string;
+  resumeHandle?: ProviderResumeHandle;
 }
 
 function codexJsonToProviderEvents(value: unknown, state: CodexExecEventState): ProviderTurnEvent[] {
@@ -313,6 +413,8 @@ function codexJsonToProviderEvents(value: unknown, state: CodexExecEventState): 
   const params = asRecord(record.params);
   const type = stringValue(record.type) ?? stringValue(record.event) ?? stringValue(record.method) ?? stringValue(asRecord(record.msg).type);
   const normalized = type?.replaceAll("_", "/").toLowerCase();
+  const resumeHandle = extractResumeHandle(record, state.provider);
+  if (resumeHandle) state.resumeHandle = resumeHandle;
   const delta = stringValue(record.delta) ?? stringValue(params.delta) ?? stringValue(record.text_delta);
   if (delta && (normalized?.includes("delta") ?? true)) {
     state.accumulatedText += delta;
@@ -331,15 +433,58 @@ function codexJsonToProviderEvents(value: unknown, state: CodexExecEventState): 
 
   if (normalized?.includes("turn/completed") || normalized?.includes("final") || normalized?.includes("completed")) {
     const text = extractFinalText(record) ?? state.accumulatedText.trim();
-    state.sawFinal = true;
-    return text ? [{ type: "final", text }] : [{ type: "status", message: "Codex turn completed", raw: value }];
+    if (text) {
+      state.sawFinal = true;
+      return [{ type: "final", text }];
+    }
+    return [{ type: "status", message: "Codex turn completed", raw: value }];
   }
 
   if (normalized?.includes("turn/started") || normalized?.includes("thread/started") || normalized?.includes("status")) {
-    return [{ type: "status", message: type ?? "Codex status", raw: value }];
+    return [{
+      type: "status",
+      message: type ?? "Codex status",
+      raw: resumeHandle ? { event: value, resumeHandle } : value,
+    }];
   }
 
   return [];
+}
+
+function extractResumeHandle(record: Record<string, unknown>, provider: string): ProviderResumeHandle | undefined {
+  const params = asRecord(record.params);
+  const thread = asRecord(params.thread);
+  const turn = asRecord(params.turn);
+  const sessionId = stringValue(record.session_id)
+    ?? stringValue(record.sessionId)
+    ?? stringValue(record.conversation_id)
+    ?? stringValue(record.conversationId)
+    ?? stringValue(params.session_id)
+    ?? stringValue(params.sessionId)
+    ?? stringValue(params.conversation_id)
+    ?? stringValue(params.conversationId)
+    ?? stringValue(params.threadId)
+    ?? stringValue(thread.id)
+    ?? stringValue(thread.threadId)
+    ?? stringValue(thread.conversationId)
+    ?? stringValue(turn.threadId);
+  const turnId = stringValue(record.turn_id)
+    ?? stringValue(record.turnId)
+    ?? stringValue(params.turn_id)
+    ?? stringValue(params.turnId)
+    ?? stringValue(turn.id)
+    ?? stringValue(turn.turnId);
+  if (!sessionId && !turnId) return undefined;
+  return {
+    provider,
+    sessionId,
+    turnId,
+    handle: sessionId,
+    metadata: compactMetadata({
+      source: "codex-jsonl",
+      eventType: stringValue(record.type) ?? stringValue(record.event) ?? stringValue(record.method),
+    }),
+  };
 }
 
 function extractFinalText(record: Record<string, unknown>): string | undefined {
@@ -393,6 +538,18 @@ function optionalRecord(value: unknown): Record<string, unknown> | undefined {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function compactMetadata(record: Record<string, unknown>): Record<string, string> {
+  return Object.fromEntries(Object.entries(record).filter(([, value]) => typeof value === "string" && value.length > 0)) as Record<string, string>;
+}
+
+async function readOptionalText(filePath: string): Promise<string | undefined> {
+  try {
+    return await readFile(filePath, "utf8");
+  } catch {
+    return undefined;
+  }
 }
 
 function redactPromptArgs(args: string[], prompt: string): string[] {

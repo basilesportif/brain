@@ -4,3 +4,4 @@ export * from "./runtime.js";
 export * from "./entrypoints.js";
 export * from "./jobs.js";
 export * from "./subagents.js";
+export * from "./automation.js";

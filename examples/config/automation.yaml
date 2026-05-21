@@ -1,0 +1,17 @@
+loops:
+  - id: daily-summary
+    enabled: true
+    description: Draft a daily workspace summary for review.
+    schedule: "0 9 * * *"
+    type: dispatch_subagent
+    profile: implementer
+    prompt: "Review workspace state and draft a concise daily summary."
+    route: store_only
+
+monitors:
+  - id: inbox-placeholder
+    enabled: false
+    description: Example disabled filesystem monitor; no watcher is installed by validation.
+    source: filesystem
+    config:
+      path: /srv/brain/workspaces/personal/inbox

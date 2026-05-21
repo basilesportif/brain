@@ -1,17 +1,30 @@
 import type { BrainAttachment, BrainOutboundAction, EntryPointInboundEvent, JsonRecord } from "@brain/entrypoint-protocol";
 
+export interface ProviderResumeHandle {
+  provider: string;
+  sessionId?: string;
+  turnId?: string;
+  handle?: string;
+  createdAt?: string;
+  metadata?: JsonRecord;
+}
+
 export interface ProviderTurn {
   id: string;
   sessionId: string;
   inboundEvent: EntryPointInboundEvent;
   prompt: string;
   attachments?: BrainAttachment[];
+  artifactDir?: string;
+  abortSignal?: AbortSignal;
+  resumeHandle?: ProviderResumeHandle;
   metadata?: JsonRecord;
 }
 
 export type ProviderTurnEvent =
   | { type: "delta"; text: string }
   | { type: "action"; action: BrainOutboundAction }
+  | { type: "artifact"; artifact: BrainAttachment }
   | { type: "status"; message: string; raw?: unknown }
   | { type: "final"; text: string }
   | { type: "error"; message: string; raw?: unknown };
@@ -29,6 +42,9 @@ export interface ProviderSession {
   start(): Promise<void>;
   stop(): Promise<void>;
   health(): Promise<ProviderHealth>;
+  resumeHandle?(): Promise<ProviderResumeHandle | undefined>;
+  cancelTurn?(turnId: string, reason?: string): Promise<void>;
+  steerTurn?(turnId: string, text: string): Promise<void>;
   sendTurn(turn: ProviderTurn): AsyncIterable<ProviderTurnEvent>;
 }
 

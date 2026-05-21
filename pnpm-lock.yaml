@@ -11,6 +11,15 @@ importers:
       '@brain/assistant-pack-schema':
         specifier: workspace:*
         version: link:packages/assistant-pack-schema
+      '@brain/entrypoint-telegram':
+        specifier: workspace:*
+        version: link:entrypoints/telegram
+      '@brain/provider-claude-code':
+        specifier: workspace:*
+        version: link:packages/providers/claude-code
+      '@brain/provider-codex':
+        specifier: workspace:*
+        version: link:packages/providers/codex
       '@brain/runtime-core':
         specifier: workspace:*
         version: link:packages/runtime-core

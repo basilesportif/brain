@@ -14,6 +14,8 @@ This package must not import Codex-, Claude-, Telegram-, web-, or iOS-specific S
 - Subagent job schemas, active/terminal status helpers, in-memory and file-backed job stores.
 - `FileRuntimeStateStore` for workspace-local JSON/JSONL runtime state under a private workspace state directory.
 - `SubagentLifecycle` for provider-neutral queueing, dispatch, running/terminal transitions, cancellation, steering, hydration/abandonment of active persisted jobs, and test/static executor hooks.
+- `ProviderSubagentExecutor` for running subagent jobs through any `ProviderAdapter` with artifact directories, image attachments, cancellation, steering, and terminal result capture.
+- `AutomationRuntime` skeleton for loop/monitor health and dry-run/manual dispatch of subagent loops without installing crontabs, file watchers, or host services.
 
 ## Boundary rules
 
