@@ -1,4 +1,4 @@
-# Self-hosting skeleton
+# Self-hosting
 
 Initial target: users run their own assistant server, one primary entrypoint, and a private workspace. SaaS can be considered later.
 
@@ -38,15 +38,18 @@ Self-host config should start from `examples/config/runtime.yaml` or `examples/c
 
 ## Agent-driven setup path
 
-Agents should use `docs/setup-plan.md` as the current source of truth for the
-future installer contract:
+Agents should use `docs/setup-plan.md` and `setup/AGENTS.md` as the current
+source of truth for the safe setup contract:
 
-- `brainctl setup` for guided local or remote bootstrap.
+- `brainctl setup` for local private workspace scaffolding.
 - `brainctl doctor` for environment and credential-readiness checks.
 - `brainctl config validate` for runtime config validation.
 - `brainctl secrets check` for metadata-only secret presence checks.
+- `brainctl operations validate/systemd` for non-mutating deployment readiness.
 
-Until these commands exist, setup work should remain documentation/skeleton-only
-or use fake providers and fake entrypoints. Real credentials, hostnames,
-Telegram IDs, env files, logs, generated artifacts, and workspace state belong
-in the user's private workspace or host secret store, never in source control.
+Setup work should prepare and validate private config, then stop before live
+service installation/start unless the user explicitly confirms. Use
+`brainctl run --fake --once --fake-text help` for fake smoke tests. Real
+credentials, hostnames, Telegram IDs, env files, logs, generated artifacts, and
+workspace state belong in the user's private workspace or host secret store,
+never in source control.

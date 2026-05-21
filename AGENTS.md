@@ -1,15 +1,20 @@
 # Agent guidance for `brain`
 
-This repo is a clean skeleton for a future assistant monorepo. Keep the first migration phase safe and reviewable.
+This repo is a safe, reviewable assistant monorepo with runtime, provider,
+entrypoint, setup, and operations seams. Keep migration work bounded and
+inspectable.
 
 ## Current boundaries
 
-- Do **not** copy private workspace data, secrets, logs, generated pages/images, chat transcripts, or large runtime code from existing repos yet.
+- Do **not** copy private workspace data, secrets, logs, generated pages/images,
+  chat transcripts, or unreviewed runtime code from existing repos.
 - Put channel adapters under `entrypoints/`; they translate external channels into generic Brain inbound events and outbound actions.
 - Put durable runtime/web app surfaces under `apps/`.
 - Put provider-neutral shared code under `packages/`, with provider implementations under `packages/providers/`.
 - Put pure assistant prompts, skills, workflows, and setup docs under `assistant-packs/`.
-- Treat `workspace/`, `private/`, and `data/` as user-owned/private boundaries. Only the checked-in README files in those folders should exist until the data boundary is finalized.
+- Treat `workspace/`, `private/`, and `data/` as user-owned/private boundaries.
+  Only the checked-in README files in those folders should exist unless a task
+  explicitly changes the private-boundary policy.
 
 ## Entrypoint and provider direction
 
@@ -17,7 +22,8 @@ This repo is a clean skeleton for a future assistant monorepo. Keep the first mi
 - Prompts and workflows should use generic entrypoint/inbound/outbound language, not Telegram-specific terms, unless they are explicitly Telegram adapter docs or tests.
 - Start with one primary active entrypoint per workspace, while keeping protocol metadata future-compatible with multiple entrypoints.
 - Codex support should live under `packages/providers/codex`; Codex app-server mechanics are an implementation detail of that provider.
-- Claude Code support should live under `packages/providers/claude-code` via the Claude Code SDK/subagent mechanism.
+- Claude Code support should live under `packages/providers/claude-code`, but
+  real Claude Code wiring remains out of scope until explicitly requested.
 - Shared orchestration code must depend on entrypoint/provider interfaces, not directly on any channel or provider runtime.
 
 ## Before adding code
@@ -38,13 +44,13 @@ work", "set this up", or self-host Brain:
    host. Use the assistant-agent-logic setup-server skill at
    `/home/tim/pkg/tim/assistant-agent-logic/config/skills/setup-server.md` to
    prepare the server with its own non-root Brain service user.
-5. Treat `brainctl setup` as the intended future installer flow, even while it is
-   still a skeleton. Keep the flow provider-agnostic: Codex provider/app-server
-   or Claude Code SDK/subagents.
+5. Treat `brainctl setup` plus the top-level `setup/` guide as the current
+   safe setup flow. Keep it provider-agnostic where possible: Codex first, with
+   Claude Code recorded only as a provider placeholder until real wiring exists.
 6. Bootstrap Telegram as the first primary entrypoint when the user wants live
    setup, but do not require Composio or other optional integrations.
 7. Ask before using any real remote host, credential, Telegram token/admin ID,
    provider auth, systemd unit, or secret store.
 8. Keep real workspace config, env files, tokens, Telegram IDs, logs, generated
    artifacts, hostnames, and repo-registry state outside git.
-9. Run `pnpm run check` after documentation/skeleton changes.
+9. Run `pnpm run check` after setup, documentation, or runtime changes.

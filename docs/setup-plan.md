@@ -5,9 +5,10 @@ this work", and the agent can guide a first local or remote bootstrap without
 access to the maintainer's private workspace, integrations, credentials, or
 hosts.
 
-Status: design documentation only. `brainctl` and runtime packages are not
-implemented yet, so current setup work creates/checks documented configuration
-and private workspace structure instead of deploying a live Brain runtime.
+Status: guided setup documentation. `brainctl`, runtime packages, provider
+adapters, Telegram entrypoint seams, and non-mutating operations planning exist.
+Setup should prepare and validate a local or remote workspace, then stop before
+live deployment unless the user explicitly confirms.
 
 ## Agent entrypoints
 
@@ -16,14 +17,14 @@ When started from the repository root, Codex and Claude Code agents should:
 1. Read `AGENTS.md`; Claude Code also reads `CLAUDE.md`.
 2. Read this setup plan.
 3. Read `assistant-packs/core/skills/setup-self-host/SKILL.md`.
-4. For remote Ubuntu preparation, read the upstream helper skill at
+4. Read `setup/AGENTS.md` for the short setup checklist.
+5. For remote Ubuntu preparation, read the upstream helper skill at
    `/home/tim/pkg/tim/assistant-agent-logic/config/skills/setup-server.md` and
    adapt only its public-safe, user-owned steps.
-5. Run `pnpm run check` before and after setup-documentation or skeleton
-   changes.
-6. Ask before touching any real remote host, local SSH config, systemd unit,
+6. Run `pnpm run check` before and after setup or documentation changes.
+7. Ask before touching any real remote host, local SSH config, systemd unit,
    secret file, or credential.
-7. Keep real workspace config, env files, tokens, Telegram IDs, logs, generated
+8. Keep real workspace config, env files, tokens, Telegram IDs, logs, generated
    artifacts, repo-registry state, hostnames, and deployment notes outside git.
 
 ## First question: local directory or remote SSH server?
@@ -48,7 +49,8 @@ Ask these questions explicitly. Defaults are suggestions, not assumptions.
 2. Which provider should execute assistant work?
    - `codex` — Codex provider; Codex app-server details stay behind the
      provider adapter boundary.
-   - `claude-code` — Claude Code provider via SDK/subagents.
+   - `claude-code` — Claude Code provider placeholder/seam; no real Claude
+     Code wiring is installed in this setup flow.
 3. How will the chosen provider be authenticated?
    - Existing CLI/session on this machine or server.
    - API key or token stored in a private workspace secret file or host secret
@@ -69,7 +71,7 @@ Ask these questions explicitly. Defaults are suggestions, not assumptions.
 2. Should setup create local config, secrets, logs, artifacts, backups, and
    state directories there with restrictive permissions?
 3. Which package manager command should be used from the repo root? Current
-   skeleton expects `pnpm run check`; future runtime may use pnpm workspaces.
+   repo checks use `pnpm run check` across the pnpm workspace.
 
 ### Remote-only questions
 
@@ -114,9 +116,9 @@ on private workspace knowledge.
 - Required packages: `git`, `curl`, `unzip`, `build-essential`, `tmux`, `jq`,
   `ca-certificates`, and systemd tools.
 - Node.js and package manager: install Node compatible with `package.json`
-  (`>=24` for this skeleton) and pnpm compatible with `packageManager`.
-- Optional runtimes: Bun only if a selected provider/entrypoint package later
-  requires it; Docker only if the chosen deployment mode uses containers.
+  (`>=24`) and pnpm compatible with `packageManager`.
+- Optional runtimes: Bun only if a selected provider/entrypoint package requires
+  it; Docker only if the chosen deployment mode uses containers.
 - Do not require Composio or any optional integration for initial bootstrap.
 
 ### Provider selection and auth
@@ -124,8 +126,8 @@ on private workspace knowledge.
 - Exactly one initial provider is selected: `codex` or `claude-code`.
 - Codex path records only `provider: codex`; Codex app-server mechanics and auth
   stay in the provider adapter/private secret boundary.
-- Claude path records only `provider: claude-code`; SDK/subagent auth stays in
-  the provider adapter/private secret boundary.
+- Claude path records only `provider: claude-code` as a placeholder/seam for now;
+  real Claude Code wiring is out of scope for this setup flow.
 - Setup can proceed with unauthenticated placeholders, but `doctor` must report
   provider auth as pending before a live runtime starts.
 
@@ -181,8 +183,9 @@ on private workspace knowledge.
 
 - Logs: `journalctl -u <service>`, provider logs, and entrypoint logs have known
   paths/commands.
-- Health: `brainctl doctor --workspace <path>` and `brainctl config validate`
-  are the intended future checks.
+- Health: `brainctl doctor --config <path> --pack assistant-packs/core`,
+  `brainctl config validate <path>`, and `brainctl operations validate` are the
+  current safe checks.
 - Backup: config metadata, private workspace state, and secrets backup path are
   documented without checking data into git.
 - Update: pull/fetch target ref, reinstall dependencies, run checks, restart,
@@ -190,12 +193,16 @@ on private workspace knowledge.
 
 ## Local setup flow
 
-Until `brainctl` exists, use these steps as the skeleton flow:
-
 1. Confirm the user chose local mode and a private workspace path outside this
    checkout.
 2. From the repo root, run `pnpm run check`.
-3. Create private workspace directories with restrictive permissions.
+3. Create private workspace directories with restrictive permissions, either
+   directly or with:
+
+   ```bash
+   pnpm run brainctl -- setup --workspace <workspace-name> --path <private-workspace-path>
+   ```
+
 4. Copy `examples/config/runtime.yaml` or TOML into the private workspace config
    area and adjust placeholders for:
    - workspace ID/name,
@@ -208,8 +215,21 @@ Until `brainctl` exists, use these steps as the skeleton flow:
    are missing.
 6. Validate metadata only: file exists, permissions are restrictive, required
    keys are present, and no source-controlled private files were created.
-7. Run a fake-provider or config-only smoke test if live credentials are absent.
-8. Summarize next steps to complete provider auth and Telegram admin pairing.
+7. Run current safe checks:
+
+   ```bash
+   pnpm run brainctl -- config validate <private-config>
+   pnpm run brainctl -- secrets check --config <private-config>
+   pnpm run brainctl -- doctor --config <private-config> --pack assistant-packs/core
+   pnpm run brainctl -- operations validate --config <private-config> --workspace <workspace-name> --repo <repo-root>
+   pnpm run brainctl -- operations systemd --config <private-config> --workspace <workspace-name> --repo <repo-root>
+   ```
+
+8. Use `brainctl run --fake --once --fake-text help` only for fake/dev smoke.
+   Config-driven `brainctl start`/`run` resolves the provider and entrypoint
+   from runtime config by default.
+9. Summarize next steps to complete provider auth, Telegram admin pairing, and
+   any explicit live start confirmation.
 
 ## Remote SSH setup flow
 
@@ -248,24 +268,28 @@ explicitly requested.
    entrypoint and selected provider recorded generically.
 8. Write private Telegram/provider secret files only if the user supplies the
    values; otherwise mark them pending.
-9. Prepare, but do not necessarily enable, a systemd unit with documented
-   `ExecStart`, env file, working directory, restart policy, log command, and
-   health command.
+9. Render and review, but do not install or enable, a systemd unit with
+   `brainctl operations systemd`. The rendered command uses the runtime config's
+   provider and primary entrypoint by default.
+   Record its `ExecStart`, env file, working directory, restart policy, log
+   command, and health command.
 10. Run metadata-only checks and report exactly what remains before a live start:
     provider auth, Telegram bot token, admin pairing, service enable/start, and
     optional webhook/web configuration.
 
-## Future `brainctl` CLI shape
+## Current `brainctl` CLI shape
 
-Initial commands should be explicit and scriptable:
+Current commands are explicit and scriptable:
 
 ```bash
-brainctl setup --mode local --workspace <path> --provider codex --entrypoint telegram
-brainctl setup --mode local --workspace <path> --provider claude-code --entrypoint telegram
-brainctl setup --mode remote --host <ssh-label> --workspace <remote-path> --provider codex --entrypoint telegram
-brainctl doctor --workspace <path>
-brainctl config validate --config <path>
-brainctl secrets check --workspace <path>
+pnpm run brainctl -- setup --workspace <name> --path <private-workspace-path>
+pnpm run brainctl -- doctor --config <runtime-config> --pack assistant-packs/core
+pnpm run brainctl -- config validate <runtime-config>
+pnpm run brainctl -- secrets check --config <runtime-config>
+pnpm run brainctl -- start --config <runtime-config> --workspace <name>
+pnpm run brainctl -- run --config <runtime-config> --workspace <name> --fake --once --fake-text help
+pnpm run brainctl -- operations validate --config <runtime-config> --workspace <name> --repo <checkout>
+pnpm run brainctl -- operations systemd --config <runtime-config> --workspace <name> --repo <checkout>
 ```
 
 The CLI should print paths and actions, but not secret values.

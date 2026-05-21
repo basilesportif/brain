@@ -1,6 +1,6 @@
-# Runtime configuration skeleton
+# Runtime configuration
 
-Status: initial schemas and validation exist in `@brain/workspace-schema`; `brainctl doctor` also runs a temporary runtime-core store/subagent lifecycle self-test. A foreground supervisor shape exists behind `brainctl run`/`start --foreground`, with fake provider/entrypoint defaults and explicit live Telegram polling flags.
+Status: schemas and validation exist in `@brain/workspace-schema`; `brainctl doctor` also runs a temporary runtime-core store/subagent lifecycle self-test. `brainctl run` and `brainctl start --foreground` resolve the provider and primary entrypoint from runtime config by default. Use `--fake` or explicit `--provider fake --entrypoint fake` for test/dev smoke, and use explicit Telegram polling/token flags for live polling.
 
 Brain runtime configuration must make active entrypoints explicit so prompt packs and provider adapters do not accidentally depend on Telegram-specific behavior.
 

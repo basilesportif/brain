@@ -10,8 +10,8 @@ import { parse as parseToml } from "smol-toml";
 import YAML from "yaml";
 import { validateAssistantPack } from "@brain/assistant-pack-schema";
 import { FakeEntrypointAdapter } from "@brain/entrypoint-protocol";
-import { validateWorkspaceConfig, type BrainConfig } from "@brain/workspace-schema";
-import { AutomationRuntime, BrainRuntime, BrainSupervisor, EchoProviderAdapter, EmployeeLifecycle, FakeProviderAdapter, FileAutomationLockStore, FileAutomationSpool, FileEmployeeStore, FileSubagentJobStore, ProviderEmployeeRuntime, RuntimeCommandInterceptor, RuntimeEntrypointBridge, StaticSubagentExecutor, SubagentLifecycle, createGuardedLiveValidationPlan, createOperationsPlan, parseBrainDirectives, renderSystemdService, type BrainSupervisorLogRecord, type OperationsPlan, type ProviderAdapter, type ProviderTurnEvent, type RuntimeLogEntry } from "@brain/runtime-core";
+import { validateWorkspaceConfig, type BrainConfig, type EntrypointConfig, type WorkspaceConfig } from "@brain/workspace-schema";
+import { AutomationRuntime, BrainRuntime, BrainSupervisor, EchoProviderAdapter, EmployeeLifecycle, FakeProviderAdapter, FileAutomationLockStore, FileAutomationSpool, FileEmployeeStore, FileSubagentJobStore, ProviderEmployeeRuntime, ProviderSubagentExecutor, RuntimeCommandInterceptor, RuntimeEntrypointBridge, StaticSubagentExecutor, SubagentLifecycle, createGuardedLiveValidationPlan, createOperationsPlan, parseBrainDirectives, renderSystemdService, type BrainSupervisorLogRecord, type OperationsPlan, type ProviderAdapter, type ProviderTurnEvent, type RuntimeLogEntry, type SubagentExecutor } from "@brain/runtime-core";
 import { FileTelegramPairingStore, FileTelegramPollingStateStore, TelegramBotApiClient, TelegramEntrypointAdapter, loadTelegramToken, type TelegramAttachmentTranscriber } from "@brain/entrypoint-telegram";
 import { createCodexProvider, type CodexTransportKind } from "@brain/provider-codex";
 import { createClaudeCodeProvider, type ClaudeCodeTransportKind } from "@brain/provider-claude-code";
@@ -47,8 +47,9 @@ program.command("start")
   .option("--foreground", "run the supervisor in this process instead of printing the start plan")
   .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
   .option("--workspace <id>", "workspace id", "personal")
-  .option("--entrypoint <kind>", "entrypoint kind: fake or telegram", "fake")
-  .option("--provider <kind>", "provider kind: fake, echo, codex, claude-code", "fake")
+  .option("--entrypoint <kind>", "override entrypoint kind from config: fake or telegram")
+  .option("--provider <kind>", "override provider kind from config: fake, echo, codex, claude-code")
+  .option("--fake", "force fake provider and fake entrypoint for tests/dev smoke")
   .option("--state <path>", "runtime state root")
   .option("--artifacts <path>", "runtime artifact root")
   .option("--log <path>", "runtime JSONL log path")
@@ -72,11 +73,12 @@ program.command("start")
   .action(async (options) => exitWith(await startCommand(options)));
 
 program.command("run")
-  .description("Run the Brain supervisor in the foreground. Fake provider/entrypoint defaults avoid live side effects.")
+  .description("Run the Brain supervisor in the foreground. Provider and entrypoint default to runtime config; pass --fake for test/dev smoke.")
   .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
   .option("--workspace <id>", "workspace id", "personal")
-  .option("--entrypoint <kind>", "entrypoint kind: fake or telegram", "fake")
-  .option("--provider <kind>", "provider kind: fake, echo, codex, claude-code", "fake")
+  .option("--entrypoint <kind>", "override entrypoint kind from config: fake or telegram")
+  .option("--provider <kind>", "override provider kind from config: fake, echo, codex, claude-code")
+  .option("--fake", "force fake provider and fake entrypoint for tests/dev smoke")
   .option("--state <path>", "runtime state root")
   .option("--artifacts <path>", "runtime artifact root")
   .option("--log <path>", "runtime JSONL log path")
@@ -317,6 +319,7 @@ interface SupervisorRunCommandOptions {
   workspace: string;
   entrypoint?: string;
   provider?: string;
+  fake?: boolean;
   state?: string;
   artifacts?: string;
   log?: string;
@@ -339,11 +342,30 @@ interface SupervisorRunCommandOptions {
   employeeRuntime?: boolean;
 }
 
+type RuntimeSelectionSource = "cli" | "config" | "fallback" | "fake-flag";
+
+interface ResolvedSupervisorRuntime {
+  workspaceId: string;
+  workspace: WorkspaceConfig;
+  primaryEntrypointId: string;
+  primaryEntrypoint: EntrypointConfig;
+  providerKind: string;
+  providerSource: RuntimeSelectionSource;
+  entrypointKind: string;
+  entrypointSource: RuntimeSelectionSource;
+  configPath: string;
+}
+
+type ResolvedSupervisorRuntimeResult =
+  | (CliResult & { ok: true; runtime: ResolvedSupervisorRuntime })
+  | (CliResult & { ok: false; runtime?: undefined });
+
 async function startCommand(options: SupervisorRunCommandOptions & { foreground?: boolean }): Promise<CliResult> {
   const config = await loadValidConfig(options.config);
   if (!config.ok || !config.config) return config;
-  if (!config.config.workspaces[options.workspace]) return { ok: false, summary: `workspace not found: ${options.workspace}`, details: { available: Object.keys(config.config.workspaces) } };
-  const paths = supervisorPaths(options.workspace, options);
+  const selection = resolveSupervisorRuntime(config.config, options);
+  if (!selection.ok) return selection;
+  const paths = supervisorPaths(options.workspace, { ...options, workspacePath: selection.runtime.workspace.workspacePath });
   if (!options.foreground) {
     return {
       ok: true,
@@ -351,8 +373,12 @@ async function startCommand(options: SupervisorRunCommandOptions & { foreground?
       details: {
         workspace: options.workspace,
         config: path.resolve(options.config),
-        entrypoint: options.entrypoint ?? "fake",
-        provider: options.provider ?? "fake",
+        entrypoint: selection.runtime.entrypointKind,
+        entrypointSource: selection.runtime.entrypointSource,
+        provider: selection.runtime.providerKind,
+        providerSource: selection.runtime.providerSource,
+        primaryEntrypointId: selection.runtime.primaryEntrypointId,
+        subagentExecutor: subagentExecutorIdFor(selection.runtime),
         stateRoot: paths.stateRoot,
         artifactRoot: paths.artifactRoot,
         logPath: paths.logPath,
@@ -367,18 +393,20 @@ async function startCommand(options: SupervisorRunCommandOptions & { foreground?
 async function runCommand(options: SupervisorRunCommandOptions): Promise<CliResult> {
   const config = await loadValidConfig(options.config);
   if (!config.ok || !config.config) return config;
-  const workspace = config.config.workspaces[options.workspace];
-  if (!workspace) return { ok: false, summary: `workspace not found: ${options.workspace}`, details: { available: Object.keys(config.config.workspaces) } };
+  const selection = resolveSupervisorRuntime(config.config, options);
+  if (!selection.ok) return selection;
+  const { workspace } = selection.runtime;
 
-  const paths = supervisorPaths(options.workspace, options);
+  const paths = supervisorPaths(options.workspace, { ...options, workspacePath: workspace.workspacePath });
   await mkdir(path.dirname(paths.logPath), { recursive: true, mode: 0o700 });
-  const provider = createCliProvider(options);
+  const provider = createCliProvider(selection.runtime.providerKind, options);
   let supervisor: BrainSupervisor | undefined;
   const store = new FileSubagentJobStore({ root: paths.stateRoot });
+  const subagentExecutor = createCliSubagentExecutor(selection.runtime, provider);
   const subagents = new SubagentLifecycle({
     workspaceId: options.workspace,
     store,
-    executor: new StaticSubagentExecutor({ id: "brainctl-static", outputText: "Static subagent completed." }),
+    executor: subagentExecutor,
     artifactRoot: paths.artifactRoot,
     onTerminal: async (job, result) => {
       await supervisor?.deliverSubagentResult(job, result);
@@ -393,7 +421,7 @@ async function runCommand(options: SupervisorRunCommandOptions): Promise<CliResu
   });
   await employees.init();
 
-  const entrypoint = await createCliEntrypoint(options.workspace, workspace.primaryEntrypointId, options, paths);
+  const entrypoint = await createCliEntrypoint(selection.runtime, options, paths);
   const runtime = new BrainRuntime({ workspaceId: options.workspace, workspace, provider, subagents });
   const logReader = new FileRuntimeLogReader(paths.logPath);
   const commandInterceptor = new RuntimeCommandInterceptor({
@@ -422,7 +450,13 @@ async function runCommand(options: SupervisorRunCommandOptions): Promise<CliResu
       details: {
         workspace: options.workspace,
         provider: provider.id,
+        providerKind: selection.runtime.providerKind,
+        providerSource: selection.runtime.providerSource,
         entrypoint: entrypoint.id,
+        entrypointKind: selection.runtime.entrypointKind,
+        entrypointSource: selection.runtime.entrypointSource,
+        primaryEntrypointId: selection.runtime.primaryEntrypointId,
+        subagentExecutor: subagentExecutor.id,
         processed: result.processed.length,
         stoppedReason: result.stoppedReason,
         hydration,
@@ -443,14 +477,23 @@ async function runCommand(options: SupervisorRunCommandOptions): Promise<CliResu
 
 async function healthCommand(options: { config: string; workspace: string; state?: string; log?: string }): Promise<CliResult> {
   const config = await loadValidConfig(options.config);
-  const paths = supervisorPaths(options.workspace, options);
+  const selection = config.ok && config.config ? resolveSupervisorRuntime(config.config, { ...options }) : undefined;
+  const runtime = selection?.ok ? selection.runtime : undefined;
+  const paths = supervisorPaths(options.workspace, { ...options, workspacePath: runtime?.workspace.workspacePath });
   const state = await runtimeStatusCommand({ workspace: options.workspace, state: paths.stateRoot });
   const logMeta = await fileMetadata(paths.logPath);
   return {
-    ok: config.ok && state.ok,
-    summary: config.ok && state.ok ? "runtime health seams inspected" : "runtime health seams need attention",
+    ok: config.ok && (selection?.ok ?? true) && state.ok,
+    summary: config.ok && (selection?.ok ?? true) && state.ok ? "runtime health seams inspected" : "runtime health seams need attention",
     details: {
       config: config.ok ? config.details : config,
+      runtimeSelection: selection?.ok ? {
+        provider: runtime?.providerKind,
+        providerSource: runtime?.providerSource,
+        entrypoint: runtime?.entrypointKind,
+        entrypointSource: runtime?.entrypointSource,
+        primaryEntrypointId: runtime?.primaryEntrypointId,
+      } : selection,
       workspace: options.workspace,
       state: state.details,
       logs: { path: paths.logPath, metadata: logMeta },
@@ -473,8 +516,11 @@ async function logsCommand(options: { file?: string; workspace: string; state?: 
 
 async function statusCommand(options: { config: string; workspace: string; state?: string; artifacts?: string; log?: string }): Promise<CliResult> {
   const health = await healthCommand(options);
-  const paths = supervisorPaths(options.workspace, options);
-  const operations = health.ok ? operationsPlan({ ...options, repo: process.cwd() }) : undefined;
+  const config = await loadValidConfig(options.config);
+  const selection = config.ok && config.config ? resolveSupervisorRuntime(config.config, options) : undefined;
+  const runtime = selection?.ok ? selection.runtime : undefined;
+  const paths = supervisorPaths(options.workspace, { ...options, workspacePath: runtime?.workspace.workspacePath });
+  const operations = health.ok ? operationsPlan({ ...options, repo: process.cwd() }, runtime) : undefined;
   return {
     ok: health.ok,
     summary: health.ok ? "runtime status inspected without live side effects" : "runtime status needs attention",
@@ -506,8 +552,9 @@ interface OperationsCommandOptions {
 async function operationsPlanCommand(options: OperationsCommandOptions): Promise<CliResult> {
   const config = await loadValidConfig(options.config);
   if (!config.ok || !config.config) return config;
-  if (!config.config.workspaces[options.workspace]) return { ok: false, summary: `workspace not found: ${options.workspace}`, details: { available: Object.keys(config.config.workspaces) } };
-  const plan = operationsPlan(options);
+  const selection = resolveSupervisorRuntime(config.config, options);
+  if (!selection.ok) return selection;
+  const plan = operationsPlan(options, selection.runtime);
   return {
     ok: true,
     summary: "operations plan rendered without deployment side effects",
@@ -521,8 +568,9 @@ async function operationsPlanCommand(options: OperationsCommandOptions): Promise
 async function operationsSystemdCommand(options: OperationsCommandOptions): Promise<CliResult> {
   const config = await loadValidConfig(options.config);
   if (!config.ok || !config.config) return config;
-  if (!config.config.workspaces[options.workspace]) return { ok: false, summary: `workspace not found: ${options.workspace}`, details: { available: Object.keys(config.config.workspaces) } };
-  const plan = operationsPlan(options);
+  const selection = resolveSupervisorRuntime(config.config, options);
+  if (!selection.ok) return selection;
+  const plan = operationsPlan(options, selection.runtime);
   return {
     ok: true,
     summary: "systemd unit rendered without installing or restarting services",
@@ -539,8 +587,9 @@ async function operationsSystemdCommand(options: OperationsCommandOptions): Prom
 async function operationsValidateCommand(options: OperationsCommandOptions): Promise<CliResult> {
   const config = await loadValidConfig(options.config);
   if (!config.ok || !config.config) return config;
-  if (!config.config.workspaces[options.workspace]) return { ok: false, summary: `workspace not found: ${options.workspace}`, details: { available: Object.keys(config.config.workspaces) } };
-  const plan = operationsPlan(options);
+  const selection = resolveSupervisorRuntime(config.config, options);
+  if (!selection.ok) return selection;
+  const plan = operationsPlan(options, selection.runtime);
   const [repo, configFile, stateParent, artifactRoot, logParent, envFile] = await Promise.all([
     fileMetadata(plan.repoPath),
     fileMetadata(plan.configPath),
@@ -563,8 +612,8 @@ async function operationsValidateCommand(options: OperationsCommandOptions): Pro
   };
 }
 
-function operationsPlan(options: OperationsCommandOptions): OperationsPlan {
-  const paths = supervisorPaths(options.workspace, options);
+function operationsPlan(options: OperationsCommandOptions, runtime?: ResolvedSupervisorRuntime): OperationsPlan {
+  const paths = supervisorPaths(options.workspace, { ...options, workspacePath: runtime?.workspace.workspacePath });
   return createOperationsPlan({
     workspaceId: options.workspace,
     repoPath: options.repo ?? process.cwd(),
@@ -574,6 +623,8 @@ function operationsPlan(options: OperationsCommandOptions): OperationsPlan {
     logPath: paths.logPath,
     serviceName: options.serviceName,
     serviceUser: options.serviceUser,
+    providerKind: runtime?.providerKind,
+    entrypointKind: runtime?.entrypointKind,
   });
 }
 
@@ -707,8 +758,8 @@ async function runSafeValidationChecks(
   return results;
 }
 
-function supervisorPaths(workspace: string, options: { state?: string; artifacts?: string; log?: string }): { stateRoot: string; artifactRoot: string; logPath: string } {
-  const base = path.join(process.env.HOME ?? ".", ".brain", "workspaces", workspace);
+function supervisorPaths(workspace: string, options: { state?: string; artifacts?: string; log?: string; workspacePath?: string }): { stateRoot: string; artifactRoot: string; logPath: string } {
+  const base = path.resolve(options.workspacePath ?? path.join(process.env.HOME ?? ".", ".brain", "workspaces", workspace));
   const stateRoot = path.resolve(options.state ?? path.join(base, "state"));
   return {
     stateRoot,
@@ -717,8 +768,60 @@ function supervisorPaths(workspace: string, options: { state?: string; artifacts
   };
 }
 
-function createCliProvider(options: SupervisorRunCommandOptions): ProviderAdapter {
-  const provider = (options.provider ?? "fake").toLowerCase();
+function resolveSupervisorRuntime(config: BrainConfig, options: Pick<SupervisorRunCommandOptions, "workspace" | "config" | "provider" | "entrypoint" | "fake" | "fakeText">): ResolvedSupervisorRuntimeResult {
+  const workspace = config.workspaces[options.workspace];
+  if (!workspace) return { ok: false, summary: `workspace not found: ${options.workspace}`, details: { available: Object.keys(config.workspaces) } };
+  const primaryEntrypoint = workspace.enabledEntrypoints[workspace.primaryEntrypointId];
+  if (!primaryEntrypoint) return { ok: false, summary: `primary entrypoint not found: ${workspace.primaryEntrypointId}`, details: { workspace: options.workspace } };
+
+  if (options.fake && ((options.provider && options.provider.toLowerCase() !== "fake") || (options.entrypoint && options.entrypoint.toLowerCase() !== "fake"))) {
+    return { ok: false, summary: "--fake cannot be combined with non-fake --provider or --entrypoint", details: { provider: options.provider, entrypoint: options.entrypoint } };
+  }
+
+  let providerKind: string;
+  let entrypointKind: string;
+  try {
+    providerKind = normalizeProviderKind(options.fake ? "fake" : options.provider ?? workspace.provider ?? "fake");
+    entrypointKind = normalizeEntrypointKind(options.fake ? "fake" : options.entrypoint ?? primaryEntrypoint.kind ?? "fake");
+  } catch (error) {
+    return { ok: false, summary: "runtime selection invalid", details: { error: errorMessage(error), provider: options.provider ?? workspace.provider, entrypoint: options.entrypoint ?? primaryEntrypoint.kind } };
+  }
+  if (options.fakeText !== undefined && entrypointKind !== "fake") {
+    return { ok: false, summary: "--fake-text requires --fake or --entrypoint fake", details: { entrypoint: entrypointKind, source: options.entrypoint ? "cli" : "config" } };
+  }
+
+  return {
+    ok: true,
+    summary: "runtime selection resolved",
+    runtime: {
+      workspaceId: options.workspace,
+      workspace,
+      primaryEntrypointId: workspace.primaryEntrypointId,
+      primaryEntrypoint,
+      providerKind,
+      providerSource: options.fake ? "fake-flag" : options.provider ? "cli" : workspace.provider ? "config" : "fallback",
+      entrypointKind,
+      entrypointSource: options.fake ? "fake-flag" : options.entrypoint ? "cli" : primaryEntrypoint.kind ? "config" : "fallback",
+      configPath: path.resolve(options.config),
+    },
+  };
+}
+
+function normalizeProviderKind(provider: string): string {
+  const normalized = provider.toLowerCase();
+  if (normalized === "claude") return "claude-code";
+  if (["fake", "echo", "codex", "claude-code"].includes(normalized)) return normalized;
+  throw new Error(`unknown provider: ${provider}`);
+}
+
+function normalizeEntrypointKind(entrypoint: string): string {
+  const normalized = entrypoint.toLowerCase();
+  if (["fake", "telegram"].includes(normalized)) return normalized;
+  throw new Error(`unknown entrypoint: ${entrypoint}`);
+}
+
+function createCliProvider(providerKind: string, options: SupervisorRunCommandOptions): ProviderAdapter {
+  const provider = providerKind.toLowerCase();
   if (provider === "fake") return new FakeProviderAdapter();
   if (provider === "echo") return new EchoProviderAdapter();
   if (provider === "codex") return createCodexProvider({
@@ -728,26 +831,47 @@ function createCliProvider(options: SupervisorRunCommandOptions): ProviderAdapte
     appServerUrl: options.appServerUrl,
   });
   if (provider === "claude-code" || provider === "claude") return createClaudeCodeProvider({ transport: (options.transport as ClaudeCodeTransportKind | undefined) ?? "stub" });
-  throw new Error(`unknown provider: ${options.provider}`);
+  throw new Error(`unknown provider: ${providerKind}`);
 }
 
-async function createCliEntrypoint(workspaceId: string, primaryEntrypointId: string, options: SupervisorRunCommandOptions, paths: { stateRoot: string }): Promise<FakeEntrypointAdapter | TelegramEntrypointAdapter> {
-  const kind = (options.entrypoint ?? "fake").toLowerCase();
+function createCliSubagentExecutor(selection: ResolvedSupervisorRuntime, provider: ProviderAdapter): SubagentExecutor {
+  if (selection.providerKind === "fake") {
+    return new StaticSubagentExecutor({ id: "brainctl-static", outputText: "Static subagent completed." });
+  }
+  return new ProviderSubagentExecutor({
+    provider,
+    workspaceId: selection.workspaceId,
+    entrypointId: selection.primaryEntrypointId,
+    entrypointDisplayName: selection.primaryEntrypoint.displayName ?? selection.primaryEntrypointId,
+    sessionMetadata: {
+      source: "brainctl-supervisor",
+      primaryEntrypointId: selection.primaryEntrypointId,
+    },
+  });
+}
+
+function subagentExecutorIdFor(selection: ResolvedSupervisorRuntime): string {
+  return selection.providerKind === "fake" ? "brainctl-static" : `provider:${selection.providerKind}`;
+}
+
+async function createCliEntrypoint(selection: ResolvedSupervisorRuntime, options: SupervisorRunCommandOptions, paths: { stateRoot: string }): Promise<FakeEntrypointAdapter | TelegramEntrypointAdapter> {
+  const kind = selection.entrypointKind;
   if (kind === "fake") {
-    const entrypoint = new FakeEntrypointAdapter({ workspaceId, entrypointId: primaryEntrypointId, channelKind: "fake", displayName: "Brainctl fake entrypoint" });
+    const entrypoint = new FakeEntrypointAdapter({ workspaceId: selection.workspaceId, entrypointId: selection.primaryEntrypointId, channelKind: "fake", displayName: "Brainctl fake entrypoint" });
     if (options.fakeText !== undefined) entrypoint.enqueueText(options.fakeText, { conversationId: "brainctl-run" });
     if (options.once) entrypoint.close();
     return entrypoint;
   }
-  if (kind !== "telegram") throw new Error(`unknown entrypoint: ${options.entrypoint}`);
+  if (kind !== "telegram") throw new Error(`unknown entrypoint: ${selection.entrypointKind}`);
   const downloadDir = path.resolve(options.telegramDownloadDir ?? path.join(paths.stateRoot, "..", "artifacts", "telegram-downloads"));
   const apiClient = options.telegramPolling
     ? await TelegramBotApiClient.fromTokenRef({ tokenEnv: options.telegramTokenEnv, tokenFile: options.telegramTokenFile, required: true, downloadDir: options.telegramDownloads || options.telegramDownloadDir ? downloadDir : undefined })
     : undefined;
   const pairingState = options.telegramPairingState ? path.resolve(options.telegramPairingState) : path.join(paths.stateRoot, "telegram-pairing");
   return new TelegramEntrypointAdapter({
-    workspaceId,
-    entrypointId: primaryEntrypointId,
+    workspaceId: selection.workspaceId,
+    entrypointId: selection.primaryEntrypointId,
+    displayName: selection.primaryEntrypoint.displayName,
     apiClient,
     polling: options.telegramPolling ? {
       enabled: true,

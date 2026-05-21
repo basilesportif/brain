@@ -1,8 +1,8 @@
-# Deployment skeleton
+# Deployment planning
 
 No live deployment is executed by this repository by default. Brain now includes non-mutating operations seams that render the commands and unit files an operator can review before installing anything.
 
-Future deployment docs should define:
+Deployment docs and private notes should define:
 
 - Supported self-host target OS and prerequisites.
 - Local SSH config conventions for remote setup.
@@ -30,7 +30,11 @@ The repository now has CLI seams for deployment automation, but they remain non-
 - `brainctl health` inspects config/state/log readiness without starting live providers or Telegram.
 - `brainctl logs` tails Brain JSONL logs with redaction.
 - `brainctl operations plan` renders preflight, update, restart, rollback, and post-update smoke command lists.
-- `brainctl operations systemd` renders a systemd unit with explicit state/log/artifact paths. It does not write `/etc/systemd/system`, call `systemctl`, or restart anything.
+- `brainctl operations systemd` renders a systemd unit with explicit config,
+  workspace, provider, entrypoint, state/log/artifact paths. It resolves the
+  provider and primary entrypoint from runtime config, so a config declaring
+  Telegram + Codex renders Telegram + Codex rather than fake. It does not write
+  `/etc/systemd/system`, call `systemctl`, or restart anything.
 - `brainctl validate live` renders a guarded Telegram/Codex readiness plan. `--run-safe` executes only no-network/no-secret checks by default.
 - Runtime chat commands such as `update`, `deploy`, and `agent backend` are recognized by the supervisor command interceptor, but they only return safe status text in this parity slice. They do not pull git, rebuild, restart systemd, or mutate crontabs.
 - Runtime `employees` and `employee status/start/stop/steer` commands update durable lifecycle records only; they do not start a real Employee app-server process.

@@ -55,7 +55,7 @@ test("brainctl start, run, health, and logs expose safe supervisor seams", async
     assert.match(startJson.summary, /dry run/);
     assert.equal(startJson.details.deployment, "not performed");
 
-    const run = spawnBrainctl(["run", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--once", "--fake-text", "agents", "--state", state, "--artifacts", artifacts, "--log", log]);
+    const run = spawnBrainctl(["run", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--fake", "--once", "--fake-text", "agents", "--state", state, "--artifacts", artifacts, "--log", log]);
     assert.equal(run.status, 0, run.stderr);
     const runJson = JSON.parse(run.stdout) as { ok: boolean; details: { processed: number; interceptedCommands: string[]; logPath: string } };
     assert.equal(runJson.ok, true);
@@ -119,6 +119,48 @@ test("brainctl operations and live validation commands are non-mutating by defau
   }
 });
 
+test("brainctl run/start/operations resolve Telegram and Codex from runtime config", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-config-runtime-"));
+  try {
+    const state = path.join(root, "state");
+    const artifacts = path.join(root, "artifacts");
+    const log = path.join(root, "runtime.jsonl");
+
+    const start = spawnBrainctl(["start", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--state", state, "--artifacts", artifacts, "--log", log]);
+    assert.equal(start.status, 0, start.stderr);
+    const startJson = JSON.parse(start.stdout) as { ok: boolean; details: { provider: string; providerSource: string; entrypoint: string; entrypointSource: string; subagentExecutor: string } };
+    assert.equal(startJson.ok, true);
+    assert.equal(startJson.details.provider, "codex");
+    assert.equal(startJson.details.providerSource, "config");
+    assert.equal(startJson.details.entrypoint, "telegram");
+    assert.equal(startJson.details.entrypointSource, "config");
+    assert.equal(startJson.details.subagentExecutor, "provider:codex");
+
+    const run = spawnBrainctl(["run", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--once", "--state", state, "--artifacts", artifacts, "--log", log]);
+    assert.equal(run.status, 0, run.stderr);
+    const runJson = JSON.parse(run.stdout) as { ok: boolean; details: { providerKind: string; providerSource: string; entrypointKind: string; entrypointSource: string; subagentExecutor: string; processed: number; stoppedReason: string } };
+    assert.equal(runJson.ok, true);
+    assert.equal(runJson.details.providerKind, "codex");
+    assert.equal(runJson.details.providerSource, "config");
+    assert.equal(runJson.details.entrypointKind, "telegram");
+    assert.equal(runJson.details.entrypointSource, "config");
+    assert.equal(runJson.details.subagentExecutor, "provider:codex");
+    assert.equal(runJson.details.processed, 0);
+    assert.equal(runJson.details.stoppedReason, "entrypoint-closed");
+
+    const systemd = spawnBrainctl(["operations", "systemd", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--repo", repoRoot, "--state", state, "--artifacts", artifacts, "--log", log]);
+    assert.equal(systemd.status, 0, systemd.stderr);
+    const systemdJson = JSON.parse(systemd.stdout) as { ok: boolean; details: { unit: string; sideEffects: string } };
+    assert.equal(systemdJson.ok, true);
+    assert.match(systemdJson.details.unit, /--config .*runtime\.yaml --workspace personal/);
+    assert.match(systemdJson.details.unit, /--entrypoint telegram --provider codex/);
+    assert.doesNotMatch(systemdJson.details.unit, /--entrypoint fake|--provider fake/);
+    assert.equal(systemdJson.details.sideEffects, "none");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("brainctl status, provider smoke, automation monitor, and web wrappers are safe and testable", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brainctl-parity-"));
   try {
@@ -140,7 +182,7 @@ test("brainctl status, provider smoke, automation monitor, and web wrappers are 
     assert.equal(providerJson.details.taskStarted, true);
     assert.ok(providerJson.details.eventTypes.includes("final"));
 
-    const employeeRun = spawnBrainctl(["run", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--once", "--fake-text", "employee start analyst", "--employee-runtime", "--state", state, "--artifacts", artifacts, "--log", log]);
+    const employeeRun = spawnBrainctl(["run", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--fake", "--once", "--fake-text", "employee start analyst", "--employee-runtime", "--state", state, "--artifacts", artifacts, "--log", log]);
     assert.equal(employeeRun.status, 0, employeeRun.stderr);
     const employeeJson = JSON.parse(employeeRun.stdout) as { ok: boolean; details: { interceptedCommands: string[]; dispatchResults: Array<{ type: string }> } };
     assert.equal(employeeJson.ok, true);

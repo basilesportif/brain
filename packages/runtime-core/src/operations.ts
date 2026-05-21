@@ -12,6 +12,8 @@ export interface OperationsPlanInput {
   nodeBinary?: string;
   pnpmBinary?: string;
   environmentFile?: string;
+  providerKind?: string;
+  entrypointKind?: string;
 }
 
 export interface OperationsPlan {
@@ -25,6 +27,9 @@ export interface OperationsPlan {
   logPath: string;
   unitPath: string;
   environmentFile: string;
+  providerKind?: string;
+  entrypointKind?: string;
+  runtimeCommand: string[];
   commands: {
     preflight: string[];
     update: string[];
@@ -46,6 +51,21 @@ export function createOperationsPlan(input: OperationsPlanInput): OperationsPlan
   const environmentFile = path.resolve(input.environmentFile ?? path.join(path.dirname(stateRoot), "config", `${serviceName}.env`));
   const pnpm = shellWord(input.pnpmBinary ?? "pnpm");
   const brainctl = `${pnpm} --dir ${shellWord(repoPath)} run brainctl --`;
+  const runtimeCommand = [
+    "run",
+    "--config",
+    configPath,
+    "--workspace",
+    input.workspaceId,
+    ...(input.entrypointKind ? ["--entrypoint", input.entrypointKind] : []),
+    ...(input.providerKind ? ["--provider", input.providerKind] : []),
+    "--state",
+    stateRoot,
+    "--artifacts",
+    artifactRoot,
+    "--log",
+    logPath,
+  ];
 
   return {
     workspaceId: input.workspaceId,
@@ -58,6 +78,9 @@ export function createOperationsPlan(input: OperationsPlanInput): OperationsPlan
     logPath,
     unitPath: `/etc/systemd/system/${serviceName}.service`,
     environmentFile,
+    providerKind: input.providerKind,
+    entrypointKind: input.entrypointKind,
+    runtimeCommand,
     commands: {
       preflight: [
         `${brainctl} config validate ${shellWord(configPath)}`,
@@ -100,17 +123,7 @@ export function renderSystemdService(plan: OperationsPlan): string {
     "run",
     "brainctl",
     "--",
-    "run",
-    "--config",
-    plan.configPath,
-    "--workspace",
-    plan.workspaceId,
-    "--state",
-    plan.stateRoot,
-    "--artifacts",
-    plan.artifactRoot,
-    "--log",
-    plan.logPath,
+    ...plan.runtimeCommand,
   ].map(systemdEscapeArg).join(" ");
 
   return [

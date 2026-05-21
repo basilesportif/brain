@@ -41,7 +41,7 @@ Legend:
 - [x] Token loading supports literal/env/file refs with redacted metadata checks.
 - [x] Polling offset persistence stores only Telegram provider-native update offsets.
 - [x] Webhook skeleton validates Telegram secret-token headers.
-- [~] Live polling/webhook can be assembled through adapter seams, and `brainctl run/start --foreground` can now host the runtime supervisor with explicit Telegram polling flags; systemd/live cutover validation remains pending.
+- [~] Live polling/webhook can be assembled through adapter seams, and `brainctl run/start --foreground` now resolves Telegram from runtime config by default with explicit Telegram polling flags for live mode; live cutover validation remains pending.
 - [x] Voice/audio/video attachment download, upload boundaries, and injectable transcription seams exist; provider-specific OpenAI transcription keys/prompts remain private runtime configuration, not repo code.
 - [~] Pairing/admin bootstrap flow has adapter-owned one-time `/pair <code>` state and paired user/chat allowlist support; operator UX/live Telegram validation remains pending.
 - [~] Supervisor command intercepts exist for `logs`, `agents`, `agent status/kill/steer`, `employee*`, `health`, and deploy/update safe seams; full live queueing plus timeout/restart notifications remain pending.
@@ -77,7 +77,7 @@ Legend:
 - [x] Provider-backed subagent executor runs child work through provider abstraction with artifact dirs and image attachments.
 - [x] Runtime dispatches subagents from directives and records job IDs.
 - [x] Runtime now consumes normalized cancel/steer directives through the lifecycle control port.
-- [~] Static and provider-backed executors are covered by tests; full `codex-chat` child process backend parity is represented by provider-backed Codex exec/app-server seams rather than copied child-backend code.
+- [x] Static and provider-backed executors are covered by tests; `brainctl run/start` now wire provider-backed subagents for non-fake supervisor runtimes while keeping static subagents for explicit fake/test paths.
 - [x] Result routes (`return_to_main`, `send_to_user`, `send_progress_and_return`, `send_to_admins`, `store_only`, `silent`) are modeled and supervisor delivery exists for completed child results without adding persistent turn replay.
 - [x] Subagent terminal delivery includes failure text and last-message/artifact forwarding for user/admin result routes.
 - [~] Telegram/CLI command intercept parity exists for `agents`, `agent status`, `agent kill`, and `agent steer`; backend switching is a safe acknowledged seam and rich formatting remains partial.
@@ -113,7 +113,7 @@ Legend:
 - [x] Docs define self-host, deployment, runtime config, testing, provider, web publisher, and private-boundary principles.
 - [x] `brainctl doctor`, `setup`, `start`, `run`, `health`, `status`, `logs`, `config validate`, `secrets check`, `pack validate`, `provider check/smoke`, `entrypoint check`, `runtime status`, `runtime smoke`, `directives check`, `automation`, `operations`, and `web` checks exist.
 - [~] `doctor` validates config, pack, private boundaries, toolchain, and a temporary subagent lifecycle self-test.
-- [~] Long-running supervisor shape exists via `brainctl run` and `brainctl start --foreground`; `brainctl start` defaults to a dry-run plan. Full service/systemd equivalence remains pending.
+- [x] Long-running supervisor shape exists via `brainctl run` and `brainctl start --foreground`; `brainctl start` defaults to a dry-run plan, and operations/systemd rendering uses the same config-driven provider/entrypoint selection.
 - [~] `brainctl health` CLI inspects config/state/log readiness and supervisor health is available in-process; no HTTP endpoint or full live auth matrix yet.
 - [x] Non-mutating operations seams render systemd service units plus preflight/update/restart/rollback/post-update smoke command plans and deployment path metadata through `brainctl operations plan/systemd/validate`.
 - [~] Supervisor JSONL logs, `brainctl logs`, chat `logs`/`introspect`, and deploy/update safe command seams exist; installing/uninstalling systemd units and executing update/rollback remain pending by design.
@@ -121,7 +121,7 @@ Legend:
 ### 9. Fresh-server setup
 
 - [x] Docs and assistant-pack skill describe local/remote setup questions, private workspace directories, server prerequisites, provider choice, Telegram bootstrap, secret metadata checks, and no-secrets summaries.
-- [~] `brainctl setup` creates local private directory scaffolding only.
+- [~] `brainctl setup` creates local private directory scaffolding; top-level `setup/AGENTS.md`/`CLAUDE.md` now guide local/remote setup through prerequisites, private config/secrets placeholders, provider/Telegram metadata, and validation before any live deploy.
 - [~] Fresh Ubuntu bootstrap automation remains partial: systemd templates and service env metadata/smoke planning exist, but remote bootstrap, reverse-proxy/webhook guidance, and remote smoke execution remain pending.
 
 ### 10. Migration and smoke tests
@@ -181,3 +181,33 @@ Self-audit after this pass: **PARTIAL parity, not full parity**. The replacement
 - Updated docs and tests for Telegram download/transcription, provider smoke, automation fake execution, web publishing, operations validation, status, and provider-backed Employees.
 
 Self-audit after this pass: **DEPLOYABLE FEATURE-PARITY SURFACE: YES; LIVE-CUTOVER VALIDATED: NO**. Brain now contains practical seams/classes of behavior for Telegram runtime, Codex provider turns, subagents, Employees, loops/monitors, ops, workspace packs, generated pages, and safe smoke tests without copying secrets or adding a persistent turn replay store. The remaining work is live deployment validation and environment-specific wiring, not missing repo-level product surface.
+
+## Implemented in this pass (config-driven runtime/setup blocker closeout)
+
+- Changed `brainctl start` and `brainctl run` so provider and entrypoint default
+  to the selected workspace runtime config. Example config now resolves to
+  Telegram + Codex instead of silently falling back to fake; `--fake` and
+  explicit `--provider fake --entrypoint fake` remain available for tests/dev.
+- Changed operations planning/systemd rendering to include the same
+  config-driven runtime command, including config path, workspace, state,
+  artifacts, logs, and resolved `--entrypoint telegram --provider codex` flags.
+- Wired provider-backed subagent execution into non-fake supervisor runtimes;
+  static subagents remain only for explicit fake/test supervisor paths and
+  local fake automation/doctor harnesses.
+- Added top-level `setup/AGENTS.md` plus `setup/CLAUDE.md` symlink with a
+  concise local/remote setup flow: collect minimal target details, validate a
+  dedicated Brain user/server prerequisites, clone/pull, prepare private config
+  and secrets placeholders outside git, configure Codex-first provider metadata,
+  configure Telegram token/pairing/admin metadata, run `brainctl` validations,
+  and stop before live deploy unless the user confirms.
+- Updated setup/brainctl/deployment/self-hosting/runtime docs that still
+  described the runtime as future or skeleton-only.
+- Added regression coverage that config-driven `brainctl start`, `run`, and
+  `operations systemd` resolve Telegram + Codex and provider-backed subagents.
+
+Remaining blockers after this pass:
+
+- Live Telegram/Codex deployment is still not validated in this repo; it needs a
+  guarded environment-specific live pass with real private credentials.
+- No real Claude Code wiring and no persistent turn replay/idempotency store
+  were added, by design.

@@ -1,6 +1,6 @@
 # brainctl
 
-`brainctl` is the operator CLI for Brain. It remains validation-first and safe by default: it prepares private workspace directories, checks config/assistant-pack hygiene, can run a foreground fake/no-network supervisor, and renders deployment plans without installing services, contacting Telegram, deploying, or writing secrets unless explicit live flags are supplied.
+`brainctl` is the operator CLI for Brain. It remains validation-first and safe by default: it prepares private workspace directories, checks config/assistant-pack hygiene, resolves supervisor provider/entrypoint defaults from runtime config, keeps explicit fake/no-network smoke flags for tests, and renders deployment plans without installing services, contacting Telegram, deploying, or writing secrets unless explicit live flags are supplied.
 
 ## Commands
 
@@ -16,7 +16,7 @@ pnpm run brainctl -- provider check codex --transport app-server --app-server-ur
 pnpm run brainctl -- provider check claude-code --transport stub
 pnpm run brainctl -- entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN --polling-state ~/.brain/workspaces/personal/state/telegram-offset.json
 pnpm run brainctl -- start --config examples/config/runtime.yaml --workspace personal
-pnpm run brainctl -- run --config examples/config/runtime.yaml --workspace personal --once --fake-text help
+pnpm run brainctl -- run --config examples/config/runtime.yaml --workspace personal --fake --once --fake-text help
 pnpm run brainctl -- health --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl -- status --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl -- logs --file ~/.brain/workspaces/personal/logs/runtime.jsonl --lines 100
@@ -46,10 +46,10 @@ pnpm run brainctl -- web prune --dry-run
 pnpm run brainctl -- start --config examples/config/runtime.yaml --workspace personal
 
 # Foreground fake-entrypoint/fake-provider smoke through the supervisor and command intercepts.
-pnpm run brainctl -- run --config examples/config/runtime.yaml --workspace personal --once --fake-text "help"
+pnpm run brainctl -- run --config examples/config/runtime.yaml --workspace personal --fake --once --fake-text "help"
 
-# Optional provider-backed Employee sessions (uses selected provider; keep fake/stub unless live is intended).
-pnpm run brainctl -- run --config examples/config/runtime.yaml --workspace personal --employee-runtime --provider fake
+# Optional provider-backed Employee sessions (uses selected provider from config unless overridden).
+pnpm run brainctl -- run --config examples/config/runtime.yaml --workspace personal --employee-runtime
 
 # Inspect state/log readiness without live processes.
 pnpm run brainctl -- health --config examples/config/runtime.yaml --workspace personal
@@ -58,7 +58,7 @@ pnpm run brainctl -- health --config examples/config/runtime.yaml --workspace pe
 pnpm run brainctl -- logs --file ~/.brain/workspaces/personal/logs/runtime.jsonl --lines 100
 ```
 
-`start` defaults to a dry-run plan. Use `start --foreground` or `run` to enter the foreground supervisor. The default provider and entrypoint are `fake`, so the command is safe in CI and fresh checkouts. Explicit live Telegram polling requires `--entrypoint telegram --telegram-polling` plus `--telegram-token-env` or `--telegram-token-file`; polling offsets remain Telegram-native state only. Attachment download and voice/audio/video transcription are opt-in with `--telegram-downloads`, `--telegram-download-dir`, and a private `--telegram-transcription-command` seam; no transcription provider keys belong in the repo.
+`start` defaults to a dry-run plan. Use `start --foreground` or `run` to enter the foreground supervisor. Provider and entrypoint default to the selected workspace's runtime config; pass `--fake` or explicit `--provider fake --entrypoint fake` for CI/fresh-checkout smoke. Explicit live Telegram polling requires `--entrypoint telegram --telegram-polling` plus `--telegram-token-env` or `--telegram-token-file`; polling offsets remain Telegram-native state only. Attachment download and voice/audio/video transcription are opt-in with `--telegram-downloads`, `--telegram-download-dir`, and a private `--telegram-transcription-command` seam; no transcription provider keys belong in the repo.
 
 The supervisor intercepts service commands before provider turns when configured: `help`, `health`, `logs`/`introspect`, `agents`, `agent status`, `agent kill`, `agent steer`, `agent backend`, `employees`, `employee status/start/stop/steer`, and `update`/`deploy`. Backend mutation and deploy/update remain safe seams only. Employee commands update durable lifecycle records; pass `--employee-runtime` when running the supervisor to back Employee start/steer/stop with the selected provider session.
 
@@ -97,7 +97,7 @@ pnpm run brainctl -- validate live --config examples/config/runtime.yaml --works
 - `provider check` instantiates provider adapters and reports health without sending a real user task. Codex `app-server` checks can point at an existing WebSocket URL or, when a binary is supplied, exercise the provider-owned app-server protocol startup path.
 - `provider smoke` runs a single provider turn; non-stub transports require `--allow-live`.
 - `entrypoint check` instantiates entrypoint adapters without requiring live credentials. Optional Telegram token and polling-state flags report only redacted token metadata and durable offset metadata.
-- `start` prints a dry-run supervisor start plan by default. `start --foreground` and `run` enter the foreground supervisor; fake provider/entrypoint defaults avoid live side effects.
+- `start` prints a dry-run supervisor start plan by default. `start --foreground` and `run` enter the foreground supervisor; provider/entrypoint default to runtime config, and `--fake` keeps explicit test/dev smoke side effects local.
 - `health` inspects config, state, and log readiness without starting live processes.
 - `status` combines health, runtime state/log metadata, and operations preflight readiness without starting live processes.
 - `logs` tails supervisor JSONL logs with conservative redaction of token/key-like fields.
@@ -111,4 +111,4 @@ pnpm run brainctl -- validate live --config examples/config/runtime.yaml --works
 - `web` commands validate/publish/prune generated static page packages through the publisher boundary; publish/prune support `--dry-run`.
 - `doctor` combines the checks above with toolchain and private-boundary placeholder checks.
 
-The CLI is the place future setup, health, runtime, migration, and publisher commands should attach instead of making entrypoint or provider packages own operator workflows.
+The CLI is the place setup, health, runtime, migration, and publisher commands should attach instead of making entrypoint or provider packages own operator workflows.

@@ -11,9 +11,10 @@ Claude Code should follow the same repository instructions as Codex:
   remote Ubuntu server over SSH. For remote setup, use the assistant-agent-logic
   setup-server skill to prepare a dedicated service user before Brain-specific
   config.
-- Keep setup provider-agnostic: Codex provider/app-server or Claude Code
-  SDK/subagents. Bootstrap Telegram first, and do not require Composio or other
-  optional integrations for initial setup.
+- Keep setup provider-agnostic where possible, with Codex as the first live
+  provider path. Record Claude Code only as a placeholder until real wiring is
+  intentionally added. Bootstrap Telegram first, and do not require Composio or
+  other optional integrations for initial setup.
 - Keep private workspace data, env files, credentials, generated artifacts,
   logs, chat transcripts, Telegram IDs, hostnames, and repo-registry state out
   of source control.

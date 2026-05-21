@@ -1,8 +1,8 @@
 # brain
 
-`brain` is a new local skeleton monorepo for consolidating a self-hosted assistant runtime, entrypoint adapters, web shell, reusable assistant logic, and self-host setup guidance.
+`brain` is a local monorepo for consolidating a self-hosted assistant runtime, entrypoint adapters, web shell, reusable assistant logic, and self-host setup guidance.
 
-Status: **safe parity scaffold**. Runtime, entrypoint, provider, supervisor, operations, and web-publisher seams exist for no-network validation, but no private assistant data, secrets, logs, generated artifacts, or real deployment state has been copied here.
+Status: **safe parity surface**. Runtime, entrypoint, provider, supervisor, operations, and web-publisher seams exist for no-network validation and reviewed setup/deployment planning, but no private assistant data, secrets, logs, generated artifacts, or real deployment state has been copied here.
 
 ## Intended layout
 
@@ -22,12 +22,12 @@ workspace/, private/, data/  User-owned/private boundaries; ignored except READM
 pnpm run check
 ```
 
-The check currently validates that the skeleton structure exists, that runtime config examples are present, that private boundary directories contain only their README placeholders, and that provider/entrypoint/automation seams pass unit tests.
+The check validates that the repo structure exists, runtime config examples are present, private boundary directories contain only their README placeholders, and provider/entrypoint/automation seams pass unit tests.
 
 
 ## brainctl
 
-`brainctl` is the operator CLI for Brain. It validates runtime config, assistant-pack manifests, private-boundary hygiene, provider/entrypoint health seams, automation definitions, secret reference metadata, foreground fake supervisor smoke, non-mutating operations plans, and guarded live-readiness plans without deploying services or printing secret values. See `docs/brainctl.md`.
+`brainctl` is the operator CLI for Brain. It validates runtime config, assistant-pack manifests, private-boundary hygiene, provider/entrypoint health seams, automation definitions, secret reference metadata, config-driven supervisor plans, explicit fake smoke paths, non-mutating operations plans, and guarded live-readiness plans without deploying services or printing secret values. See `docs/brainctl.md`.
 
 ```bash
 pnpm run build
