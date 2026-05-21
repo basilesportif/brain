@@ -15,3 +15,16 @@ This is an entrypoint adapter into the system, not the core runtime. Do not port
 The first migration should register Telegram as the single primary active entrypoint for the workspace, for example `telegram-main` in `enabledEntrypoints` with `enabled: true` and `primaryEntrypointId: telegram-main`.
 
 This adapter should preserve current Telegram behavior by translating chats, messages, threads, files, webhooks/polling, sends, edits, uploads, status updates, and failures into generic Brain protocol events/actions. Bot tokens, allowlists, webhook secrets, and raw Telegram IDs stay inside the adapter config or secret boundary.
+
+## Bootstrap minimum
+
+The setup flow should make Telegram usable enough for future configuration work:
+
+1. Store the BotFather token only in a private workspace secret file or host secret store.
+2. Configure `telegram-main` as the only enabled entrypoint in `single-primary` mode.
+3. Pair the initial admin by private user/chat ID or by a one-time pairing code the user sends to the bot.
+4. Prefer polling for first bootstrap because it only requires outbound HTTPS.
+5. Leave webhook URL, reverse proxy, TLS, generated pages, and additional integrations disabled unless the user explicitly enables them.
+6. After admin pairing, allow future integration setup commands to be received through Telegram.
+
+Composio and other optional integration tokens are not required for this bootstrap.
