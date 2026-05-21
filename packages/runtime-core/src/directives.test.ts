@@ -14,3 +14,22 @@ test("normalizes legacy codex-chat image directives to send_artifact", () => {
   assert.equal(result.errors.length, 0);
   assert.equal(result.blocks[0]?.actions[0]?.type, "send_artifact");
 });
+
+test("normalizes legacy codex-chat target and subagent control directives", () => {
+  const result = parseBrainDirectives(`\`\`\`codex-chat
+{"version":1,"actions":[
+  {"type":"send_text","chatId":123,"replyToMessageId":456,"text":"Hi","idempotencyKey":"txt"},
+  {"type":"cancel_job","jobId":"job_123","idempotencyKey":"cancel"},
+  {"type":"notify_owner","text":"Heads up","idempotencyKey":"notify"}
+]}\n\`\`\``);
+
+  assert.equal(result.errors.length, 0);
+  const [sendText, cancel, notify] = result.blocks[0]?.actions ?? [];
+  assert.equal(sendText?.type, "send_text");
+  assert.equal(sendText?.target?.conversationId, "123");
+  assert.equal(sendText?.target?.replyToExternalMessageId, "456");
+  assert.equal(cancel?.type, "cancel_subagent");
+  assert.equal(cancel?.type === "cancel_subagent" ? cancel.jobId : "", "job_123");
+  assert.equal(notify?.type, "send_text");
+  assert.equal(notify?.target?.route, "admins");
+});

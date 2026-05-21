@@ -25,6 +25,29 @@ test("routeOutboundToOrigin preserves generic origin routing metadata", () => {
   });
 });
 
+test("routeOutboundToOrigin fills missing origin fields on partial targets", () => {
+  const event: EntryPointInboundEvent = {
+    id: "evt_2",
+    kind: "message",
+    workspaceId: "personal",
+    entrypoint: { entrypointId: "telegram-main", channelKind: "telegram" },
+    conversation: { id: "chat_1", threadId: "topic_2", metadata: { messageId: "42" } },
+    receivedAt: "2026-05-21T00:00:00.000Z",
+  };
+
+  const action = routeOutboundToOrigin(event, { type: "react", emoji: "👀", target: { replyToExternalMessageId: "99" } });
+  assert.deepEqual(action.target, {
+    route: "originating-entrypoint",
+    entrypointId: "telegram-main",
+    conversationId: "chat_1",
+    threadId: "topic_2",
+    replyToExternalMessageId: "99",
+  });
+
+  const admins = routeOutboundToOrigin(event, { type: "send_text", text: "ops", target: { route: "admins" } });
+  assert.deepEqual(admins.target, { route: "admins" });
+});
+
 test("FakeEntrypointAdapter queues inbound events and records outbound dispatches", async () => {
   const entrypoint = new FakeEntrypointAdapter({
     workspaceId: "personal",

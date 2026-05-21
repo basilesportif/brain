@@ -66,6 +66,44 @@ test("BrainRuntime consumes dispatch_subagent actions through lifecycle port", a
   assert.equal((await store.get("job_runtime_1"))?.status, "completed");
 });
 
+test("BrainRuntime consumes legacy cancel_job directives through subagent control port", async () => {
+  const calls: Array<{ ref: string; reason?: string }> = [];
+  const runtime = new BrainRuntime({
+    workspaceId: "personal",
+    workspace: {
+      workspacePath: "/tmp/personal",
+      primaryEntrypointId: "telegram-main",
+      enabledEntrypoints: { "telegram-main": { kind: "telegram", enabled: true } },
+      outboundDefaults: { route: "originating-entrypoint", allowCrossEntrypointReplies: false },
+      promptContext: { includeActiveEntrypointMetadata: true, exposeChannelSecrets: false },
+    },
+    provider: new FakeProviderAdapter([{
+      type: "final",
+      text: '```codex-chat\n{"version":1,"actions":[{"type":"cancel_job","jobId":"job_cancel_me","idempotencyKey":"cancel-1"}]}\n```',
+    }]),
+    subagents: {
+      async dispatch() { throw new Error("not expected"); },
+      async requestCancel(ref, reason) {
+        calls.push({ ref, reason });
+        return { status: "success", ref, message: `cancelled ${ref}`, job: { id: ref, profile: "implementer", status: "cancelled" }, previousStatus: "running" } as never;
+      },
+    },
+  });
+
+  const result = await runtime.handleInboundEvent({
+    id: "evt_cancel",
+    kind: "message",
+    workspaceId: "personal",
+    entrypoint: { entrypointId: "telegram-main", channelKind: "telegram" },
+    text: "cancel that",
+    receivedAt: "2026-05-21T00:00:00.000Z",
+  });
+
+  assert.deepEqual(calls, [{ ref: "job_cancel_me", reason: "runtime directive" }]);
+  assert.equal(result.controlResults[0]?.status, "success");
+  assert.equal(result.actions.some((action) => action.type === "cancel_subagent"), false);
+});
+
 test("fake entrypoint smoke sends inbound event through runtime and dispatches outbound action", async () => {
   const entrypoint = new FakeEntrypointAdapter({
     workspaceId: "personal",

@@ -11,7 +11,7 @@
   },
   "scripts": {
     "build": "tsc -b tsconfig.build.json",
-    "check": "node scripts/check-skeleton.mjs && pnpm run build && node --test \"packages/*/dist/**/*.test.js\" \"packages/config/*/dist/**/*.test.js\" \"packages/providers/*/dist/**/*.test.js\" \"entrypoints/*/dist/**/*.test.js\" \"apps/*/dist/**/*.test.js\" && node dist/brainctl.js doctor --config examples/config/runtime.yaml --pack assistant-packs/core",
+    "check": "node scripts/check-skeleton.mjs && pnpm run build && node --test \"dist/**/*.test.js\" \"packages/*/dist/**/*.test.js\" \"packages/config/*/dist/**/*.test.js\" \"packages/providers/*/dist/**/*.test.js\" \"entrypoints/*/dist/**/*.test.js\" \"apps/*/dist/**/*.test.js\" && node dist/brainctl.js doctor --config examples/config/runtime.yaml --pack assistant-packs/core",
     "test": "pnpm run check",
     "brainctl": "node dist/brainctl.js"
   },
@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@brain/assistant-pack-schema": "workspace:*",
+    "@brain/entrypoint-protocol": "workspace:*",
     "@brain/entrypoint-telegram": "workspace:*",
     "@brain/provider-claude-code": "workspace:*",
     "@brain/provider-codex": "workspace:*",

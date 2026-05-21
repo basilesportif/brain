@@ -158,6 +158,18 @@ export interface DispatchSubagentAction extends BaseOutboundAction {
   images?: string[];
 }
 
+export interface CancelSubagentAction extends BaseOutboundAction {
+  type: "cancel_subagent";
+  jobId: string;
+  reason?: string;
+}
+
+export interface SteerSubagentAction extends BaseOutboundAction {
+  type: "steer_subagent";
+  jobId: string;
+  text: string;
+}
+
 export interface EnqueueMainAction extends BaseOutboundAction {
   type: "enqueue_main";
   text: string;
@@ -171,6 +183,8 @@ export type BrainOutboundAction =
   | ReactAction
   | EditMessageAction
   | DispatchSubagentAction
+  | CancelSubagentAction
+  | SteerSubagentAction
   | EnqueueMainAction;
 
 export interface OutboundDispatchResult {
@@ -349,10 +363,24 @@ export function originatingTarget(event: EntryPointInboundEvent): OutboundTarget
 }
 
 export function routeOutboundToOrigin(event: EntryPointInboundEvent, action: BrainOutboundAction): BrainOutboundAction {
+  const origin = originatingTarget(event);
   return {
     ...action,
     originatingEventId: action.originatingEventId ?? event.id,
     workspaceId: action.workspaceId ?? event.workspaceId,
-    target: action.target ?? originatingTarget(event),
+    target: action.target ? mergeTargetWithOrigin(action.target, origin) : origin,
+  };
+}
+
+function mergeTargetWithOrigin(target: OutboundTarget, origin: OutboundTarget): OutboundTarget {
+  const route = target.route ?? origin.route;
+  if (route === "admins" || route === "store-only" || route === "silent") return { ...target, route };
+  const useOriginConversation = route === "originating-entrypoint";
+  return {
+    route,
+    entrypointId: target.entrypointId ?? origin.entrypointId,
+    conversationId: target.conversationId ?? (useOriginConversation ? origin.conversationId : undefined),
+    threadId: target.threadId ?? (useOriginConversation ? origin.threadId : undefined),
+    replyToExternalMessageId: target.replyToExternalMessageId ?? (useOriginConversation ? origin.replyToExternalMessageId : undefined),
   };
 }

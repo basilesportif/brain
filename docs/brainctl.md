@@ -15,6 +15,8 @@ pnpm run brainctl -- provider check codex --transport app-server --app-server-ur
 pnpm run brainctl -- provider check claude-code --transport stub
 pnpm run brainctl -- entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN --polling-state ~/.brain/workspaces/personal/state/telegram-offset.json
 pnpm run brainctl -- runtime status --state ~/.brain/workspaces/personal/state
+pnpm run brainctl -- runtime smoke --config examples/config/runtime.yaml --workspace personal --text ping
+pnpm run brainctl -- directives check docs/brainctl.md
 pnpm run brainctl -- automation validate examples/config/automation.yaml
 pnpm run brainctl -- automation run daily-summary --file examples/config/automation.yaml
 pnpm run brainctl -- automation due --file examples/config/automation.yaml --now 2026-05-21T09:00:00.000Z
@@ -29,6 +31,8 @@ pnpm run brainctl -- automation due --file examples/config/automation.yaml --now
 - `provider check` instantiates provider adapters and reports health without sending a real user task. Codex `app-server` checks can point at an existing WebSocket URL or, when a binary is supplied, exercise the provider-owned app-server protocol startup path.
 - `entrypoint check` instantiates entrypoint adapters without requiring live credentials. Optional Telegram token and polling-state flags report only redacted token metadata and durable offset metadata.
 - `runtime status` initializes/reads job state and summarizes active jobs without starting providers or entrypoints.
+- `runtime smoke` runs a deterministic no-network path through a fake entrypoint, `BrainRuntime`, a fake provider, and outbound dispatch routing using workspace metadata from the runtime config.
+- `directives check` parses `brain-actions` and legacy `codex-chat` directive fences without executing anything. It reports normalized action counts, parse errors, and clean-text byte size.
 - `automation validate` validates loop/monitor definitions, cron expression shape, and no-host-scheduler status.
 - `automation run` and `automation due` evaluate loops without installing crontabs/watchers. They dry-run by default; `--dispatch` currently reports not-runnable unless a real runtime dispatch port is wired in a future command.
 - `doctor` combines the checks above with toolchain and private-boundary placeholder checks.

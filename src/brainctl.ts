@@ -9,8 +9,9 @@ import { Command } from "commander";
 import { parse as parseToml } from "smol-toml";
 import YAML from "yaml";
 import { validateAssistantPack } from "@brain/assistant-pack-schema";
+import { FakeEntrypointAdapter } from "@brain/entrypoint-protocol";
 import { validateWorkspaceConfig, type BrainConfig } from "@brain/workspace-schema";
-import { AutomationRuntime, FileSubagentJobStore, StaticSubagentExecutor, SubagentLifecycle } from "@brain/runtime-core";
+import { AutomationRuntime, BrainRuntime, FakeProviderAdapter, FileSubagentJobStore, RuntimeEntrypointBridge, StaticSubagentExecutor, SubagentLifecycle, parseBrainDirectives } from "@brain/runtime-core";
 import { FileTelegramPollingStateStore, TelegramEntrypointAdapter, loadTelegramToken } from "@brain/entrypoint-telegram";
 import { createCodexProvider, type CodexTransportKind } from "@brain/provider-codex";
 import { createClaudeCodeProvider, type ClaudeCodeTransportKind } from "@brain/provider-claude-code";
@@ -86,6 +87,18 @@ runtime.command("status")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--state <path>", "runtime state root", path.join(process.env.HOME ?? ".", ".brain", "workspaces", "personal", "state"))
   .action(async (options) => exitWith(await runtimeStatusCommand(options)));
+runtime.command("smoke")
+  .description("Run a no-network runtime smoke: fake entrypoint -> fake provider -> outbound dispatch.")
+  .option("--config <path>", "runtime YAML/TOML/JSON config to source workspace metadata from", "examples/config/runtime.yaml")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--text <text>", "inbound text for the fake turn", "ping")
+  .action(async (options) => exitWith(await runtimeSmokeCommand(options)));
+
+const directives = program.command("directives").description("Directive validation commands");
+directives.command("check")
+  .description("Parse Brain/codex-chat action blocks without executing them.")
+  .argument("[file]", "file to parse, or '-' for stdin", "-")
+  .action(async (file) => exitWith(await directivesCheckCommand(file)));
 
 const automation = program.command("automation").description("Loop and monitor validation commands");
 automation.command("validate")
@@ -151,6 +164,18 @@ async function configValidateCommand(file: string): Promise<CliResult> {
     ok: result.ok,
     summary: result.ok ? "runtime config valid" : "runtime config invalid",
     details: result.ok ? configSummary(result.config) : { issues: result.issues },
+  };
+}
+
+async function loadValidConfig(file: string): Promise<CliResult & { config?: BrainConfig }> {
+  const raw = await readFile(file, "utf8");
+  const parsed = parseConfigText(file, raw);
+  const result = validateWorkspaceConfig(parsed);
+  return {
+    ok: result.ok,
+    summary: result.ok ? "runtime config valid" : "runtime config invalid",
+    details: result.ok ? configSummary(result.config) : { issues: result.issues },
+    config: result.config,
   };
 }
 
@@ -258,6 +283,70 @@ async function runtimeStatusCommand(options: { workspace: string; state: string 
     ok: true,
     summary: jobs.length === 0 ? "runtime state is initialized with no jobs" : "runtime state inspected",
     details: { workspace: options.workspace, stateRoot: path.resolve(options.state), jobs: jobs.length, byStatus, active },
+  };
+}
+
+async function runtimeSmokeCommand(options: { config: string; workspace: string; text: string }): Promise<CliResult> {
+  const config = await loadValidConfig(options.config);
+  if (!config.ok || !config.config) return config;
+  const workspace = config.config.workspaces[options.workspace];
+  if (!workspace) {
+    return { ok: false, summary: `workspace not found: ${options.workspace}`, details: { available: Object.keys(config.config.workspaces) } };
+  }
+  const primary = workspace.enabledEntrypoints[workspace.primaryEntrypointId];
+  const entrypoint = new FakeEntrypointAdapter({
+    workspaceId: options.workspace,
+    entrypointId: workspace.primaryEntrypointId,
+    channelKind: primary?.kind ?? "fake",
+    displayName: primary?.displayName ?? workspace.primaryEntrypointId,
+    capabilities: primary?.capabilities,
+    now: () => new Date("2026-05-21T00:00:00.000Z"),
+  });
+  const runtime = new BrainRuntime({
+    workspaceId: options.workspace,
+    workspace,
+    provider: new FakeProviderAdapter(),
+  });
+  const bridge = new RuntimeEntrypointBridge({ runtime, entrypoint });
+  entrypoint.enqueueText(options.text, { conversationId: "brainctl-smoke" });
+  entrypoint.close();
+  const result = await bridge.run({ maxEvents: 1 });
+  const dispatched = entrypoint.dispatchedActions;
+  const ok = result.processed.length === 1 && dispatched.some((action) => action.type === "send_text");
+  return {
+    ok,
+    summary: ok ? "runtime smoke passed without network or provider credentials" : "runtime smoke failed",
+    details: {
+      workspace: options.workspace,
+      entrypointId: workspace.primaryEntrypointId,
+      provider: "fake",
+      processed: result.processed.length,
+      stoppedReason: result.stoppedReason,
+      dispatchedActions: dispatched.map((action) => ({ type: action.type, target: action.target })),
+      providerEvents: result.processed[0]?.turn.providerEvents.map((event) => event.type) ?? [],
+    },
+  };
+}
+
+async function directivesCheckCommand(file: string): Promise<CliResult> {
+  const raw = file === "-" ? await readStdin() : await readFile(file, "utf8");
+  const parsed = parseBrainDirectives(raw);
+  const actionCounts: Record<string, number> = {};
+  for (const block of parsed.blocks) {
+    for (const action of block.actions) actionCounts[action.type] = (actionCounts[action.type] ?? 0) + 1;
+  }
+  const actionTotal = Object.values(actionCounts).reduce((sum, count) => sum + count, 0);
+  return {
+    ok: parsed.errors.length === 0,
+    summary: parsed.errors.length === 0 ? "directive blocks valid" : "directive blocks contain errors",
+    details: {
+      file: file === "-" ? "stdin" : path.resolve(file),
+      blocks: parsed.blocks.length,
+      actions: actionTotal,
+      actionCounts,
+      cleanTextBytes: Buffer.byteLength(parsed.cleanText, "utf8"),
+      errors: parsed.errors,
+    },
   };
 }
 
@@ -393,6 +482,16 @@ function runVersion(command: string, args: string[]): string {
   const result = spawnSync(command, args, { encoding: "utf8" });
   if (result.error) return `unavailable: ${result.error.message}`;
   return (result.stdout || result.stderr).trim();
+}
+
+function readStdin(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let raw = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { raw += chunk; });
+    process.stdin.on("end", () => resolve(raw));
+    process.stdin.on("error", reject);
+  });
 }
 
 function exitWith(result: CliResult): void {

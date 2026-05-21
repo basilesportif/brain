@@ -12,4 +12,13 @@ Migration test layers:
 
 The first end-to-end runtime smoke is intentionally no-network: a fake inbound message is emitted by a fake entrypoint, processed by runtime-core through a fake provider, and dispatched back as a generic outbound action. Live Telegram and real provider credentials should only be tested after that path is green.
 
+Operator smoke checks now include:
+
+```bash
+pnpm run brainctl -- runtime smoke --config examples/config/runtime.yaml --workspace personal --text ping
+pnpm run brainctl -- directives check <file-or-stdin>
+```
+
+These checks are safe for fresh checkouts because they do not contact Telegram, do not invoke a real provider, do not deploy services, and do not execute parsed directive actions.
+
 Restart tests should not expect exact turn replay. Validate provider-native resume handles where an adapter supports them, and otherwise validate graceful degradation of active jobs/runtime state.

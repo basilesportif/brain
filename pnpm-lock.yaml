@@ -11,6 +11,9 @@ importers:
       '@brain/assistant-pack-schema':
         specifier: workspace:*
         version: link:packages/assistant-pack-schema
+      '@brain/entrypoint-protocol':
+        specifier: workspace:*
+        version: link:packages/entrypoint-protocol
       '@brain/entrypoint-telegram':
         specifier: workspace:*
         version: link:entrypoints/telegram

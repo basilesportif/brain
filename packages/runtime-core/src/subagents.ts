@@ -38,6 +38,11 @@ export interface SubagentDispatchPort {
   dispatch(input: SubagentDispatchInput): Promise<string>;
 }
 
+export interface SubagentControlPort extends SubagentDispatchPort {
+  requestCancel?(ref: string, reason?: string): Promise<CancelSubagentJobResult>;
+  steerJob?(ref: string, text: string): Promise<SteerSubagentJobResult>;
+}
+
 export interface SubagentRunResult {
   status?: Extract<SubagentJobStatus, "completed" | "failed" | "cancelled" | "timed_out">;
   outputText?: string;

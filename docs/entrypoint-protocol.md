@@ -35,4 +35,6 @@ Each workspace must identify one `primaryEntrypointId` by default. In `single-pr
 
 Inbound events should include generic active-entrypoint metadata: `entrypointId`, `channelKind`, display label, workspace ID, external conversation metadata, actor metadata, and correlation IDs. Prompt context may include this generic metadata and capability flags, but not adapter secrets or raw Telegram identifiers.
 
-Outbound actions without an explicit target should default to the originating inbound event's `entrypointId`. If the runtime cannot determine an originating entrypoint, dispatch should fail closed rather than guessing Telegram or any other channel.
+Outbound actions without an explicit target should default to the originating inbound event's `entrypointId`. Partial targets, such as a legacy reply/reaction that only specifies a message ID, should inherit the originating entrypoint conversation before dispatch. If the runtime cannot determine an originating entrypoint, dispatch should fail closed rather than guessing Telegram or any other channel.
+
+Some normalized actions, such as `dispatch_subagent`, `cancel_subagent`, and `steer_subagent`, are runtime control actions rather than external sends. Entrypoints should not execute those directly; `BrainRuntime` consumes them through the configured subagent lifecycle/control port and leaves user-visible acknowledgement to ordinary `send_text` actions.

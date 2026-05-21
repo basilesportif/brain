@@ -9,6 +9,11 @@ const targetSchema = z.object({
   threadId: z.string().min(1).optional(),
   replyToExternalMessageId: z.string().min(1).optional(),
 }).optional();
+const legacyTelegramIdSchema = z.union([z.number().int(), z.string().min(1)]).optional();
+const legacyTelegramTargetFields = {
+  chatId: legacyTelegramIdSchema,
+  replyToMessageId: legacyTelegramIdSchema,
+};
 const baseAction = z.object({
   id: z.string().min(1).optional(),
   idempotencyKey: z.string().min(1).optional(),
@@ -20,12 +25,14 @@ const baseAction = z.object({
 
 const sendTextAction = baseAction.extend({
   type: z.literal("send_text"),
+  ...legacyTelegramTargetFields,
   text: z.string().min(1),
   format: z.enum(["text", "markdown", "markdownv2"]).optional(),
 });
 
 const sendArtifactAction = baseAction.extend({
   type: z.literal("send_artifact"),
+  ...legacyTelegramTargetFields,
   path: z.string().min(1).optional(),
   uri: z.string().min(1).optional(),
   caption: z.string().optional(),
@@ -36,15 +43,17 @@ const sendArtifactAction = baseAction.extend({
 
 const legacySendImageAction = baseAction.extend({
   type: z.literal("send_image"),
+  ...legacyTelegramTargetFields,
   path: z.string().min(1).optional(),
   fileId: z.string().min(1).optional(),
   caption: z.string().optional(),
   asDocument: z.boolean().optional(),
   deleteAfterSend: z.boolean().optional(),
-});
+}).refine((value) => value.path || value.fileId, "send_image requires path or fileId");
 
 const legacySendDocumentAction = baseAction.extend({
   type: z.literal("send_document"),
+  ...legacyTelegramTargetFields,
   path: z.string().min(1),
   caption: z.string().optional(),
 });
@@ -57,13 +66,20 @@ const showStatusAction = baseAction.extend({
 
 const requestClarificationAction = baseAction.extend({
   type: z.literal("request_clarification"),
+  ...legacyTelegramTargetFields,
   text: z.string().min(1),
   choices: z.array(z.string().min(1)).optional(),
 });
 
-const reactAction = baseAction.extend({ type: z.literal("react"), emoji: z.string().min(1) });
+const reactAction = baseAction.extend({
+  type: z.literal("react"),
+  chatId: legacyTelegramIdSchema,
+  messageId: legacyTelegramIdSchema,
+  emoji: z.string().min(1),
+});
 const editMessageAction = baseAction.extend({
   type: z.literal("edit_message"),
+  ...legacyTelegramTargetFields,
   text: z.string().min(1),
   externalMessageId: z.string().min(1).optional(),
   format: z.enum(["text", "markdown", "markdownv2"]).optional(),
@@ -79,7 +95,25 @@ const dispatchSubagentAction = baseAction.extend({
   effort: z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]).optional(),
   images: z.array(z.string().min(1)).optional(),
 });
-const enqueueMainAction = baseAction.extend({ type: z.literal("enqueue_main"), text: z.string().min(1) });
+const legacyCancelJobAction = baseAction.extend({
+  type: z.literal("cancel_job"),
+  jobId: z.string().min(1),
+  reason: z.string().min(1).optional(),
+});
+const steerSubagentAction = baseAction.extend({
+  type: z.literal("steer_subagent"),
+  jobId: z.string().min(1),
+  text: z.string().min(1),
+});
+const notifyOwnerAction = baseAction.extend({
+  type: z.literal("notify_owner"),
+  text: z.string().min(1),
+});
+const enqueueMainAction = baseAction.extend({
+  type: z.literal("enqueue_main"),
+  text: z.string().min(1),
+  route: routeSchema.optional(),
+});
 
 const rawActionSchema = z.discriminatedUnion("type", [
   sendTextAction,
@@ -91,6 +125,9 @@ const rawActionSchema = z.discriminatedUnion("type", [
   reactAction,
   editMessageAction,
   dispatchSubagentAction,
+  legacyCancelJobAction,
+  steerSubagentAction,
+  notifyOwnerAction,
   enqueueMainAction,
 ]);
 
@@ -145,17 +182,39 @@ export function parseBrainDirectives(text: string): DirectiveParseResult {
 
 function normalizeAction(action: z.infer<typeof rawActionSchema>): BrainOutboundAction {
   if (action.type === "send_image") {
-    return {
+    return applyLegacyTelegramTarget({
       ...action,
       type: "send_artifact",
       uri: action.fileId ? `telegram-file:${action.fileId}` : undefined,
       mimeType: "image/*",
-    };
+    }, action);
   }
   if (action.type === "send_document") {
-    return { ...action, type: "send_artifact", asDocument: true };
+    return applyLegacyTelegramTarget({ ...action, type: "send_artifact", asDocument: true }, action);
   }
-  return action as unknown as BrainOutboundAction;
+  if (action.type === "cancel_job") {
+    return { ...action, type: "cancel_subagent" };
+  }
+  if (action.type === "notify_owner") {
+    return { ...action, type: "send_text", target: { ...(action.target ?? {}), route: "admins" } };
+  }
+  return applyLegacyTelegramTarget(action as unknown as BrainOutboundAction, action as { chatId?: string | number; replyToMessageId?: string | number; messageId?: string | number });
+}
+
+function applyLegacyTelegramTarget<T extends BrainOutboundAction>(
+  action: T,
+  legacy: { chatId?: string | number; replyToMessageId?: string | number; messageId?: string | number },
+): T {
+  const target = { ...(action.target ?? {}) };
+  if (legacy.chatId !== undefined && !target.conversationId) {
+    target.route = target.route ?? "explicit-entrypoint";
+    target.conversationId = String(legacy.chatId);
+  }
+  const replyId = legacy.replyToMessageId ?? legacy.messageId;
+  if (replyId !== undefined && !target.replyToExternalMessageId) {
+    target.replyToExternalMessageId = String(replyId);
+  }
+  return Object.keys(target).length > 0 ? { ...action, target } : action;
 }
 
 function collectDirectiveBlocks(text: string): RawDirectiveBlock[] {
