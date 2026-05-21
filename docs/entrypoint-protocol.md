@@ -10,12 +10,15 @@ Each entrypoint should:
 - Convert that activity into generic Brain inbound events: message, attachment, command, callback/action, lifecycle event, or delivery update.
 - Attach channel metadata without forcing prompts or workflows to depend on a specific channel.
 - Convert Brain outbound actions back into channel behavior: reply, edit, upload artifact, show status, request clarification, mark done, or report failure.
+- Implement the generic entrypoint adapter shape: an inbound event stream plus outbound action dispatcher. Fake/no-network adapters should use the same shape for smoke tests.
 
 ## Prompt and workflow language
 
 Assistant packs should talk about generic entrypoints, inbound messages, user-visible replies, artifacts, and outbound actions. They should avoid Telegram-specific words like chat, bot token, or Telegram message except inside the Telegram entrypoint adapter docs and tests.
 
 Telegram behavior is preserved by `entrypoints/telegram`, which maps Telegram chats, messages, threads, files, and API calls into and out of the generic protocol.
+
+Current implementation includes a no-network fake entrypoint and a no-network Telegram adapter wrapper. These let tests prove `inbound event -> runtime -> provider -> outbound action` without requiring a bot token, webhook, polling loop, or live channel.
 
 ## Active entrypoint policy
 

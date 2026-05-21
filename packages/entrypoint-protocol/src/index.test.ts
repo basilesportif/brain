@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { routeOutboundToOrigin, type EntryPointInboundEvent } from "./index.js";
+import { FakeEntrypointAdapter, routeOutboundToOrigin, type EntryPointInboundEvent } from "./index.js";
 
 test("routeOutboundToOrigin preserves generic origin routing metadata", () => {
   const event: EntryPointInboundEvent = {
@@ -23,4 +23,26 @@ test("routeOutboundToOrigin preserves generic origin routing metadata", () => {
     threadId: "topic_2",
     replyToExternalMessageId: "42",
   });
+});
+
+test("FakeEntrypointAdapter queues inbound events and records outbound dispatches", async () => {
+  const entrypoint = new FakeEntrypointAdapter({
+    workspaceId: "personal",
+    entrypointId: "fake-main",
+    now: () => new Date("2026-05-21T00:00:00.000Z"),
+  });
+  entrypoint.enqueueText("hello", { conversationId: "fake-conversation" });
+  entrypoint.close();
+
+  const events: EntryPointInboundEvent[] = [];
+  for await (const event of entrypoint.inboundEvents()) events.push(event);
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.workspaceId, "personal");
+  assert.equal(events[0]?.entrypoint.entrypointId, "fake-main");
+  assert.equal(events[0]?.conversation?.id, "fake-conversation");
+
+  const result = await entrypoint.dispatch({ type: "send_text", text: "hi" });
+  assert.equal(result.status, "queued");
+  assert.equal(entrypoint.dispatchedActions[0]?.type, "send_text");
 });

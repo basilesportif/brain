@@ -9,6 +9,8 @@
 
 The runtime must load user-owned workspace state from a private boundary and load public-safe assistant pack content from source-controlled packs. Entrypoint-specific concerns, such as Telegram chat IDs or future web/iOS session IDs, should be normalized at the edge. Provider-specific execution belongs behind adapters so Codex and Claude Code can share orchestration logic.
 
+Runtime state should stay minimal. Brain should not persist exact turn replay/idempotency state; after crash/restart it should use provider-native resume support where available and otherwise degrade gracefully while keeping only operational job/runtime state.
+
 Initial routing policy should be simple: one primary active entrypoint per workspace. The entrypoint protocol should still include entrypoint IDs and channel metadata so multiple simultaneous entrypoints can be added later without rewriting assistant packs.
 
 

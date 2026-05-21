@@ -6,8 +6,11 @@ Entrypoints translate external channels into Brain-neutral contracts:
 
 - **Inbound events**: user message, attachment, command, callback/action, lifecycle event, and delivery metadata.
 - **Outbound actions**: reply, edit, upload artifact, show status, request clarification, mark done/failure, and channel-specific fallback metadata.
+- **Adapter shape**: inbound event streams plus outbound action dispatch results, shared by live adapters and no-network fakes.
 
 Initial policy should allow one primary entrypoint per workspace to keep routing, identity, and notification behavior simple. The protocol should still carry stable entrypoint IDs and channel metadata so multiple active entrypoints can be supported later without changing assistant packs.
+
+The package includes a `FakeEntrypointAdapter` for end-to-end runtime smoke tests without any channel token or network dependency.
 
 ## Active entrypoint config contract
 

@@ -1,4 +1,4 @@
-import type { BrainOutboundAction, EntryPointInboundEvent, JsonRecord, OutboundDispatchResult } from "@brain/entrypoint-protocol";
+import type { BrainEntrypointAdapter, BrainOutboundAction, EntryPointHealth, EntryPointInboundEvent, EntryPointRef, JsonRecord, OutboundDispatchResult } from "@brain/entrypoint-protocol";
 
 export interface TelegramMessageLike {
   message_id: number;
@@ -33,9 +33,71 @@ export interface TelegramEntrypointOptions {
   displayName?: string;
 }
 
+export interface TelegramEntrypointAdapterOptions extends TelegramEntrypointOptions {
+  updates?: Iterable<TelegramUpdateLike> | AsyncIterable<TelegramUpdateLike>;
+  dispatchIntent?(intent: TelegramCallIntent, action: BrainOutboundAction): Promise<OutboundDispatchResult> | OutboundDispatchResult;
+}
+
 export interface TelegramCallIntent {
   method: string;
   payload: Record<string, unknown>;
+}
+
+export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
+  readonly id: string;
+  readonly ref: EntryPointRef;
+  private started = false;
+  private lastEventId?: string;
+
+  constructor(private readonly options: TelegramEntrypointAdapterOptions) {
+    this.id = options.entrypointId ?? "telegram-main";
+    this.ref = {
+      entrypointId: this.id,
+      channelKind: "telegram",
+      displayName: options.displayName ?? "Telegram",
+      capabilities: {
+        replies: true,
+        edits: true,
+        artifactUploads: true,
+        statusUpdates: true,
+        reactions: true,
+        attachments: true,
+        commands: true,
+      },
+    };
+  }
+
+  async start(): Promise<void> {
+    this.started = true;
+  }
+
+  async stop(): Promise<void> {
+    this.started = false;
+  }
+
+  async health(): Promise<EntryPointHealth> {
+    return {
+      ok: this.started,
+      entrypointId: this.id,
+      detail: this.started ? "started without Telegram network client" : "stopped",
+      lastEventId: this.lastEventId,
+    };
+  }
+
+  async *inboundEvents(): AsyncIterable<EntryPointInboundEvent> {
+    for await (const update of toAsyncIterable(this.options.updates ?? [])) {
+      const event = telegramUpdateToInboundEvent(update, this.options);
+      if (!event) continue;
+      this.lastEventId = event.id;
+      yield event;
+    }
+  }
+
+  async dispatch(action: BrainOutboundAction): Promise<OutboundDispatchResult> {
+    const intent = outboundActionToTelegramIntent(action);
+    if (!intent) return actionDispatchResult(action, intent);
+    return this.options.dispatchIntent?.(intent, action) ?? actionDispatchResult(action, intent);
+  }
 }
 
 export function telegramUpdateToInboundEvent(update: TelegramUpdateLike, options: TelegramEntrypointOptions): EntryPointInboundEvent | undefined {
@@ -92,7 +154,7 @@ export function outboundActionToTelegramIntent(action: BrainOutboundAction): Tel
         chat_id: chatId,
         message_thread_id: threadId ? Number(threadId) : undefined,
         text: action.text,
-        parse_mode: action.type === "send_text" && action.format === "markdown" ? "Markdown" : undefined,
+        parse_mode: action.type === "send_text" ? telegramParseMode(action.format) : undefined,
         reply_to_message_id: action.target?.replyToExternalMessageId ? Number(action.target.replyToExternalMessageId) : undefined,
       }),
     };
@@ -109,12 +171,13 @@ export function outboundActionToTelegramIntent(action: BrainOutboundAction): Tel
     };
   }
   if (action.type === "show_status") {
-    return { method: "sendChatAction", payload: compact({ chat_id: chatId, action: action.status === "typing" || action.status === "running" ? "typing" : undefined }) };
+    const chatAction = action.status === "typing" || action.status === "running" ? "typing" : undefined;
+    return chatAction ? { method: "sendChatAction", payload: compact({ chat_id: chatId, action: chatAction }) } : undefined;
   }
   if (action.type === "react") {
     return {
       method: "setMessageReaction",
-      payload: compact({ chat_id: chatId, message_id: action.target?.replyToExternalMessageId, reaction: [{ type: "emoji", emoji: action.emoji }] }),
+      payload: compact({ chat_id: chatId, message_id: action.target?.replyToExternalMessageId ? Number(action.target.replyToExternalMessageId) : undefined, reaction: [{ type: "emoji", emoji: action.emoji }] }),
     };
   }
   if (action.type === "edit_message") {
@@ -165,4 +228,14 @@ function toIso(unixSeconds: number | undefined): string {
 
 function compact<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== "")) as T;
+}
+
+async function* toAsyncIterable<T>(items: Iterable<T> | AsyncIterable<T>): AsyncIterable<T> {
+  for await (const item of items) yield item;
+}
+
+function telegramParseMode(format: "text" | "markdown" | "markdownv2" | undefined): "Markdown" | "MarkdownV2" | undefined {
+  if (format === "markdown") return "Markdown";
+  if (format === "markdownv2") return "MarkdownV2";
+  return undefined;
 }

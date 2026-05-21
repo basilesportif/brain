@@ -5,6 +5,9 @@ Provider adapter shell for Codex. The adapter implements runtime-core provider c
 Current state:
 
 - `stub` transport is runtime-compatible and useful for tests/smoke checks.
-- `app-server` and `exec` transports expose typed configuration/session seams and health/error events, but the real transport wiring is still a TODO.
+- `exec` transport can shell out to `codex exec --json` or a configured Codex-compatible binary, stream JSONL deltas/status/final events into runtime-core provider events, pass prompt text over stdin, pass local image attachments, and report CLI health with `--version`.
+- `app-server` transport keeps the app-server boundary internal and exposes an injectable protocol-client seam. A full Codex app-server JSON-RPC/WebSocket client is still a TODO.
+
+Exec transport does not force `--ephemeral` by default. Brain should rely on Codex's own session/resume infrastructure where possible after a restart instead of persisting exact turn replay state in runtime-core.
 
 Do not model the Codex app-server as a top-level `apps/` runtime; it is an implementation detail of the Codex provider path.

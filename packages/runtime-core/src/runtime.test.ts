@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { BrainRuntime, EchoProviderAdapter, InMemorySubagentJobStore, StaticSubagentExecutor, SubagentLifecycle, type ProviderAdapter, type ProviderSession, type ProviderTurn, type ProviderTurnEvent, type ProviderHealth } from "./index.js";
+import { FakeEntrypointAdapter } from "@brain/entrypoint-protocol";
+import { BrainRuntime, EchoProviderAdapter, FakeProviderAdapter, InMemorySubagentJobStore, RuntimeEntrypointBridge, StaticSubagentExecutor, SubagentLifecycle, type ProviderAdapter, type ProviderSession, type ProviderTurn, type ProviderTurnEvent, type ProviderHealth } from "./index.js";
 
 test("BrainRuntime turns provider final text into origin-routed outbound action", async () => {
   const runtime = new BrainRuntime({
@@ -63,6 +64,38 @@ test("BrainRuntime consumes dispatch_subagent actions through lifecycle port", a
   assert.deepEqual(result.subagentJobIds, ["job_runtime_1"]);
   assert.equal(result.actions.some((action) => action.type === "dispatch_subagent"), false);
   assert.equal((await store.get("job_runtime_1"))?.status, "completed");
+});
+
+test("fake entrypoint smoke sends inbound event through runtime and dispatches outbound action", async () => {
+  const entrypoint = new FakeEntrypointAdapter({
+    workspaceId: "personal",
+    entrypointId: "fake-main",
+    now: () => new Date("2026-05-21T00:00:00.000Z"),
+  });
+  const runtime = new BrainRuntime({
+    workspaceId: "personal",
+    workspace: {
+      workspacePath: "/tmp/personal",
+      primaryEntrypointId: "fake-main",
+      enabledEntrypoints: { "fake-main": { kind: "fake", enabled: true, displayName: "Fake main" } },
+      outboundDefaults: { route: "originating-entrypoint", allowCrossEntrypointReplies: false },
+      promptContext: { includeActiveEntrypointMetadata: true, exposeChannelSecrets: false },
+    },
+    provider: new FakeProviderAdapter(),
+  });
+  const bridge = new RuntimeEntrypointBridge({ runtime, entrypoint });
+
+  entrypoint.enqueueText("ping", { conversationId: "fake-conversation" });
+  entrypoint.close();
+  const result = await bridge.run({ maxEvents: 1 });
+
+  assert.equal(result.stoppedReason, "max-events");
+  assert.equal(result.processed.length, 1);
+  assert.equal(entrypoint.dispatchedActions.length, 1);
+  assert.equal(entrypoint.dispatchedActions[0]?.type, "send_text");
+  assert.match(entrypoint.dispatchedActions[0]?.type === "send_text" ? entrypoint.dispatchedActions[0].text : "", /Fake: ping/);
+  assert.equal(entrypoint.dispatchedActions[0]?.target?.entrypointId, "fake-main");
+  assert.equal(result.processed[0]?.dispatchResults[0]?.status, "queued");
 });
 
 class DirectiveProviderAdapter implements ProviderAdapter {

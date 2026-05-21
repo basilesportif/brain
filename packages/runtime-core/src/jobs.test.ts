@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { FileRuntimeStateStore, FileSubagentJobStore, InMemorySubagentJobStore, loopDefinitionSchema, subagentJobSchema } from "./jobs.js";
@@ -56,6 +56,18 @@ test("file runtime state store rejects path traversal", async () => {
     const state = new FileRuntimeStateStore({ root });
     await state.init();
     assert.throws(() => state.path("../escape.json"), /escapes root/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("file runtime state store does not create turn replay or idempotency stores", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "brain-state-policy-"));
+  try {
+    const state = new FileRuntimeStateStore({ root });
+    await state.init();
+    await assert.rejects(stat(path.join(root, "idempotency")), /ENOENT/);
+    await assert.rejects(stat(path.join(root, "turns")), /ENOENT/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

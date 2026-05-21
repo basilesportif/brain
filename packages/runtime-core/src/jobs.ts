@@ -166,7 +166,7 @@ export class FileRuntimeStateStore {
 
   async init(): Promise<void> {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
-    for (const dir of ["jobs", "events", "values", "idempotency"]) {
+    for (const dir of ["jobs", "events", "values"]) {
       await mkdir(this.path(dir), { recursive: true, mode: 0o700 });
     }
     const schemaPath = this.path("schema.json");

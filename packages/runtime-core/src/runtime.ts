@@ -27,6 +27,7 @@ export class BrainRuntime {
   constructor(private readonly options: BrainRuntimeOptions) {}
 
   async start(): Promise<void> {
+    if (this.session) return;
     this.session = await this.options.provider.createSession({ workspaceId: this.options.workspaceId });
     await this.session.start();
   }

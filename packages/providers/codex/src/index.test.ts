@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { CodexAppServerTransport, createCodexProvider, createCodexTransport } from "./index.js";
+import { chmod, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { CodexAppServerTransport, CodexExecTransport, buildCodexExecArgs, createCodexProvider, createCodexTransport } from "./index.js";
 
 test("Codex provider creates runtime-core compatible stub sessions", async () => {
   const provider = createCodexProvider({ transport: "stub" });
@@ -18,7 +21,7 @@ test("Codex provider exposes typed app-server transport seam", async () => {
   await session.start();
   const health = await session.health();
   assert.equal(health.ok, false);
-  assert.match(health.detail ?? "", /typed but not implemented/);
+  assert.match(health.detail ?? "", /protocol client/);
 
   const events = [];
   for await (const event of session.sendTurn({
@@ -35,4 +38,71 @@ test("Codex provider exposes typed app-server transport seam", async () => {
     prompt: "hello",
   })) events.push(event);
   assert.equal(events[0]?.type, "error");
+});
+
+test("Codex exec transport shells out and maps JSONL events", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "brain-codex-exec-"));
+  const fakeCodex = path.join(dir, "fake-codex.mjs");
+  await writeFile(fakeCodex, `#!/usr/bin/env node
+if (process.argv.includes("--version")) {
+  console.log("fake-codex 1.0.0");
+  process.exit(0);
+}
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => input += chunk);
+process.stdin.on("end", () => {
+  console.log(JSON.stringify({ method: "turn/started", params: { turn: { id: "turn_fake" } } }));
+  console.log(JSON.stringify({ method: "item/agentMessage/delta", params: { delta: "Codex fake: " } }));
+  console.log(JSON.stringify({ method: "item/agentMessage/delta", params: { delta: input.trim() } }));
+  console.log(JSON.stringify({ method: "turn/completed", params: { turn: { id: "turn_fake", status: "completed", items: [] } } }));
+});
+`);
+  await chmod(fakeCodex, 0o755);
+
+  const transport = createCodexTransport({ transport: "exec", binary: fakeCodex, cwd: dir });
+  assert.ok(transport instanceof CodexExecTransport);
+  const session = await transport.createSession({ workspaceId: "personal" });
+  await session.start();
+  const health = await session.health();
+  assert.equal(health.ok, true);
+  assert.match(health.detail ?? "", /fake-codex/);
+
+  const events = [];
+  for await (const event of session.sendTurn({
+    id: "turn_1",
+    sessionId: session.id,
+    inboundEvent: {
+      id: "evt_1",
+      kind: "message",
+      workspaceId: "personal",
+      entrypoint: { entrypointId: "cli", channelKind: "cli" },
+      text: "hello",
+      receivedAt: "2026-05-21T00:00:00.000Z",
+    },
+    prompt: "hello",
+  })) events.push(event);
+
+  assert.equal(events.some((event) => event.type === "error"), false);
+  assert.equal(events.filter((event) => event.type === "delta").map((event) => event.text).join(""), "Codex fake: hello");
+  assert.deepEqual(events.at(-1), { type: "final", text: "Codex fake: hello" });
+});
+
+test("buildCodexExecArgs keeps Codex session persistence enabled unless ephemeral is requested", () => {
+  const args = buildCodexExecArgs({ transport: "exec", model: "gpt-5.5", effort: "high", approvalPolicy: "never" }, {
+    id: "turn_1",
+    sessionId: "session_1",
+    inboundEvent: {
+      id: "evt_1",
+      kind: "message",
+      workspaceId: "personal",
+      entrypoint: { entrypointId: "cli", channelKind: "cli" },
+      text: "hello",
+      receivedAt: "2026-05-21T00:00:00.000Z",
+    },
+    prompt: "hello",
+  });
+  assert.equal(args.includes("--ephemeral"), false);
+  assert.deepEqual(args.slice(0, 4), ["exec", "--json", "--color", "never"]);
+  assert.equal(args.at(-1), "-");
 });

@@ -16,6 +16,8 @@ The first migration should register Telegram as the single primary active entryp
 
 This adapter should preserve current Telegram behavior by translating chats, messages, threads, files, webhooks/polling, sends, edits, uploads, status updates, and failures into generic Brain protocol events/actions. Bot tokens, allowlists, webhook secrets, and raw Telegram IDs stay inside the adapter config or secret boundary.
 
+Current implementation includes a no-network `TelegramEntrypointAdapter` wrapper over supplied update iterables and outbound dispatch hooks. It is suitable for runtime smoke tests and mapping checks; it does not contact Telegram or require a bot token.
+
 ## Bootstrap minimum
 
 The setup flow should make Telegram usable enough for future configuration work:

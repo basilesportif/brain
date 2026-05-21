@@ -70,3 +70,49 @@ export class EchoProviderAdapter implements ProviderAdapter {
     return new EchoProviderSession(`echo_${options.workspaceId}`);
   }
 }
+
+export type FakeProviderScript =
+  | Iterable<ProviderTurnEvent>
+  | AsyncIterable<ProviderTurnEvent>
+  | ((turn: ProviderTurn) => Iterable<ProviderTurnEvent> | AsyncIterable<ProviderTurnEvent>);
+
+export class FakeProviderSession implements ProviderSession {
+  readonly provider: string = "fake";
+  private started = false;
+
+  constructor(readonly id: string, private readonly script: FakeProviderScript = defaultFakeProviderScript) {}
+
+  async start(): Promise<void> {
+    this.started = true;
+  }
+
+  async stop(): Promise<void> {
+    this.started = false;
+  }
+
+  async health(): Promise<ProviderHealth> {
+    return { ok: this.started, provider: this.provider, sessionId: this.id, detail: this.started ? "started" : "stopped" };
+  }
+
+  async *sendTurn(turn: ProviderTurn): AsyncIterable<ProviderTurnEvent> {
+    if (!this.started) await this.start();
+    const events = typeof this.script === "function" ? this.script(turn) : this.script;
+    for await (const event of events) yield event;
+  }
+}
+
+export class FakeProviderAdapter implements ProviderAdapter {
+  readonly id = "fake";
+
+  constructor(private readonly script: FakeProviderScript = defaultFakeProviderScript) {}
+
+  async createSession(options: { workspaceId: string }): Promise<ProviderSession> {
+    return new FakeProviderSession(`fake_${options.workspaceId}`, this.script);
+  }
+}
+
+function* defaultFakeProviderScript(turn: ProviderTurn): Iterable<ProviderTurnEvent> {
+  const text = turn.inboundEvent.text?.trim() || turn.prompt.trim() || "(empty turn)";
+  yield { type: "status", message: "fake provider received turn" };
+  yield { type: "final", text: `Fake: ${text}` };
+}

@@ -180,6 +180,164 @@ export interface OutboundDispatchResult {
   error?: string;
 }
 
+export interface EntryPointHealth {
+  ok: boolean;
+  entrypointId: string;
+  detail?: string;
+  lastEventId?: string;
+}
+
+export interface BrainEntrypointAdapter {
+  readonly id: string;
+  readonly ref: EntryPointRef;
+  start?(): Promise<void>;
+  stop?(): Promise<void>;
+  health?(): Promise<EntryPointHealth>;
+  inboundEvents(): AsyncIterable<EntryPointInboundEvent>;
+  dispatch(action: BrainOutboundAction): Promise<OutboundDispatchResult>;
+}
+
+export interface FakeEntrypointOptions {
+  workspaceId: string;
+  entrypointId?: string;
+  channelKind?: ChannelKind;
+  displayName?: string;
+  capabilities?: EntryPointCapabilities;
+  conversationId?: string;
+  actor?: ExternalActorRef;
+  dispatchStatus?: OutboundDispatchResult["status"];
+  now?: () => Date;
+}
+
+export interface FakeInboundTextOptions {
+  id?: string;
+  kind?: InboundEventKind;
+  command?: string;
+  args?: string[];
+  attachments?: BrainAttachment[];
+  conversationId?: string;
+  threadId?: string;
+  actor?: ExternalActorRef;
+  metadata?: JsonRecord;
+  correlationId?: string;
+  receivedAt?: string;
+}
+
+export class FakeEntrypointAdapter implements BrainEntrypointAdapter {
+  readonly id: string;
+  readonly ref: EntryPointRef;
+  readonly dispatchedActions: BrainOutboundAction[] = [];
+  readonly dispatchResults: OutboundDispatchResult[] = [];
+  private readonly queue: EntryPointInboundEvent[] = [];
+  private readonly waiters: Array<(next: IteratorResult<EntryPointInboundEvent>) => void> = [];
+  private eventCounter = 0;
+  private closed = false;
+  private started = false;
+  private lastEventId?: string;
+
+  constructor(private readonly options: FakeEntrypointOptions) {
+    this.id = options.entrypointId ?? "fake-main";
+    this.ref = {
+      entrypointId: this.id,
+      channelKind: options.channelKind ?? "fake",
+      displayName: options.displayName ?? "Fake entrypoint",
+      capabilities: options.capabilities ?? {
+        replies: true,
+        edits: true,
+        artifactUploads: true,
+        statusUpdates: true,
+        reactions: true,
+        attachments: true,
+        commands: true,
+      },
+    };
+  }
+
+  async start(): Promise<void> {
+    this.started = true;
+  }
+
+  async stop(): Promise<void> {
+    this.started = false;
+    this.close();
+  }
+
+  async health(): Promise<EntryPointHealth> {
+    return {
+      ok: this.started && !this.closed,
+      entrypointId: this.id,
+      detail: this.started ? (this.closed ? "closed" : "started") : "stopped",
+      lastEventId: this.lastEventId,
+    };
+  }
+
+  enqueue(event: EntryPointInboundEvent): EntryPointInboundEvent {
+    if (this.closed) throw new Error(`Fake entrypoint ${this.id} is closed`);
+    const normalized = { ...event, entrypoint: event.entrypoint ?? this.ref };
+    this.lastEventId = normalized.id;
+    const waiter = this.waiters.shift();
+    if (waiter) waiter({ value: normalized, done: false });
+    else this.queue.push(normalized);
+    return normalized;
+  }
+
+  enqueueText(text: string, options: FakeInboundTextOptions = {}): EntryPointInboundEvent {
+    return this.enqueue({
+      id: options.id ?? `${this.id}_event_${++this.eventCounter}`,
+      kind: options.kind ?? (options.command ? "command" : "message"),
+      workspaceId: this.options.workspaceId,
+      entrypoint: this.ref,
+      text,
+      command: options.command,
+      args: options.args,
+      attachments: options.attachments,
+      actor: options.actor ?? this.options.actor,
+      conversation: {
+        id: options.conversationId ?? this.options.conversationId ?? `${this.id}_conversation`,
+        threadId: options.threadId,
+      },
+      correlationId: options.correlationId,
+      receivedAt: options.receivedAt ?? this.nowIso(),
+      metadata: options.metadata,
+    });
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    while (this.waiters.length) {
+      const waiter = this.waiters.shift();
+      waiter?.({ value: undefined as never, done: true });
+    }
+  }
+
+  async *inboundEvents(): AsyncIterable<EntryPointInboundEvent> {
+    while (true) {
+      const next = await this.nextInboundEvent();
+      if (next.done) return;
+      yield next.value;
+    }
+  }
+
+  async dispatch(action: BrainOutboundAction): Promise<OutboundDispatchResult> {
+    this.dispatchedActions.push(action);
+    const result = { action, status: this.options.dispatchStatus ?? "queued" } satisfies OutboundDispatchResult;
+    this.dispatchResults.push(result);
+    return result;
+  }
+
+  private nextInboundEvent(): Promise<IteratorResult<EntryPointInboundEvent>> {
+    const queued = this.queue.shift();
+    if (queued) return Promise.resolve({ value: queued, done: false });
+    if (this.closed) return Promise.resolve({ value: undefined as never, done: true });
+    return new Promise((resolve) => this.waiters.push(resolve));
+  }
+
+  private nowIso(): string {
+    return (this.options.now?.() ?? new Date()).toISOString();
+  }
+}
+
 export function originatingTarget(event: EntryPointInboundEvent): OutboundTarget {
   return {
     route: "originating-entrypoint",

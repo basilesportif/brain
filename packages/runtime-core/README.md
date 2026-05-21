@@ -7,6 +7,8 @@ This package must not import Codex-, Claude-, Telegram-, web-, or iOS-specific S
 ## Implemented slices
 
 - Generic provider contracts plus an echo provider for tests/smoke checks.
+- Generic entrypoint bridge that connects entrypoint inbound event streams to runtime turns and dispatches resulting outbound actions.
+- Fake entrypoint and fake provider helpers for no-network end-to-end smoke tests.
 - Brain directive parsing for `brain-actions` blocks.
 - `BrainRuntime` turn handling that routes generic outbound actions back to the originating entrypoint and consumes `dispatch_subagent` actions when a subagent lifecycle port is configured.
 - Subagent job schemas, active/terminal status helpers, in-memory and file-backed job stores.
@@ -16,3 +18,5 @@ This package must not import Codex-, Claude-, Telegram-, web-, or iOS-specific S
 ## Boundary rules
 
 Runtime-core deals in generic workspaces, entrypoints, providers, jobs, artifacts, and outbound actions. Provider packages own model transport details; entrypoint packages own channel delivery details; workspace data stays outside the repo.
+
+Runtime-core intentionally does not add a durable exact-turn replay/idempotency store. Crash/restart recovery should prefer provider-native resume handles where available and otherwise degrade gracefully while preserving only minimal job/runtime state needed for operations.
