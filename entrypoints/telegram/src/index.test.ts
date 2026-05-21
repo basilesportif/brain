@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { TelegramBotApiClient, TelegramEntrypointAdapter, handleTelegramWebhookUpdate, outboundActionToTelegramIntent, pollTelegramUpdates, resolveTelegramAttachmentDownload, telegramUpdateToInboundEvent, type TelegramBotApi, type TelegramCallIntent } from "./index.js";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { FileTelegramPollingStateStore, TelegramBotApiClient, TelegramEntrypointAdapter, createTelegramWebhookServer, handleTelegramWebhookUpdate, loadTelegramToken, outboundActionToTelegramIntent, pollTelegramUpdates, resolveTelegramAttachmentDownload, telegramUpdateToInboundEvent, type TelegramBotApi, type TelegramCallIntent } from "./index.js";
 
 test("maps Telegram message-like updates into Brain inbound events", () => {
   const event = telegramUpdateToInboundEvent({
@@ -97,6 +100,33 @@ test("Telegram polling skeleton maps getUpdates without a real token", async () 
   assert.deepEqual(calls, ["getUpdates:none"]);
 });
 
+test("Telegram durable polling state stores offsets without replaying updates", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-telegram-state-"));
+  try {
+    const store = new FileTelegramPollingStateStore(path.join(root, "telegram-offset.json"));
+    const offsets: Array<number | undefined> = [];
+    const api: TelegramBotApi = {
+      async call(_method, payload) {
+        offsets.push(payload?.offset as number | undefined);
+        return {
+          ok: true,
+          result: [
+            { update_id: 500, message: { message_id: 70, date: 1779321600, text: "one", chat: { id: 123 }, from: { id: 7 } } },
+            { update_id: 501, message: { message_id: 71, date: 1779321600, text: "two", chat: { id: 123 }, from: { id: 7 } } },
+          ],
+        };
+      },
+    };
+    const updates = [];
+    for await (const update of pollTelegramUpdates(api, { maxPolls: 1, stateStore: store })) updates.push(update);
+    assert.equal(updates.length, 2);
+    assert.deepEqual(offsets, [undefined]);
+    assert.equal(await store.getOffset(), 502);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Telegram API dispatch and file download boundaries are injectable", async () => {
   const api: TelegramBotApi = {
     async call(method, payload) {
@@ -131,7 +161,69 @@ test("Telegram webhook skeleton validates secret token", () => {
   assert.equal(event?.text, "hook");
 });
 
+test("Telegram webhook server accepts valid POSTs and rejects wrong secrets", async () => {
+  const accepted: string[] = [];
+  const server = createTelegramWebhookServer({
+    workspaceId: "personal",
+    expectedSecretToken: "secret",
+    onEvent: (event) => {
+      if (event.text) accepted.push(event.text);
+    },
+  });
+  const address = await server.start();
+  try {
+    const url = `http://${address.host}:${address.port}${address.path}`;
+    const bad = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-telegram-bot-api-secret-token": "wrong" },
+      body: JSON.stringify({ update_id: 610, message: { message_id: 80, text: "bad", chat: { id: 123 }, from: { id: 7 } } }),
+    });
+    assert.equal(bad.status, 401);
+    const good = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-telegram-bot-api-secret-token": "secret" },
+      body: JSON.stringify({ update_id: 611, message: { message_id: 81, text: "good", chat: { id: 123 }, from: { id: 7 } } }),
+    });
+    assert.equal(good.status, 200);
+    assert.deepEqual(accepted, ["good"]);
+  } finally {
+    await server.stop();
+  }
+});
+
 test("TelegramBotApiClient reports missing token without exposing secrets", async () => {
   const client = new TelegramBotApiClient({});
   await assert.rejects(client.call("getMe"), /token is not configured/);
+});
+
+test("Telegram token loading and local upload boundaries redact secrets", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-telegram-token-"));
+  const tokenFile = path.join(root, "token");
+  const uploadPath = path.join(root, "image.jpg");
+  try {
+    await writeFile(tokenFile, "123456:secret-token\n");
+    await writeFile(uploadPath, "fake-image");
+    const loaded = await loadTelegramToken({ tokenFile, required: true });
+    assert.equal(loaded.present, true);
+    assert.equal(loaded.token, "123456:secret-token");
+    assert.equal(loaded.redacted, "present:19chars");
+
+    const calls: Array<{ url: string; bodyType: string }> = [];
+    const client = new TelegramBotApiClient({
+      tokenRef: { tokenFile },
+      fetchImpl: async (url, init) => {
+        calls.push({ url: String(url), bodyType: init?.body instanceof FormData ? "form" : typeof init?.body });
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 77 } }), { status: 200, headers: { "content-type": "application/json" } });
+      },
+    });
+    await client.call("sendPhoto", { chat_id: "123", photo: uploadPath, caption: "hi" });
+    assert.equal(calls[0]?.bodyType, "form");
+    assert.match(calls[0]?.url ?? "", /bot123456:secret-token\/sendPhoto$/);
+
+    const intent = outboundActionToTelegramIntent({ type: "send_artifact", path: "/tmp/voice.ogg", mimeType: "audio/ogg", target: { conversationId: "123" } });
+    assert.equal(intent?.method, "sendVoice");
+    assert.equal(intent?.payload.voice, "/tmp/voice.ogg");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

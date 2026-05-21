@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { CodexAppServerTransport, CodexExecTransport, buildCodexExecArgs, createCodexProvider, createCodexTransport } from "./index.js";
+import { CodexAppServerTransport, CodexExecTransport, buildCodexExecArgs, createCodexProvider, createCodexTransport, type CodexAppServerWebSocket } from "./index.js";
 
 test("Codex provider creates runtime-core compatible stub sessions", async () => {
   const provider = createCodexProvider({ transport: "stub" });
@@ -15,13 +15,13 @@ test("Codex provider creates runtime-core compatible stub sessions", async () =>
 });
 
 test("Codex provider exposes typed app-server transport seam", async () => {
-  const transport = createCodexTransport({ transport: "app-server", appServerUrl: "ws://127.0.0.1:9999" });
+  const transport = createCodexTransport({ transport: "app-server" });
   assert.ok(transport instanceof CodexAppServerTransport);
   const session = await transport.createSession({ workspaceId: "personal" });
   await session.start();
   const health = await session.health();
   assert.equal(health.ok, false);
-  assert.match(health.detail ?? "", /protocol client/);
+  assert.match(health.detail ?? "", /appServerUrl|binary/);
 
   const events = [];
   for await (const event of session.sendTurn({
@@ -38,6 +38,92 @@ test("Codex provider exposes typed app-server transport seam", async () => {
     prompt: "hello",
   })) events.push(event);
   assert.equal(events[0]?.type, "error");
+});
+
+test("Codex app-server transport speaks JSON-RPC over the protocol seam", async () => {
+  const sent: Array<{ method?: string; params?: Record<string, unknown> }> = [];
+  class FakeWebSocket implements CodexAppServerWebSocket {
+    readyState = 0;
+    private listeners = new Map<string, Array<(event?: unknown) => void>>();
+
+    constructor() {
+      queueMicrotask(() => {
+        this.readyState = 1;
+        this.emit("open");
+      });
+    }
+
+    addEventListener(type: "open", listener: () => void): void;
+    addEventListener(type: "close", listener: (event?: unknown) => void): void;
+    addEventListener(type: "error", listener: (event?: unknown) => void): void;
+    addEventListener(type: "message", listener: (event: { data: unknown }) => void): void;
+    addEventListener(type: "open" | "close" | "error" | "message", listener: (...args: never[]) => void): void {
+      this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener as (event?: unknown) => void]);
+    }
+
+    close(): void {
+      this.readyState = 3;
+      this.emit("close");
+    }
+
+    send(data: string): void {
+      const message = JSON.parse(data) as { id: number; method: string; params?: Record<string, unknown> };
+      sent.push({ method: message.method, params: message.params });
+      if (message.method === "initialize") this.respond(message.id, {});
+      else if (message.method === "thread/start") this.respond(message.id, { thread: { id: "thread_fake" } });
+      else if (message.method === "turn/start") {
+        this.respond(message.id, { turn: { id: "turn_fake" } });
+        setTimeout(() => {
+          this.message({ method: "item/agentMessage/delta", params: { turnId: "turn_fake", delta: "hello " } });
+          this.message({ method: "item/agentMessage/delta", params: { turnId: "turn_fake", delta: "world" } });
+          this.message({ method: "turn/completed", params: { turn: { id: "turn_fake", threadId: "thread_fake", status: "completed" } } });
+        }, 0);
+      } else this.respond(message.id, {});
+    }
+
+    private respond(id: number, result: unknown): void {
+      queueMicrotask(() => this.message({ id, result }));
+    }
+
+    private message(value: unknown): void {
+      this.emit("message", { data: JSON.stringify(value) });
+    }
+
+    private emit(type: string, event?: unknown): void {
+      for (const listener of this.listeners.get(type) ?? []) listener(event);
+    }
+  }
+
+  const session = await createCodexTransport({
+    transport: "app-server",
+    appServerUrl: "ws://127.0.0.1:9999",
+    appServerWebSocketFactory: () => new FakeWebSocket(),
+    model: "gpt-test",
+    effort: "medium",
+  }).createSession({ workspaceId: "personal" });
+  await session.start();
+  assert.equal((await session.health()).ok, true);
+
+  const events = [];
+  for await (const event of session.sendTurn({
+    id: "turn_1",
+    sessionId: session.id,
+    inboundEvent: {
+      id: "evt_1",
+      kind: "message",
+      workspaceId: "personal",
+      entrypoint: { entrypointId: "cli", channelKind: "cli" },
+      text: "hello",
+      receivedAt: "2026-05-21T00:00:00.000Z",
+    },
+    prompt: "hello",
+  })) events.push(event);
+
+  assert.deepEqual(events.filter((event) => event.type === "delta").map((event) => event.text).join(""), "hello world");
+  assert.deepEqual(events.find((event) => event.type === "final"), { type: "final", text: "hello world" });
+  assert.equal((await session.resumeHandle?.())?.sessionId, "thread_fake");
+  assert.deepEqual(sent.map((item) => item.method), ["initialize", "thread/start", "turn/start"]);
+  await session.stop();
 });
 
 test("Codex exec transport shells out and maps JSONL events", async () => {

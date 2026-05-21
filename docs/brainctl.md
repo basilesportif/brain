@@ -11,10 +11,13 @@ pnpm run brainctl -- config validate examples/config/runtime.yaml
 pnpm run brainctl -- secrets check --config examples/config/runtime.yaml
 pnpm run brainctl -- pack validate assistant-packs/core
 pnpm run brainctl -- provider check codex --transport stub
+pnpm run brainctl -- provider check codex --transport app-server --app-server-url ws://127.0.0.1:9000 --timeout-ms 3000
 pnpm run brainctl -- provider check claude-code --transport stub
-pnpm run brainctl -- entrypoint check telegram
+pnpm run brainctl -- entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN --polling-state ~/.brain/workspaces/personal/state/telegram-offset.json
 pnpm run brainctl -- runtime status --state ~/.brain/workspaces/personal/state
 pnpm run brainctl -- automation validate examples/config/automation.yaml
+pnpm run brainctl -- automation run daily-summary --file examples/config/automation.yaml
+pnpm run brainctl -- automation due --file examples/config/automation.yaml --now 2026-05-21T09:00:00.000Z
 ```
 
 ## Safety model
@@ -23,10 +26,11 @@ pnpm run brainctl -- automation validate examples/config/automation.yaml
 - `config validate` enforces the initial single-primary entrypoint policy and secret-free prompt context.
 - `secrets check` reports only metadata such as env/file ref presence, mode, and byte size; values are redacted.
 - `pack validate` checks assistant-pack manifests, skill frontmatter, and portable public-safety hygiene.
-- `provider check` instantiates provider adapters and reports health without sending a real user task.
-- `entrypoint check` instantiates entrypoint adapters without requiring live credentials.
+- `provider check` instantiates provider adapters and reports health without sending a real user task. Codex `app-server` checks can point at an existing WebSocket URL or, when a binary is supplied, exercise the provider-owned app-server protocol startup path.
+- `entrypoint check` instantiates entrypoint adapters without requiring live credentials. Optional Telegram token and polling-state flags report only redacted token metadata and durable offset metadata.
 - `runtime status` initializes/reads job state and summarizes active jobs without starting providers or entrypoints.
-- `automation validate` validates loop/monitor skeleton definitions and reports which definitions are runnable without installing crontabs/watchers.
+- `automation validate` validates loop/monitor definitions, cron expression shape, and no-host-scheduler status.
+- `automation run` and `automation due` evaluate loops without installing crontabs/watchers. They dry-run by default; `--dispatch` currently reports not-runnable unless a real runtime dispatch port is wired in a future command.
 - `doctor` combines the checks above with toolchain and private-boundary placeholder checks.
 
 The CLI is the place future setup, health, runtime, migration, and publisher commands should attach instead of making entrypoint or provider packages own operator workflows.

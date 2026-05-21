@@ -22,12 +22,12 @@ workspace/, private/, data/  User-owned/private boundaries; ignored except READM
 pnpm run check
 ```
 
-The check currently validates that the skeleton structure exists, that runtime config examples are present, and that private boundary directories contain only their README placeholders.
+The check currently validates that the skeleton structure exists, that runtime config examples are present, that private boundary directories contain only their README placeholders, and that provider/entrypoint/automation seams pass unit tests.
 
 
 ## brainctl
 
-`brainctl` is the operator CLI skeleton for Brain. It currently validates runtime config, assistant-pack manifests, private-boundary hygiene, and secret reference metadata without starting a live runtime or printing secret values. See `docs/brainctl.md`.
+`brainctl` is the operator CLI skeleton for Brain. It currently validates runtime config, assistant-pack manifests, private-boundary hygiene, provider/entrypoint health seams, automation definitions, and secret reference metadata without deploying services or printing secret values. See `docs/brainctl.md`.
 
 ```bash
 pnpm run build

@@ -11,7 +11,7 @@ import YAML from "yaml";
 import { validateAssistantPack } from "@brain/assistant-pack-schema";
 import { validateWorkspaceConfig, type BrainConfig } from "@brain/workspace-schema";
 import { AutomationRuntime, FileSubagentJobStore, StaticSubagentExecutor, SubagentLifecycle } from "@brain/runtime-core";
-import { TelegramEntrypointAdapter } from "@brain/entrypoint-telegram";
+import { FileTelegramPollingStateStore, TelegramEntrypointAdapter, loadTelegramToken } from "@brain/entrypoint-telegram";
 import { createCodexProvider, type CodexTransportKind } from "@brain/provider-codex";
 import { createClaudeCodeProvider, type ClaudeCodeTransportKind } from "@brain/provider-claude-code";
 
@@ -66,6 +66,8 @@ provider.command("check")
   .option("--transport <kind>", "provider transport to instantiate")
   .option("--binary <path>", "provider CLI binary for exec health checks")
   .option("--cwd <path>", "provider working directory for CLI health checks")
+  .option("--app-server-url <url>", "Codex app-server WebSocket URL for app-server transport")
+  .option("--timeout-ms <ms>", "provider health timeout in milliseconds", parseNumberOption)
   .action(async (providerId, options) => exitWith(await providerCheckCommand(providerId, options)));
 
 const entrypoint = program.command("entrypoint").description("Entrypoint boundary checks");
@@ -73,6 +75,9 @@ entrypoint.command("check")
   .description("Check an entrypoint adapter without requiring live credentials.")
   .argument("<entrypoint>", "entrypoint id: telegram")
   .option("--workspace <id>", "workspace id", "personal")
+  .option("--token-env <name>", "Telegram token env var to verify without printing")
+  .option("--token-file <path>", "Telegram token file to verify without printing")
+  .option("--polling-state <path>", "Telegram durable polling offset state path to inspect")
   .action(async (entrypointId, options) => exitWith(await entrypointCheckCommand(entrypointId, options)));
 
 const runtime = program.command("runtime").description("Runtime state inspection commands");
@@ -88,6 +93,21 @@ automation.command("validate")
   .argument("[file]", "automation JSON/YAML file with loops/monitors arrays")
   .option("--workspace <id>", "workspace id", "personal")
   .action(async (file, options) => exitWith(await automationValidateCommand(file, options)));
+automation.command("run")
+  .description("Evaluate one loop definition without installing cron; dry-run by default.")
+  .argument("<loop>", "loop id")
+  .option("--file <path>", "automation JSON/YAML file with loops/monitors arrays", "examples/config/automation.yaml")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--dry-run", "do not dispatch; this is the default safe behavior", true)
+  .option("--dispatch", "attempt a real dispatch through the configured CLI runtime port (currently reports not-runnable)")
+  .action(async (loopId, options) => exitWith(await automationRunCommand(loopId, options)));
+automation.command("due")
+  .description("Evaluate due loops for the current minute without installing cron; dry-run by default.")
+  .option("--file <path>", "automation JSON/YAML file with loops/monitors arrays", "examples/config/automation.yaml")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--now <iso>", "override current time for deterministic checks")
+  .option("--dry-run", "do not dispatch; this is the default safe behavior", true)
+  .action(async (options) => exitWith(await automationDueCommand(options)));
 
 await program.parseAsync(process.argv);
 
@@ -166,29 +186,35 @@ async function packValidateCommand(dir: string): Promise<CliResult> {
   };
 }
 
-async function providerCheckCommand(providerId: string, options: { workspace: string; transport?: string; binary?: string; cwd?: string }): Promise<CliResult> {
+async function providerCheckCommand(providerId: string, options: { workspace: string; transport?: string; binary?: string; cwd?: string; appServerUrl?: string; timeoutMs?: number }): Promise<CliResult> {
   const normalized = providerId.toLowerCase();
   const adapter = normalized === "codex"
-    ? createCodexProvider({ transport: (options.transport as CodexTransportKind | undefined) ?? "stub", binary: options.binary, cwd: options.cwd })
+    ? createCodexProvider({ transport: (options.transport as CodexTransportKind | undefined) ?? "stub", binary: options.binary, cwd: options.cwd, appServerUrl: options.appServerUrl, timeoutMs: options.timeoutMs, appServerStartupTimeoutMs: options.timeoutMs })
     : normalized === "claude-code" || normalized === "claude"
       ? createClaudeCodeProvider({ transport: (options.transport as ClaudeCodeTransportKind | undefined) ?? "stub" })
       : undefined;
   if (!adapter) return { ok: false, summary: `unknown provider: ${providerId}`, details: { supported: ["codex", "claude-code"] } };
   const session = await adapter.createSession({ workspaceId: options.workspace, metadata: { check: "brainctl provider check" } });
-  await session.start();
   try {
+    await session.start();
     const health = await session.health();
     return {
       ok: health.ok,
       summary: health.ok ? `${adapter.id} provider check passed` : `${adapter.id} provider check failed`,
       details: { health, transport: options.transport ?? "stub", taskStarted: false },
     };
+  } catch (error) {
+    return {
+      ok: false,
+      summary: `${adapter.id} provider check failed to start`,
+      details: { error: error instanceof Error ? error.message : String(error), transport: options.transport ?? "stub", taskStarted: false },
+    };
   } finally {
     await session.stop();
   }
 }
 
-async function entrypointCheckCommand(entrypointId: string, options: { workspace: string }): Promise<CliResult> {
+async function entrypointCheckCommand(entrypointId: string, options: { workspace: string; tokenEnv?: string; tokenFile?: string; pollingState?: string }): Promise<CliResult> {
   if (entrypointId !== "telegram") {
     return { ok: false, summary: `unknown entrypoint: ${entrypointId}`, details: { supported: ["telegram"] } };
   }
@@ -196,10 +222,16 @@ async function entrypointCheckCommand(entrypointId: string, options: { workspace
   await adapter.start();
   try {
     const health = await adapter.health();
+    const token = options.tokenEnv || options.tokenFile
+      ? await loadTelegramToken({ tokenEnv: options.tokenEnv, tokenFile: options.tokenFile })
+      : undefined;
+    const polling = options.pollingState
+      ? { statePath: path.resolve(options.pollingState), offset: await new FileTelegramPollingStateStore(path.resolve(options.pollingState)).getOffset() }
+      : undefined;
     return {
       ok: health.ok,
       summary: "telegram entrypoint boundary check passed",
-      details: { health, liveTokenRequired: false, pollingStarted: false, webhookStarted: false },
+      details: { health, liveTokenRequired: false, token: token ? { present: token.present, source: token.source, redacted: token.redacted } : "not checked", polling, pollingStarted: false, webhookStarted: false },
     };
   } finally {
     await adapter.stop();
@@ -241,10 +273,49 @@ async function automationValidateCommand(file: string | undefined, options: { wo
   };
 }
 
+async function automationRunCommand(loopId: string, options: { file: string; workspace: string; dryRun?: boolean; dispatch?: boolean }): Promise<CliResult> {
+  const record = await readAutomationConfig(options.file);
+  const runtime = new AutomationRuntime({ workspaceId: options.workspace, loops: record.loops ?? [], monitors: record.monitors ?? [] });
+  const dryRun = options.dispatch ? false : options.dryRun !== false;
+  const result = await runtime.runLoopOnce(loopId, { dryRun });
+  return {
+    ok: result.status === "dry_run" || result.status === "dispatched",
+    summary: result.status === "dry_run" ? "loop dry-run evaluated without cron side effects" : `loop ${result.status}`,
+    details: { result, safeDefault: "no crontab or watcher was installed" },
+  };
+}
+
+async function automationDueCommand(options: { file: string; workspace: string; now?: string; dryRun?: boolean }): Promise<CliResult> {
+  const record = await readAutomationConfig(options.file);
+  const runtime = new AutomationRuntime({
+    workspaceId: options.workspace,
+    loops: record.loops ?? [],
+    monitors: record.monitors ?? [],
+    now: options.now ? () => new Date(options.now as string) : undefined,
+  });
+  const results = await runtime.runDueLoops({ dryRun: options.dryRun !== false, now: options.now ? new Date(options.now) : undefined });
+  return {
+    ok: results.every((result) => result.status === "dry_run" || result.status === "dispatched"),
+    summary: results.length === 0 ? "no loops due; no cron side effects" : "due loops evaluated without cron side effects",
+    details: { results, safeDefault: "no crontab or watcher was installed" },
+  };
+}
+
+async function readAutomationConfig(file: string): Promise<{ loops?: unknown[]; monitors?: unknown[] }> {
+  const parsed = parseConfigText(file, await readFile(file, "utf8"));
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as { loops?: unknown[]; monitors?: unknown[] } : {};
+}
+
 function parseConfigText(file: string, raw: string): unknown {
   if (file.endsWith(".yaml") || file.endsWith(".yml")) return YAML.parse(raw);
   if (file.endsWith(".toml")) return parseToml(raw);
   return JSON.parse(raw);
+}
+
+function parseNumberOption(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`Expected positive number, got ${value}`);
+  return parsed;
 }
 
 function configSummary(config: BrainConfig | undefined) {

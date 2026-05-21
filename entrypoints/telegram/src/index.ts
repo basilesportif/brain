@@ -1,3 +1,6 @@
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import path from "node:path";
 import type { BrainAttachment, BrainEntrypointAdapter, BrainOutboundAction, EntryPointHealth, EntryPointInboundEvent, EntryPointRef, JsonRecord, OutboundDispatchResult } from "@brain/entrypoint-protocol";
 
 export interface TelegramMessageLike {
@@ -57,12 +60,46 @@ export interface TelegramPollingOptions {
   timeoutSec?: number;
   limit?: number;
   maxPolls?: number;
+  initialOffset?: number;
+  allowedUpdates?: string[];
+  stateStore?: TelegramPollingStateStore;
+  retryDelayMs?: number;
+  onError?(error: Error, context: { poll: number; offset?: number }): void | Promise<void>;
   signal?: AbortSignal;
 }
 
 export interface TelegramBotApi {
   call(method: string, payload?: Record<string, unknown>): Promise<unknown>;
   downloadFile?(filePath: string): Promise<TelegramDownloadedFile>;
+}
+
+export interface TelegramTokenOptions {
+  token?: string;
+  tokenEnv?: string;
+  tokenFile?: string;
+  required?: boolean;
+}
+
+export interface TelegramTokenLoadResult {
+  present: boolean;
+  source?: "literal" | "env" | "file";
+  token?: string;
+  redacted: string;
+}
+
+export interface TelegramPollingStateStore {
+  getOffset(): Promise<number | undefined>;
+  setOffset(offset: number): Promise<void>;
+}
+
+export interface TelegramWebhookServerOptions extends TelegramEntrypointOptions {
+  host?: string;
+  port?: number;
+  path?: string;
+  expectedSecretToken?: string;
+  maxBodyBytes?: number;
+  onEvent(event: EntryPointInboundEvent, update: TelegramUpdateLike): Promise<void> | void;
+  onError?(error: Error, update?: unknown): Promise<void> | void;
 }
 
 export interface TelegramDownloadedFile {
@@ -83,6 +120,46 @@ export interface TelegramApiResponse<T = unknown> {
   ok: boolean;
   result?: T;
   description?: string;
+}
+
+export async function loadTelegramToken(options: TelegramTokenOptions = {}): Promise<TelegramTokenLoadResult> {
+  const literal = normalizeToken(options.token);
+  if (literal) return { present: true, source: "literal", token: literal, redacted: redactToken(literal) };
+  if (options.tokenEnv) {
+    const fromEnv = normalizeToken(process.env[options.tokenEnv]);
+    if (fromEnv) return { present: true, source: "env", token: fromEnv, redacted: redactToken(fromEnv) };
+  }
+  if (options.tokenFile) {
+    try {
+      const fromFile = normalizeToken(await readFile(options.tokenFile, "utf8"));
+      if (fromFile) return { present: true, source: "file", token: fromFile, redacted: redactToken(fromFile) };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  if (options.required) throw new Error("Telegram bot token is not configured");
+  return { present: false, redacted: "absent" };
+}
+
+export class FileTelegramPollingStateStore implements TelegramPollingStateStore {
+  constructor(readonly filePath: string) {}
+
+  async getOffset(): Promise<number | undefined> {
+    try {
+      const parsed = JSON.parse(await readFile(this.filePath, "utf8")) as { offset?: unknown };
+      return typeof parsed.offset === "number" && Number.isSafeInteger(parsed.offset) ? parsed.offset : undefined;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+  }
+
+  async setOffset(offset: number): Promise<void> {
+    await mkdir(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
+    const temp = path.join(path.dirname(this.filePath), `.telegram-offset.${process.pid}.${Date.now()}.tmp`);
+    await writeFile(temp, `${JSON.stringify({ offset, updatedAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 });
+    await rename(temp, this.filePath);
+  }
 }
 
 export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
@@ -144,7 +221,11 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
     if (this.options.apiClient) {
       try {
         const response = await this.options.apiClient.call(intent.method, intent.payload);
-        return telegramApiDispatchResult(action, response);
+        const result = telegramApiDispatchResult(action, response);
+        if (result.status === "sent" && action.type === "send_artifact" && action.deleteAfterSend && action.path) {
+          await rm(action.path, { force: true }).catch(() => undefined);
+        }
+        return result;
       } catch (error) {
         return { action, status: "failed", error: error instanceof Error ? error.message : String(error) };
       }
@@ -226,12 +307,13 @@ export function outboundActionToTelegramIntent(action: BrainOutboundAction): Tel
     };
   }
   if (action.type === "send_artifact") {
+    const endpoint = telegramArtifactEndpoint(action);
     return {
-      method: action.asDocument ? "sendDocument" : "sendPhoto",
+      method: endpoint.method,
       payload: compact({
         chat_id: chatId,
         message_thread_id: threadId ? Number(threadId) : undefined,
-        [action.asDocument ? "document" : "photo"]: action.path ?? action.uri,
+        [endpoint.field]: action.path ?? action.uri,
         caption: action.caption,
       }),
     };
@@ -260,22 +342,31 @@ export function actionDispatchResult(action: BrainOutboundAction, intent: Telegr
 }
 
 export async function* pollTelegramUpdates(api: TelegramBotApi, options: TelegramPollingOptions = {}): AsyncIterable<TelegramUpdateLike> {
-  let offset: number | undefined;
+  let offset = options.initialOffset ?? await options.stateStore?.getOffset();
   let polls = 0;
   while (!options.signal?.aborted && (options.maxPolls === undefined || polls < options.maxPolls)) {
     polls++;
-    const response = await api.call("getUpdates", compact({
-      offset,
-      timeout: options.timeoutSec ?? 30,
-      limit: options.limit ?? 50,
-      allowed_updates: ["message", "edited_message", "callback_query"],
-    }));
-    const updates = telegramApiResult<TelegramUpdateLike[]>(response, []);
-    for (const update of updates) {
-      offset = update.update_id + 1;
-      yield update;
+    try {
+      const response = await api.call("getUpdates", compact({
+        offset,
+        timeout: options.timeoutSec ?? 30,
+        limit: options.limit ?? 50,
+        allowed_updates: options.allowedUpdates ?? ["message", "edited_message", "callback_query"],
+      }));
+      const updates = telegramApiResult<TelegramUpdateLike[]>(response, []);
+      for (const update of updates) {
+        offset = update.update_id + 1;
+        await options.stateStore?.setOffset(offset);
+        yield update;
+      }
+      if (updates.length === 0 && options.maxPolls !== undefined) return;
+    } catch (error) {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      if (!options.onError) throw normalized;
+      await options.onError(normalized, { poll: polls, offset });
+      if (options.maxPolls !== undefined) return;
+      await delay(options.retryDelayMs ?? 1_000, options.signal);
     }
-    if (updates.length === 0 && options.maxPolls !== undefined) return;
   }
 }
 
@@ -284,6 +375,59 @@ export function handleTelegramWebhookUpdate(update: TelegramUpdateLike, options:
     throw new Error("Telegram webhook secret token mismatch");
   }
   return telegramUpdateToInboundEvent(update, options);
+}
+
+export class TelegramWebhookServer {
+  private server?: Server;
+
+  constructor(private readonly options: TelegramWebhookServerOptions) {}
+
+  async start(): Promise<{ host: string; port: number; path: string }> {
+    if (this.server?.listening) return this.address();
+    this.server = createServer((req, res) => {
+      void this.handleRequest(req, res);
+    });
+    await new Promise<void>((resolve, reject) => {
+      this.server?.once("error", reject);
+      this.server?.listen(this.options.port ?? 0, this.options.host ?? "127.0.0.1", () => resolve());
+    });
+    return this.address();
+  }
+
+  async stop(): Promise<void> {
+    const server = this.server;
+    this.server = undefined;
+    if (!server || !server.listening) return;
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+
+  async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    try {
+      if (req.method !== "POST") return respondJson(res, 405, { ok: false, error: "method not allowed" });
+      if (new URL(req.url ?? "/", "http://localhost").pathname !== (this.options.path ?? "/telegram/webhook")) {
+        return respondJson(res, 404, { ok: false, error: "not found" });
+      }
+      const raw = await readRequestBody(req, this.options.maxBodyBytes ?? 1_000_000);
+      const update = JSON.parse(raw) as TelegramUpdateLike;
+      const event = handleTelegramWebhookUpdate(update, this.options, headerValue(req.headers["x-telegram-bot-api-secret-token"]));
+      if (event) await this.options.onEvent(event, update);
+      return respondJson(res, 200, { ok: true, accepted: Boolean(event) });
+    } catch (error) {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      await this.options.onError?.(normalized);
+      return respondJson(res, /secret token/i.test(normalized.message) ? 401 : 400, { ok: false, error: normalized.message });
+    }
+  }
+
+  private address(): { host: string; port: number; path: string } {
+    const address = this.server?.address();
+    const port = typeof address === "object" && address ? address.port : this.options.port ?? 0;
+    return { host: this.options.host ?? "127.0.0.1", port, path: this.options.path ?? "/telegram/webhook" };
+  }
+}
+
+export function createTelegramWebhookServer(options: TelegramWebhookServerOptions): TelegramWebhookServer {
+  return new TelegramWebhookServer(options);
 }
 
 export async function resolveTelegramAttachmentDownload(attachment: BrainAttachment, api: TelegramBotApi): Promise<BrainAttachment> {
@@ -308,35 +452,56 @@ export async function resolveTelegramAttachmentDownload(attachment: BrainAttachm
 }
 
 export class TelegramBotApiClient implements TelegramBotApi {
-  constructor(private readonly options: { token?: string; baseUrl?: string; fetchImpl?: typeof fetch }) {}
+  constructor(private readonly options: { token?: string; tokenRef?: TelegramTokenOptions; baseUrl?: string; downloadDir?: string; fetchImpl?: typeof fetch }) {}
+
+  static async fromTokenRef(options: TelegramTokenOptions & { baseUrl?: string; downloadDir?: string; fetchImpl?: typeof fetch }): Promise<TelegramBotApiClient> {
+    const loaded = await loadTelegramToken({ ...options, required: options.required ?? true });
+    return new TelegramBotApiClient({ token: loaded.token, baseUrl: options.baseUrl, downloadDir: options.downloadDir, fetchImpl: options.fetchImpl });
+  }
 
   async call(method: string, payload: Record<string, unknown> = {}): Promise<unknown> {
-    if (!this.options.token) throw new Error("Telegram bot token is not configured");
+    const token = await this.token();
     const fetchImpl = this.options.fetchImpl ?? fetch;
-    const response = await fetchImpl(`${this.baseUrl()}/${method}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    const uploadForm = await telegramUploadForm(payload);
+    const response = await fetchImpl(`${this.baseUrl(token)}/${method}`, uploadForm
+      ? { method: "POST", body: uploadForm }
+      : {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        });
     const data = await response.json() as TelegramApiResponse;
     if (!data.ok) throw new Error(data.description ?? `Telegram API ${method} failed`);
     return data;
   }
 
   async downloadFile(filePath: string): Promise<TelegramDownloadedFile> {
-    if (!this.options.token) throw new Error("Telegram bot token is not configured");
+    const token = await this.token();
     const fetchImpl = this.options.fetchImpl ?? fetch;
-    const response = await fetchImpl(`${this.fileBaseUrl()}/${filePath}`);
+    const response = await fetchImpl(`${this.fileBaseUrl(token)}/${filePath}`);
     if (!response.ok) throw new Error(`Telegram file download failed with HTTP ${response.status}`);
-    return { bytes: new Uint8Array(await response.arrayBuffer()), filePath };
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (this.options.downloadDir) {
+      await mkdir(this.options.downloadDir, { recursive: true, mode: 0o700 });
+      const localPath = path.join(this.options.downloadDir, safeTelegramFileName(filePath));
+      await writeFile(localPath, bytes, { mode: 0o600 });
+      return { bytes, localPath, uri: `file://${localPath}`, filePath };
+    }
+    return { bytes, filePath };
   }
 
-  private baseUrl(): string {
-    return `${this.options.baseUrl ?? "https://api.telegram.org"}/bot${this.options.token}`;
+  private async token(): Promise<string> {
+    const loaded = await loadTelegramToken({ ...(this.options.tokenRef ?? {}), token: this.options.token ?? this.options.tokenRef?.token, required: true });
+    if (!loaded.token) throw new Error("Telegram bot token is not configured");
+    return loaded.token;
   }
 
-  private fileBaseUrl(): string {
-    return `${this.options.baseUrl ?? "https://api.telegram.org"}/file/bot${this.options.token}`;
+  private baseUrl(token: string): string {
+    return `${this.options.baseUrl ?? "https://api.telegram.org"}/bot${token}`;
+  }
+
+  private fileBaseUrl(token: string): string {
+    return `${this.options.baseUrl ?? "https://api.telegram.org"}/file/bot${token}`;
   }
 }
 
@@ -393,6 +558,111 @@ function isTelegramEventAllowed(event: EntryPointInboundEvent, allowlist: Telegr
   const userOk = users.size === 0 || (event.actor?.id !== undefined && users.has(String(event.actor.id)));
   const chatOk = chats.size === 0 || (event.conversation?.id !== undefined && chats.has(String(event.conversation.id)));
   return userOk && chatOk;
+}
+
+function telegramArtifactEndpoint(action: Extract<BrainOutboundAction, { type: "send_artifact" }>): { method: string; field: string } {
+  const method = typeof action.metadata?.telegramMethod === "string" ? action.metadata.telegramMethod : undefined;
+  if (method && ["sendDocument", "sendPhoto", "sendVoice", "sendAudio", "sendVideo"].includes(method)) {
+    return { method, field: method.replace(/^send/, "").toLowerCase() };
+  }
+  if (action.asDocument) return { method: "sendDocument", field: "document" };
+  if (action.mimeType?.startsWith("video/")) return { method: "sendVideo", field: "video" };
+  if (action.mimeType?.startsWith("audio/")) {
+    if (/ogg|opus|voice/i.test(action.mimeType) || /\.ogg$/i.test(action.path ?? action.uri ?? "")) return { method: "sendVoice", field: "voice" };
+    return { method: "sendAudio", field: "audio" };
+  }
+  return { method: "sendPhoto", field: "photo" };
+}
+
+async function telegramUploadForm(payload: Record<string, unknown>): Promise<FormData | undefined> {
+  const uploadFields = ["photo", "document", "voice", "audio", "video"];
+  const uploadField = uploadFields.find((field) => typeof payload[field] === "string" && isLikelyLocalPath(payload[field] as string));
+  if (!uploadField) return undefined;
+  const filePath = payload[uploadField] as string;
+  try {
+    const info = await stat(filePath);
+    if (!info.isFile()) return undefined;
+  } catch {
+    return undefined;
+  }
+  const form = new FormData();
+  for (const [key, value] of Object.entries(payload)) {
+    if (value === undefined) continue;
+    if (key === uploadField) {
+      const bytes = await readFile(filePath);
+      form.append(key, new Blob([bytes], { type: telegramUploadMimeType(uploadField, payload) }), path.basename(filePath));
+    } else if (typeof value === "object") {
+      form.append(key, JSON.stringify(value));
+    } else {
+      form.append(key, String(value));
+    }
+  }
+  return form;
+}
+
+function telegramUploadMimeType(field: string, payload: Record<string, unknown>): string {
+  if (typeof payload.mime_type === "string") return payload.mime_type;
+  if (field === "photo") return "image/jpeg";
+  if (field === "voice") return "audio/ogg";
+  if (field === "audio") return "audio/mpeg";
+  if (field === "video") return "video/mp4";
+  return "application/octet-stream";
+}
+
+function isLikelyLocalPath(value: string): boolean {
+  return path.isAbsolute(value) || value.startsWith("./") || value.startsWith("../");
+}
+
+function safeTelegramFileName(filePath: string): string {
+  return path.basename(filePath).replace(/[^A-Za-z0-9._-]/g, "_") || "telegram-file";
+}
+
+function normalizeToken(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed || undefined;
+}
+
+function redactToken(token: string): string {
+  return `present:${token.length}chars`;
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      resolve();
+    }, { once: true });
+  });
+}
+
+function readRequestBody(req: IncomingMessage, maxBytes: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on("data", (chunk: Buffer) => {
+      size += chunk.byteLength;
+      if (size > maxBytes) {
+        reject(new Error(`Telegram webhook body exceeds ${maxBytes} bytes`));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
+function respondJson(res: ServerResponse, status: number, body: Record<string, unknown>): void {
+  if (res.headersSent) return;
+  res.writeHead(status, { "content-type": "application/json" });
+  res.end(JSON.stringify(body));
+}
+
+function headerValue(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
 }
 
 function toIso(unixSeconds: number | undefined): string {

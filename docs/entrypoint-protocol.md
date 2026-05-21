@@ -18,7 +18,7 @@ Assistant packs should talk about generic entrypoints, inbound messages, user-vi
 
 Telegram behavior is preserved by `entrypoints/telegram`, which maps Telegram chats, messages, threads, files, and API calls into and out of the generic protocol.
 
-Current implementation includes a no-network fake entrypoint and a no-network Telegram adapter wrapper. These let tests prove `inbound event -> runtime -> provider -> outbound action` without requiring a bot token, webhook, polling loop, or live channel.
+Current implementation includes a no-network fake entrypoint and a Telegram adapter wrapper. The Telegram adapter can still run with injected/no-network updates for tests, and it now also includes operator seams for token loading from literal/env/file refs, durable `getUpdates` offset storage, local file download/upload handling, voice/audio/video artifact mapping, delete-after-send cleanup for staged artifacts, and a small webhook HTTP server skeleton with Telegram secret-token validation. These pieces are inert unless explicitly configured; no bot token is required for default checks.
 
 ## Active entrypoint policy
 

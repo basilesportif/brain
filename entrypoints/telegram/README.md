@@ -19,10 +19,12 @@ This adapter should preserve current Telegram behavior by translating chats, mes
 Current implementation includes:
 
 - a no-network `TelegramEntrypointAdapter` wrapper over supplied update iterables and outbound dispatch hooks;
-- injectable Telegram Bot API boundary for outbound sends and file metadata/download resolution;
-- polling and webhook mapping skeletons that do not require a real token in tests;
+- injectable Telegram Bot API boundary for outbound sends, multipart local uploads, file metadata, and download resolution;
+- token loading from literal/env/file refs with redacted metadata only;
+- durable polling offset storage for Telegram `getUpdates` without any Brain turn replay/idempotency store;
+- polling and a small webhook HTTP server skeleton that do not require a real token in tests;
 - private admin allowlist filtering by Telegram user/chat id; and
-- outbound mapping for replies, edits, artifacts, status actions, and reactions.
+- outbound mapping for replies, edits, photo/document/voice/audio/video artifacts, status actions, reactions, and delete-after-send cleanup for staged local artifacts.
 
 It is suitable for runtime smoke tests and mapping checks. Live polling/webhook startup is still intentionally a skeleton: no process manager, reverse proxy, token file, or deployment side effects are installed by this package.
 

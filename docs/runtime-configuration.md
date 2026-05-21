@@ -136,4 +136,6 @@ Current `codex-chat` behavior should migrate as a single-primary workspace confi
 - Map Telegram replies, edits, uploads, typing/status updates, and failures to generic Brain outbound actions.
 - Ensure any outbound action created while handling a Telegram inbound event defaults back to `telegram-main`.
 - Keep bot tokens, webhook secrets, polling config, chat allowlists, and Telegram API details in the Telegram adapter config/secret boundary.
+- For Telegram polling, persist only Telegram's provider-native update offset (for example under workspace `state/telegram-offset.json`). Do not build a separate durable turn replay or idempotency store.
+- Loop and monitor definitions are validated in-process. The default runtime/CLI behavior does not install crontabs, filesystem watchers, or shell monitors; explicit future operator commands should be required for host-level scheduling.
 - Do not enable web or iOS in the migrated workspace until multi-entrypoint routing, identity, permissions, notifications, and conflict handling have explicit config and tests.

@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, readFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import path from "node:path";
 import { EchoProviderSession, type ProviderAdapter, type ProviderHealth, type ProviderResumeHandle, type ProviderSession, type ProviderTurn, type ProviderTurnEvent } from "@brain/runtime-core";
 
@@ -30,7 +31,16 @@ export interface CodexProviderOptions {
   lastMessageFilename?: string;
   timeoutMs?: number;
   maxOutputBytes?: number;
+  appServerStartupTimeoutMs?: number;
+  appServerRequestTimeoutMs?: number;
+  appServerServiceName?: string;
+  appServerBaseInstructions?: string;
+  appServerDeveloperInstructions?: string;
+  appServerExperimentalRawEvents?: boolean;
+  appServerPersistExtendedHistory?: boolean;
   appServerClient?: CodexAppServerClient;
+  /** Test seam for the Codex app-server JSON-RPC WebSocket transport. */
+  appServerWebSocketFactory?: CodexAppServerWebSocketFactory;
 }
 
 export type CodexSessionInput = Parameters<ProviderAdapter["createSession"]>[0];
@@ -48,6 +58,27 @@ export interface CodexAppServerSessionInput extends CodexSessionInput {
   id: string;
   options: CodexProviderOptions;
 }
+
+export type CodexJsonRpcMessage = Record<string, unknown> & {
+  id?: string | number;
+  method?: string;
+  params?: unknown;
+  result?: unknown;
+  error?: unknown;
+};
+
+export interface CodexAppServerWebSocket {
+  readonly readyState: number;
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+  addEventListener(type: "open", listener: () => void, options?: { once?: boolean }): void;
+  addEventListener(type: "close", listener: (event?: unknown) => void, options?: { once?: boolean }): void;
+  addEventListener(type: "error", listener: (event?: unknown) => void, options?: { once?: boolean }): void;
+  addEventListener(type: "message", listener: (event: { data: unknown }) => void, options?: { once?: boolean }): void;
+  removeEventListener?(type: "open" | "close" | "error" | "message", listener: (...args: never[]) => void): void;
+}
+
+export type CodexAppServerWebSocketFactory = (url: string) => CodexAppServerWebSocket;
 
 export class CodexProviderAdapter implements ProviderAdapter {
   readonly id = "codex";
@@ -88,7 +119,7 @@ export class CodexAppServerTransport implements CodexTransport {
   async createSession(input: CodexSessionInput): Promise<ProviderSession> {
     const id = `codex_app_${input.workspaceId}`;
     if (this.options.appServerClient) return this.options.appServerClient.createSession({ ...input, id, options: this.options });
-    return new CodexAppServerShellSession(id, this.options, input.metadata);
+    return new CodexAppServerProtocolSession(id, input.workspaceId, this.options, input.metadata);
   }
 }
 
@@ -102,42 +133,148 @@ export class CodexExecTransport implements CodexTransport {
   }
 }
 
-export class CodexAppServerShellSession implements ProviderSession {
+export class CodexAppServerProtocolSession implements ProviderSession {
   readonly provider = "codex";
   private started = false;
+  private child?: ChildProcess;
+  private ws?: CodexAppServerWebSocket;
+  private connected = false;
+  private requestId = 1;
+  private readonly pending = new Map<string | number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
+  private readonly notificationHandlers = new Set<(message: CodexJsonRpcMessage) => void>();
+  private readonly activeTurnIds = new Map<string, string>();
+  private currentThreadId?: string;
+  private currentResumeHandle?: ProviderResumeHandle;
+  private lastError?: Error;
 
   constructor(
     readonly id: string,
+    readonly workspaceId: string,
     readonly options: CodexProviderOptions = {},
     readonly metadata?: CodexSessionInput["metadata"],
   ) {}
 
   async start(): Promise<void> {
+    if (this.started && this.connected) return;
     this.started = true;
+    const url = await this.resolveAppServerUrl();
+    if (!url) return;
+    if (this.options.binary && !this.options.appServerUrl) this.spawnAppServer(url);
+    await this.connectWithRetry(url);
+    await this.request("initialize", {
+      clientInfo: { name: "brain", title: "Brain Codex provider", version: "0.1.0" },
+      capabilities: { experimentalApi: true },
+    });
   }
 
   async stop(): Promise<void> {
     this.started = false;
+    this.connected = false;
+    this.rejectAll(new Error("Codex app-server session stopped"));
+    this.ws?.close();
+    this.ws = undefined;
+    const child = this.child;
+    this.child = undefined;
+    if (child && child.exitCode === null && !child.killed) {
+      child.kill("SIGTERM");
+      await Promise.race([
+        new Promise<void>((resolve) => child.once("exit", () => resolve())),
+        new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+      ]);
+      if (child.exitCode === null && !child.killed) child.kill("SIGKILL");
+    }
   }
 
   async health(): Promise<ProviderHealth> {
+    const hasConfig = Boolean(this.options.appServerUrl || this.options.binary);
     return {
-      ok: false,
+      ok: this.connected && Boolean(this.ws),
       provider: this.provider,
       sessionId: this.id,
-      detail: this.options.appServerUrl || this.options.binary
-        ? "app-server configuration is present, but no Codex app-server protocol client is attached"
-        : "set appServerUrl/binary and attach an appServerClient when wiring Codex app-server transport",
+      detail: this.connected
+        ? `connected${this.currentThreadId ? ` thread=${this.currentThreadId}` : ""}`
+        : hasConfig
+          ? (this.lastError?.message ?? "app-server configured but not connected")
+          : "set appServerUrl or binary for Codex app-server transport",
     };
   }
 
-  async *sendTurn(_turn: ProviderTurn): AsyncIterable<ProviderTurnEvent> {
+  async resumeHandle(): Promise<ProviderResumeHandle | undefined> {
+    return this.currentResumeHandle;
+  }
+
+  async cancelTurn(turnId: string, reason = "cancelled"): Promise<void> {
+    const providerTurnId = this.activeTurnIds.get(turnId) ?? turnId;
+    if (!this.connected) return;
+    await this.request("turn/interrupt", { turnId: providerTurnId, reason }).catch(() => undefined);
+  }
+
+  async steerTurn(turnId: string, text: string): Promise<void> {
+    const providerTurnId = this.activeTurnIds.get(turnId) ?? turnId;
+    if (!this.connected) throw new Error("Codex app-server is not connected");
+    await this.request("turn/steer", { turnId: providerTurnId, input: [{ type: "text", text, text_elements: [] }] });
+  }
+
+  async *sendTurn(turn: ProviderTurn): AsyncIterable<ProviderTurnEvent> {
     if (!this.started) await this.start();
-    yield {
-      type: "error",
-      message: "Codex app-server transport needs a protocol client before turns can be sent. Use exec transport or inject appServerClient.",
-      raw: this.safeOptions(),
+    if (!this.connected) {
+      yield { type: "error", message: "Codex app-server transport is not connected; use exec transport or configure appServerUrl/binary.", raw: this.safeOptions() };
+      return;
+    }
+
+    const queue = new AsyncEventQueue<ProviderTurnEvent>();
+    let providerTurnId = "";
+    let accumulated = "";
+    let sawFinal = false;
+    const handler = (message: CodexJsonRpcMessage): void => {
+      if (!message.method || typeof message.params !== "object" || message.params === null) return;
+      const params = message.params as Record<string, unknown>;
+      const resumeHandle = extractResumeHandle({ method: message.method, params }, this.provider);
+      if (resumeHandle) {
+        this.currentResumeHandle = resumeHandle;
+        this.currentThreadId = resumeHandle.sessionId ?? this.currentThreadId;
+      }
+      if (message.method === "item/agentMessage/delta" && params.turnId === providerTurnId && typeof params.delta === "string") {
+        accumulated += params.delta;
+        queue.push({ type: "delta", text: params.delta });
+        return;
+      }
+      if (message.method === "turn/completed" && typeof params.turn === "object" && params.turn !== null) {
+        const turnRecord = params.turn as Record<string, unknown>;
+        if (turnRecord.id === providerTurnId) {
+          const text = extractFinalText({ params }) ?? accumulated;
+          sawFinal = true;
+          queue.push({ type: "final", text });
+          queue.close();
+        }
+        return;
+      }
+      if (message.method === "error") {
+        queue.push({ type: "error", message: extractErrorMessage({ params }) ?? JSON.stringify(params), raw: params });
+      }
     };
+
+    this.notificationHandlers.add(handler);
+    queue.push({ type: "status", message: "starting Codex app-server turn", raw: { metadata: this.metadata, threadId: this.currentThreadId } });
+    try {
+      await this.ensureThread(turn);
+      if (!this.currentThreadId) throw new Error("Codex app-server did not provide a thread id");
+      const response = await this.request<Record<string, unknown>>("turn/start", this.turnStartParams(turn));
+      const providerTurn = asRecord(response.turn);
+      providerTurnId = stringValue(providerTurn.id) ?? "";
+      if (!providerTurnId) throw new Error("Codex app-server did not return a turn id");
+      this.activeTurnIds.set(turn.id, providerTurnId);
+      const resumeHandle = extractResumeHandle({ method: "turn/start", params: { turn: providerTurn, threadId: this.currentThreadId } }, this.provider);
+      if (resumeHandle) this.currentResumeHandle = resumeHandle;
+      for await (const event of queue) yield event;
+    } catch (error) {
+      yield { type: "error", message: `Codex app-server turn failed: ${errorMessage(error)}`, raw: this.safeOptions() };
+      if (!sawFinal) queue.close();
+    } finally {
+      this.notificationHandlers.delete(handler);
+      this.activeTurnIds.delete(turn.id);
+      queue.close();
+    }
   }
 
   private safeOptions(): Record<string, unknown> {
@@ -155,12 +292,193 @@ export class CodexAppServerShellSession implements ProviderSession {
       metadata: this.metadata,
     };
   }
+
+  private async ensureThread(turn: ProviderTurn): Promise<void> {
+    if (this.currentThreadId) return;
+    const resumeSessionId = this.options.resumeSessionId ?? turn.resumeHandle?.sessionId ?? turn.resumeHandle?.handle ?? this.currentResumeHandle?.sessionId;
+    if (resumeSessionId) {
+      try {
+        const response = await this.request<Record<string, unknown>>("thread/resume", this.threadParams(turn, { threadId: resumeSessionId }));
+        this.recordThreadResponse(response, "thread/resume");
+        return;
+      } catch (error) {
+        this.lastError = error instanceof Error ? error : new Error(String(error));
+      }
+    }
+    const response = await this.request<Record<string, unknown>>("thread/start", this.threadParams(turn));
+    this.recordThreadResponse(response, "thread/start");
+  }
+
+  private recordThreadResponse(response: Record<string, unknown>, method: string): void {
+    const thread = asRecord(response.thread);
+    const threadId = stringValue(thread.id) ?? stringValue(response.threadId);
+    if (!threadId) throw new Error(`Codex app-server ${method} did not return a thread id`);
+    this.currentThreadId = threadId;
+    this.currentResumeHandle = {
+      provider: this.provider,
+      sessionId: threadId,
+      handle: threadId,
+      metadata: compactMetadata({ source: "codex-app-server", eventType: method }),
+    };
+  }
+
+  private threadParams(turn: ProviderTurn, resume?: { threadId: string }): Record<string, unknown> {
+    return compactUnknown({
+      threadId: resume?.threadId,
+      model: this.options.model,
+      cwd: this.options.cwd,
+      approvalPolicy: this.options.approvalPolicy,
+      sandbox: this.options.sandbox,
+      config: this.threadConfig(),
+      serviceName: this.options.appServerServiceName ?? `brain:${this.workspaceId}`,
+      baseInstructions: this.options.appServerBaseInstructions,
+      developerInstructions: this.options.appServerDeveloperInstructions ?? this.options.appServerBaseInstructions,
+      ephemeral: this.options.ephemeral ?? false,
+      experimentalRawEvents: this.options.appServerExperimentalRawEvents ?? false,
+      persistExtendedHistory: this.options.appServerPersistExtendedHistory ?? !(this.options.ephemeral ?? false),
+      metadata: compactUnknown({ runtimeSessionId: this.id, workspaceId: this.workspaceId, turnId: turn.id }),
+    });
+  }
+
+  private turnStartParams(turn: ProviderTurn): Record<string, unknown> {
+    return compactUnknown({
+      threadId: this.currentThreadId,
+      input: turnInputForAppServer(turn),
+      cwd: this.options.cwd,
+      approvalPolicy: this.options.approvalPolicy,
+      model: this.options.model,
+      effort: this.options.effort,
+    });
+  }
+
+  private threadConfig(): Record<string, unknown> {
+    return compactUnknown({
+      model_reasoning_effort: this.options.effort,
+    });
+  }
+
+  private async resolveAppServerUrl(): Promise<string | undefined> {
+    if (this.options.appServerUrl) return this.options.appServerUrl;
+    if (!this.options.binary) return undefined;
+    return `ws://127.0.0.1:${await getOpenPort()}`;
+  }
+
+  private spawnAppServer(listenUrl: string): void {
+    const binary = this.options.binary ?? "codex";
+    const args = ["app-server", "--listen", listenUrl];
+    for (const item of this.options.extraConfig ?? []) args.push("-c", item);
+    const { OPENAI_API_KEY: _omit, ...safeEnv } = process.env;
+    const child = spawn(binary, args, { cwd: this.options.cwd, env: safeEnv, stdio: ["ignore", "pipe", "pipe"] });
+    this.child = child;
+    child.stdout?.on("data", () => undefined);
+    child.stderr?.on("data", (chunk: Buffer) => {
+      const text = chunk.toString("utf8").trim();
+      if (text) this.lastError = new Error(text.slice(-1_000));
+    });
+    child.on("exit", (code, signal) => {
+      if (this.child !== child) return;
+      this.connected = false;
+      this.lastError = new Error(`Codex app-server exited code=${code ?? "null"} signal=${signal ?? "null"}`);
+      this.rejectAll(this.lastError);
+    });
+  }
+
+  private async connectWithRetry(url: string): Promise<void> {
+    const deadline = Date.now() + (this.options.appServerStartupTimeoutMs ?? 10_000);
+    let lastError: unknown;
+    while (Date.now() <= deadline) {
+      try {
+        await this.connect(url);
+        return;
+      } catch (error) {
+        lastError = error;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+    this.lastError = lastError instanceof Error ? lastError : new Error(String(lastError));
+    throw this.lastError;
+  }
+
+  private async connect(url: string): Promise<void> {
+    const ws = (this.options.appServerWebSocketFactory ?? defaultWebSocketFactory)(url);
+    this.ws = ws;
+    ws.addEventListener("message", (event) => {
+      if (this.ws !== ws) return;
+      this.handleMessage(webSocketMessageToString(event.data));
+    });
+    ws.addEventListener("close", () => {
+      if (this.ws !== ws) return;
+      this.connected = false;
+      const error = new Error("Codex app-server websocket closed");
+      this.lastError = error;
+      this.rejectAll(error);
+    });
+    ws.addEventListener("error", (event) => {
+      if (this.ws !== ws) return;
+      this.connected = false;
+      this.lastError = event instanceof Error ? event : new Error("Codex app-server websocket error");
+    });
+    await waitForWebSocketOpen(ws, this.options.appServerStartupTimeoutMs ?? 10_000);
+    this.connected = true;
+  }
+
+  private handleMessage(raw: string): void {
+    let message: CodexJsonRpcMessage;
+    try {
+      message = JSON.parse(raw) as CodexJsonRpcMessage;
+    } catch (error) {
+      this.lastError = error instanceof Error ? error : new Error(String(error));
+      return;
+    }
+    if (message.id !== undefined && this.pending.has(message.id)) {
+      const pending = this.pending.get(message.id);
+      this.pending.delete(message.id);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      if (message.error) pending.reject(new Error(JSON.stringify(message.error)));
+      else pending.resolve(message.result);
+      return;
+    }
+    for (const handler of this.notificationHandlers) handler(message);
+  }
+
+  private request<T = unknown>(method: string, params: unknown): Promise<T> {
+    if (!this.connected || !this.ws || this.ws.readyState !== 1) throw new Error("Codex app-server is not connected");
+    const id = this.requestId++;
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`Codex app-server request timed out: ${method}`));
+      }, this.options.appServerRequestTimeoutMs ?? this.options.timeoutMs ?? 600_000);
+      this.pending.set(id, {
+        timer,
+        resolve: (value) => resolve(value as T),
+        reject,
+      });
+      this.ws?.send(JSON.stringify({ id, method, params }));
+    });
+  }
+
+  private rejectAll(error: Error): void {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pending.clear();
+  }
 }
 
-/** @deprecated Use CodexAppServerShellSession for app-server or CodexExecSession for exec. */
-export class CodexTransportShellSession extends CodexAppServerShellSession {
+/** @deprecated Use CodexAppServerProtocolSession for app-server or CodexExecSession for exec. */
+export class CodexAppServerShellSession extends CodexAppServerProtocolSession {
+  constructor(id: string, options: CodexProviderOptions = {}, metadata?: CodexSessionInput["metadata"]) {
+    super(id, "default", options, metadata);
+  }
+}
+
+/** @deprecated Use CodexAppServerProtocolSession for app-server or CodexExecSession for exec. */
+export class CodexTransportShellSession extends CodexAppServerProtocolSession {
   constructor(id: string, readonly transportKind: Exclude<CodexTransportKind, "stub">, options: CodexProviderOptions = {}, metadata?: CodexSessionInput["metadata"]) {
-    super(id, options, metadata);
+    super(id, "default", options, metadata);
   }
 }
 
@@ -351,6 +669,66 @@ export function createCodexTransport(options: CodexProviderOptions = {}): CodexT
 
 export function createCodexProvider(options: CodexProviderOptions = {}): ProviderAdapter {
   return new CodexProviderAdapter(options);
+}
+
+function defaultWebSocketFactory(url: string): CodexAppServerWebSocket {
+  return new WebSocket(url) as unknown as CodexAppServerWebSocket;
+}
+
+function waitForWebSocketOpen(ws: CodexAppServerWebSocket, timeoutMs: number): Promise<void> {
+  if (ws.readyState === 1) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Timed out connecting to Codex app-server after ${timeoutMs}ms`)), timeoutMs);
+    ws.addEventListener("open", () => {
+      clearTimeout(timer);
+      resolve();
+    }, { once: true });
+    ws.addEventListener("error", () => {
+      clearTimeout(timer);
+      reject(new Error("Codex app-server websocket error during connect"));
+    }, { once: true });
+    ws.addEventListener("close", () => {
+      clearTimeout(timer);
+      reject(new Error("Codex app-server websocket closed during connect"));
+    }, { once: true });
+  });
+}
+
+async function getOpenPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : undefined;
+      server.close((error) => {
+        if (error) reject(error);
+        else if (port) resolve(port);
+        else reject(new Error("failed to allocate a local app-server port"));
+      });
+    });
+  });
+}
+
+function turnInputForAppServer(turn: ProviderTurn): unknown[] {
+  const input: unknown[] = [{ type: "text", text: turn.prompt, text_elements: [] }];
+  for (const attachment of turn.attachments ?? []) {
+    if (attachment.kind === "image" && attachment.localPath) input.push({ type: "localImage", path: attachment.localPath });
+    else if (attachment.localPath) input.push({ type: "localFile", path: attachment.localPath, mimeType: attachment.mimeType, name: attachment.originalName });
+  }
+  return input;
+}
+
+function compactUnknown<T extends Record<string, unknown>>(record: T): T {
+  return Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined && value !== "")) as T;
+}
+
+function webSocketMessageToString(data: unknown): string {
+  if (typeof data === "string") return data;
+  if (Buffer.isBuffer(data)) return data.toString("utf8");
+  if (data instanceof ArrayBuffer) return Buffer.from(data).toString("utf8");
+  if (ArrayBuffer.isView(data)) return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString("utf8");
+  return String(data);
 }
 
 export function buildCodexExecArgs(options: CodexProviderOptions, turn: ProviderTurn): string[] {
