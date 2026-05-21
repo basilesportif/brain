@@ -10,6 +10,7 @@
   "references": [
     { "path": "packages/entrypoint-protocol" },
     { "path": "packages/config/workspace-schema" },
-    { "path": "packages/assistant-pack-schema" }
+    { "path": "packages/assistant-pack-schema" },
+    { "path": "packages/runtime-core" }
   ]
 }

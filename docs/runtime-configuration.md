@@ -1,6 +1,6 @@
 # Runtime configuration skeleton
 
-Status: design documentation only. No runtime code has been ported or wired to this configuration yet.
+Status: initial schemas and validation exist in `@brain/workspace-schema`; `brainctl doctor` also runs a temporary runtime-core store/subagent lifecycle self-test. Live provider and entrypoint processes are still not wired.
 
 Brain runtime configuration must make active entrypoints explicit so prompt packs and provider adapters do not accidentally depend on Telegram-specific behavior.
 

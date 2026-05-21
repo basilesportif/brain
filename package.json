@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@brain/assistant-pack-schema": "workspace:*",
+    "@brain/runtime-core": "workspace:*",
     "@brain/workspace-schema": "workspace:*",
     "commander": "^14.0.1",
     "smol-toml": "^1.4.2",

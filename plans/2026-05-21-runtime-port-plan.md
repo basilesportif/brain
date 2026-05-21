@@ -17,8 +17,10 @@ Status: initial implementation slices landed; full runtime port remains incomple
 - Workspace config validation with `single-primary` active entrypoint policy.
 - Provider session/turn contracts plus Codex and Claude Code stub adapters behind provider packages.
 - Generic Brain directive parser supporting `brain-actions` blocks and legacy `codex-chat` action block normalization.
-- Minimal `BrainRuntime` that sends inbound events to a provider session, parses final text/actions, and routes replies to the originating entrypoint.
-- Initial subagent job, loop, and monitor schemas with an in-memory subagent job store. This captures high-value codex-chat runtime concepts without copying process management or private state.
+- Minimal `BrainRuntime` that sends inbound events to a provider session, parses final text/actions, routes replies to the originating entrypoint, and can consume `dispatch_subagent` actions through a runtime lifecycle port.
+- Subagent job, loop, and monitor schemas with in-memory and file-backed job stores. This captures high-value codex-chat runtime concepts without copying process management or private state.
+- Provider-neutral subagent lifecycle core: queueing, max concurrency, running/terminal transitions, cancellation, steering hooks, startup hydration that abandons unsafe active persisted jobs, and a static executor for tests/doctor checks.
+- Workspace-local `FileRuntimeStateStore` for private JSON/JSONL state under a runtime state directory.
 
 ### Entrypoint slice
 
@@ -43,9 +45,9 @@ Status: initial implementation slices landed; full runtime port remains incomple
 
 ## Remaining full-port steps
 
-1. **Codex provider transport**: implement the real Codex app-server/exec transport behind `@brain/provider-codex`, including streaming, cancellation, logs, image/artifact handoff, and health checks.
+1. **Codex provider transport**: replace the typed app-server/exec shells behind `@brain/provider-codex` with real transport wiring, including streaming, cancellation, logs, image/artifact handoff, and health checks.
 2. **Claude Code provider transport**: implement SDK/subagent execution behind `@brain/provider-claude-code`, plus contract parity tests.
-3. **Runtime persistence**: replace in-memory stores with file or database-backed stores for turns, subagent jobs, loop runs, monitor runs, directives, and idempotency keys.
+3. **Runtime persistence**: extend file/database-backed stores beyond subagent jobs to turns, loop runs, monitor runs, directives, outbound action delivery, and idempotency keys.
 4. **Telegram live entrypoint**: port polling/webhook startup, bot API client, file download/upload, reply/thread mapping, admin allowlists, voice transcription handoff, status updates, reactions, and error reporting into `entrypoints/telegram`.
 5. **Loops and monitors**: port cron/queue/spool behavior and monitor dispatch using the new schemas and generic outbound routing.
 6. **Subagents/employees**: port process/session lifecycle, steering/cancellation, child status forwarding, artifact directories, and result routing into provider-neutral runtime modules.

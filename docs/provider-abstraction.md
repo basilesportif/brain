@@ -8,3 +8,12 @@ Provider implementations stay separate:
 - `packages/providers/claude-code` implements those contracts through the Claude Code SDK and subagent mechanism.
 
 Runtime apps and entrypoints should depend on `runtime-core` contracts and select providers through configuration. They should not reach directly into provider-specific SDKs or app-server APIs.
+
+## Current runtime-core seams
+
+`@brain/runtime-core` now exposes two provider-neutral execution seams:
+
+- `ProviderAdapter` / `ProviderSession` for main runtime turns.
+- `SubagentExecutor` / `SubagentLifecycle` for queued child work, cancellation, steering, and persisted job state.
+
+`@brain/provider-codex` has a working `stub` transport and typed `app-server`/`exec` transport shells. Real Codex streaming and cancellation still need to be implemented inside the provider package, not in entrypoints or runtime apps.

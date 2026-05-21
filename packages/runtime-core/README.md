@@ -1,18 +1,18 @@
 # @brain/runtime-core
 
-Provider-neutral and entrypoint-neutral orchestration contracts will live here: jobs, sessions, messages, tool routing, workspace resolution, config schemas, artifact controls, and Brain event models.
+Provider-neutral and entrypoint-neutral orchestration contracts live here: provider sessions, runtime turns, directive parsing, subagent jobs, persistent runtime state, and lifecycle controls.
 
 This package must not import Codex-, Claude-, Telegram-, web-, or iOS-specific SDKs directly.
 
+## Implemented slices
 
-## Runtime config contracts to define later
+- Generic provider contracts plus an echo provider for tests/smoke checks.
+- Brain directive parsing for `brain-actions` blocks.
+- `BrainRuntime` turn handling that routes generic outbound actions back to the originating entrypoint and consumes `dispatch_subagent` actions when a subagent lifecycle port is configured.
+- Subagent job schemas, active/terminal status helpers, in-memory and file-backed job stores.
+- `FileRuntimeStateStore` for workspace-local JSON/JSONL runtime state under a private workspace state directory.
+- `SubagentLifecycle` for provider-neutral queueing, dispatch, running/terminal transitions, cancellation, steering, hydration/abandonment of active persisted jobs, and test/static executor hooks.
 
-Runtime-core should eventually own schemas for workspace-scoped active entrypoint configuration:
+## Boundary rules
 
-- `primaryEntrypointId` is required for each workspace.
-- `enabledEntrypoints` is a map of stable entrypoint IDs to kind, enabled state, display metadata, capability flags, and adapter config references.
-- Default outbound routing is `originating-entrypoint`.
-- Prompt context exposes generic active-entrypoint metadata and capabilities, never channel secrets.
-- `single-primary` mode rejects multiple enabled entrypoints; future `multi-explicit` mode must require deliberate routing/conflict config.
-
-No runtime implementation has been ported yet; see `docs/runtime-configuration.md` for the design skeleton.
+Runtime-core deals in generic workspaces, entrypoints, providers, jobs, artifacts, and outbound actions. Provider packages own model transport details; entrypoint packages own channel delivery details; workspace data stays outside the repo.

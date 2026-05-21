@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-import { access, mkdir, readFile, stat } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
@@ -9,6 +10,7 @@ import { parse as parseToml } from "smol-toml";
 import YAML from "yaml";
 import { validateAssistantPack } from "@brain/assistant-pack-schema";
 import { validateWorkspaceConfig, type BrainConfig } from "@brain/workspace-schema";
+import { FileSubagentJobStore, StaticSubagentExecutor, SubagentLifecycle } from "@brain/runtime-core";
 
 interface CliResult {
   ok: boolean;
@@ -73,16 +75,17 @@ async function doctorCommand(options: { config: string; pack: string }): Promise
   const configResult = await configValidateCommand(options.config);
   const packResult = await packValidateCommand(options.pack);
   const privateBoundary = await privateBoundaryCheck();
+  const runtimeCore = await runtimeCoreSelfTest();
   const toolchain = {
     node: process.version,
     git: runVersion("git", ["--version"]),
     pnpm: runVersion("pnpm", ["--version"]),
   };
-  const ok = configResult.ok && packResult.ok && privateBoundary.ok;
+  const ok = configResult.ok && packResult.ok && privateBoundary.ok && runtimeCore.ok;
   return {
     ok,
     summary: ok ? "doctor checks passed" : "doctor checks failed",
-    details: { config: configResult, pack: packResult, privateBoundary, toolchain },
+    details: { config: configResult, pack: packResult, privateBoundary, runtimeCore, toolchain },
   };
 }
 
@@ -177,6 +180,33 @@ async function privateBoundaryCheck(): Promise<CliResult> {
     }
   }
   return { ok: missing.length === 0, summary: missing.length === 0 ? "private boundary placeholders present" : "private boundary placeholders missing", details: { missing } };
+}
+
+async function runtimeCoreSelfTest(): Promise<CliResult> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "brain-runtime-doctor-"));
+  try {
+    const store = new FileSubagentJobStore({ root: path.join(root, "state") });
+    const lifecycle = new SubagentLifecycle({
+      workspaceId: "doctor",
+      store,
+      executor: new StaticSubagentExecutor({ id: "doctor-static", outputText: "ok" }),
+      artifactRoot: path.join(root, "artifacts"),
+      idFactory: () => "job_doctor",
+    });
+    await lifecycle.init();
+    const jobId = await lifecycle.dispatch({ profile: "doctor", prompt: "runtime self-test", route: "store_only" });
+    await lifecycle.waitForIdle();
+    const job = await store.get(jobId);
+    return {
+      ok: job?.status === "completed" && job.resultText === "ok",
+      summary: job?.status === "completed" ? "runtime store and subagent lifecycle self-test passed" : "runtime store and subagent lifecycle self-test failed",
+      details: { jobId, status: job?.status, provider: job?.provider, stateRoot: "temporary" },
+    };
+  } catch (error) {
+    return { ok: false, summary: "runtime store and subagent lifecycle self-test failed", details: { error: error instanceof Error ? error.message : String(error) } };
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 }
 
 function runVersion(command: string, args: string[]): string {
