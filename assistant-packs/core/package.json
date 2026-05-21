@@ -1,0 +1,7 @@
+{
+  "name": "@brain/assistant-pack-core",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Core assistant pack placeholder for public-safe prompts, skills, workflows, and setup guidance.",
+  "type": "module"
+}

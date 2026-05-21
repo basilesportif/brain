@@ -1,0 +1,7 @@
+{
+  "name": "@brain/runtime-core",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Provider-neutral runtime contracts for assistant orchestration.",
+  "type": "module"
+}

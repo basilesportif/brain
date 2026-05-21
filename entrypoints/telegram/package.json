@@ -1,0 +1,7 @@
+{
+  "name": "@brain/entrypoint-telegram",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Telegram entrypoint adapter placeholder that maps Telegram updates to Brain inbound events and outbound actions back to Telegram.",
+  "type": "module"
+}

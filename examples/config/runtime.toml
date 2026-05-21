@@ -1,0 +1,32 @@
+[runtime]
+activeEntrypointMode = "single-primary"
+
+[workspaces.personal]
+workspacePath = "/srv/brain/workspaces/personal"
+primaryEntrypointId = "telegram-main"
+
+[workspaces.personal.enabledEntrypoints.telegram-main]
+kind = "telegram"
+enabled = true
+displayName = "Personal Telegram"
+configRef = "env:TELEGRAM_MAIN_CONFIG"
+
+[workspaces.personal.enabledEntrypoints.telegram-main.capabilities]
+replies = true
+edits = true
+artifactUploads = true
+statusUpdates = true
+
+[workspaces.personal.enabledEntrypoints.web-preview]
+kind = "web"
+enabled = false
+displayName = "Web preview"
+configRef = "env:WEB_PREVIEW_CONFIG"
+
+[workspaces.personal.outboundDefaults]
+route = "originating-entrypoint"
+allowCrossEntrypointReplies = false
+
+[workspaces.personal.promptContext]
+includeActiveEntrypointMetadata = true
+exposeChannelSecrets = false

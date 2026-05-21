@@ -1,0 +1,29 @@
+runtime:
+  activeEntrypointMode: single-primary
+
+workspaces:
+  personal:
+    workspacePath: /srv/brain/workspaces/personal
+    primaryEntrypointId: telegram-main
+    enabledEntrypoints:
+      telegram-main:
+        kind: telegram
+        enabled: true
+        displayName: Personal Telegram
+        configRef: env:TELEGRAM_MAIN_CONFIG
+        capabilities:
+          replies: true
+          edits: true
+          artifactUploads: true
+          statusUpdates: true
+      web-preview:
+        kind: web
+        enabled: false
+        displayName: Web preview
+        configRef: env:WEB_PREVIEW_CONFIG
+    outboundDefaults:
+      route: originating-entrypoint
+      allowCrossEntrypointReplies: false
+    promptContext:
+      includeActiveEntrypointMetadata: true
+      exposeChannelSecrets: false

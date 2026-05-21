@@ -1,0 +1,7 @@
+{
+  "name": "@brain/web",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Placeholder for web shell and static page publishing concepts extracted from codex-chat-web.",
+  "type": "module"
+}

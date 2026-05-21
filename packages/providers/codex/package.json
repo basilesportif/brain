@@ -1,0 +1,7 @@
+{
+  "name": "@brain/provider-codex",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Codex provider adapter placeholder; Codex app-server details live behind this package.",
+  "type": "module"
+}

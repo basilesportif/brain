@@ -1,0 +1,7 @@
+{
+  "name": "@brain/provider-claude-code",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Claude Code provider adapter placeholder using SDK and subagent mechanisms.",
+  "type": "module"
+}

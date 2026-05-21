@@ -1,0 +1,6 @@
+packages:
+  - "apps/*"
+  - "entrypoints/*"
+  - "packages/*"
+  - "packages/providers/*"
+  - "assistant-packs/*"
