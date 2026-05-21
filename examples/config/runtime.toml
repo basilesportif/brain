@@ -3,6 +3,7 @@ activeEntrypointMode = "single-primary"
 
 [workspaces.personal]
 workspacePath = "/srv/brain/workspaces/personal"
+provider = "codex"
 primaryEntrypointId = "telegram-main"
 
 [workspaces.personal.enabledEntrypoints.telegram-main]

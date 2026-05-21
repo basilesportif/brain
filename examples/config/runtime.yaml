@@ -4,6 +4,7 @@ runtime:
 workspaces:
   personal:
     workspacePath: /srv/brain/workspaces/personal
+    provider: codex
     primaryEntrypointId: telegram-main
     enabledEntrypoints:
       telegram-main:

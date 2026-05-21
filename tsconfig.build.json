@@ -1,0 +1,14 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/entrypoint-protocol" },
+    { "path": "packages/config/workspace-schema" },
+    { "path": "packages/assistant-pack-schema" },
+    { "path": "packages/runtime-core" },
+    { "path": "packages/providers/codex" },
+    { "path": "packages/providers/claude-code" },
+    { "path": "entrypoints/telegram" },
+    { "path": "apps/web" },
+    { "path": "." }
+  ]
+}

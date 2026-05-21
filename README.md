@@ -24,6 +24,16 @@ pnpm run check
 
 The check currently validates that the skeleton structure exists, that runtime config examples are present, and that private boundary directories contain only their README placeholders.
 
+
+## brainctl
+
+`brainctl` is the operator CLI skeleton for Brain. It currently validates runtime config, assistant-pack manifests, private-boundary hygiene, and secret reference metadata without starting a live runtime or printing secret values. See `docs/brainctl.md`.
+
+```bash
+pnpm run build
+pnpm run brainctl -- doctor --config examples/config/runtime.yaml --pack assistant-packs/core
+```
+
 ## Design goals
 
 - Clean monorepo first, with an option to make public-safe slices later.

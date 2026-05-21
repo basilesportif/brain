@@ -1,0 +1,130 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      '@brain/assistant-pack-schema':
+        specifier: workspace:*
+        version: link:packages/assistant-pack-schema
+      '@brain/workspace-schema':
+        specifier: workspace:*
+        version: link:packages/config/workspace-schema
+      commander:
+        specifier: ^14.0.1
+        version: 14.0.3
+      smol-toml:
+        specifier: ^1.4.2
+        version: 1.6.1
+      yaml:
+        specifier: ^2.8.1
+        version: 2.9.0
+      zod:
+        specifier: ^4.1.12
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: ^24.7.2
+        version: 24.12.4
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
+  apps/web: {}
+
+  assistant-packs/core: {}
+
+  entrypoints/telegram:
+    dependencies:
+      '@brain/entrypoint-protocol':
+        specifier: workspace:*
+        version: link:../../packages/entrypoint-protocol
+
+  packages/assistant-pack-schema:
+    dependencies:
+      zod:
+        specifier: ^4.1.12
+        version: 4.4.3
+
+  packages/config/workspace-schema:
+    dependencies:
+      zod:
+        specifier: ^4.1.12
+        version: 4.4.3
+
+  packages/entrypoint-protocol: {}
+
+  packages/providers/claude-code:
+    dependencies:
+      '@brain/runtime-core':
+        specifier: workspace:*
+        version: link:../../runtime-core
+
+  packages/providers/codex:
+    dependencies:
+      '@brain/runtime-core':
+        specifier: workspace:*
+        version: link:../../runtime-core
+
+  packages/runtime-core:
+    dependencies:
+      '@brain/entrypoint-protocol':
+        specifier: workspace:*
+        version: link:../entrypoint-protocol
+      '@brain/workspace-schema':
+        specifier: workspace:*
+        version: link:../config/workspace-schema
+      zod:
+        specifier: ^4.1.12
+        version: 4.4.3
+
+packages:
+
+  '@types/node@24.12.4':
+    resolution: {integrity: sha512-GUUEShf+PBCGW2KaXwcIt3Yk+e3pkKwWKb9GSyM9WQVE+ep2jzmHdGsHzu4wgcZy5fN9FBdVzjpBQsYlpfpgLA==}
+
+  commander@14.0.3:
+    resolution: {integrity: sha512-H+y0Jo/T1RZ9qPP4Eh1pkcQcLRglraJaSLoyOtHxu6AapkjWVCy2Sit1QQ4x3Dng8qDlSsZEet7g5Pq06MvTgw==}
+    engines: {node: '>=20'}
+
+  smol-toml@1.6.1:
+    resolution: {integrity: sha512-dWUG8F5sIIARXih1DTaQAX4SsiTXhInKf1buxdY9DIg4ZYPZK5nGM1VRIYmEbDbsHt7USo99xSLFu5Q1IqTmsg==}
+    engines: {node: '>= 18'}
+
+  typescript@5.9.3:
+    resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
+    engines: {node: '>=14.17'}
+    hasBin: true
+
+  undici-types@7.16.0:
+    resolution: {integrity: sha512-Zz+aZWSj8LE6zoxD+xrjh4VfkIG8Ya6LvYkZqtUQGJPZjYl53ypCaUwWqo7eI0x66KBGeRo+mlBEkMSeSZ38Nw==}
+
+  yaml@2.9.0:
+    resolution: {integrity: sha512-2AvhNX3mb8zd6Zy7INTtSpl1F15HW6Wnqj0srWlkKLcpYl/gMIMJiyuGq2KeI2YFxUPjdlB+3Lc10seMLtL4cA==}
+    engines: {node: '>= 14.6'}
+    hasBin: true
+
+  zod@4.4.3:
+    resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
+
+snapshots:
+
+  '@types/node@24.12.4':
+    dependencies:
+      undici-types: 7.16.0
+
+  commander@14.0.3: {}
+
+  smol-toml@1.6.1: {}
+
+  typescript@5.9.3: {}
+
+  undici-types@7.16.0: {}
+
+  yaml@2.9.0: {}
+
+  zod@4.4.3: {}

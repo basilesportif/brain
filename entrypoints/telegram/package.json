@@ -2,6 +2,17 @@
   "name": "@brain/entrypoint-telegram",
   "version": "0.0.0",
   "private": true,
-  "description": "Telegram entrypoint adapter placeholder that maps Telegram updates to Brain inbound events and outbound actions back to Telegram.",
-  "type": "module"
+  "description": "Telegram entrypoint adapter skeleton mapping Telegram updates to Brain events/actions.",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "test": "node --test dist/**/*.test.js"
+  },
+  "dependencies": {
+    "@brain/entrypoint-protocol": "workspace:*"
+  }
 }

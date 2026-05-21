@@ -107,9 +107,7 @@ Use this flow only after the user chooses remote mode and confirms the host.
 2. Add or reuse a local `~/.ssh/config` entry so `ssh <host-label>` works. If
    root is needed only for bootstrap, switch the alias to the service user after
    user creation.
-3. Prepare the server with the setup-server skill from assistant-agent-logic:
-   `/home/tim/pkg/tim/assistant-agent-logic/config/skills/setup-server.md`.
-   For Brain, adapt it as follows:
+3. Prepare the server with the configured setup-server runbook. For Brain, adapt it as follows:
    - create/use a dedicated non-root Brain user with sudo for setup,
    - install Ubuntu base packages and Node/pnpm that satisfy this repo,
    - install Codex CLI or Claude Code CLI only if the selected provider needs
@@ -120,8 +118,7 @@ Use this flow only after the user chooses remote mode and confirms the host.
      creating a new key for initial bootstrap,
    - keep all provider and Telegram secrets out of the checkout.
 4. Verify service-user access through the local SSH config alias.
-5. Clone/update `https://github.com/basilesportif/brain` or the user-confirmed
-   remote into the chosen repo path.
+5. Clone/update the user-confirmed Brain repository remote into the chosen repo path.
 6. Run dependency/check commands from the remote repo root, at minimum
    `pnpm run check` after any install step.
 7. Create the remote private workspace directories listed in the local flow.

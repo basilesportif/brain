@@ -2,5 +2,6 @@ packages:
   - "apps/*"
   - "entrypoints/*"
   - "packages/*"
+  - "packages/config/*"
   - "packages/providers/*"
   - "assistant-packs/*"

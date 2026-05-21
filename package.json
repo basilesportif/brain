@@ -6,12 +6,29 @@
   "license": "UNLICENSED",
   "type": "module",
   "packageManager": "pnpm@10.18.3",
+  "bin": {
+    "brainctl": "dist/brainctl.js"
+  },
   "scripts": {
-    "check": "node scripts/check-skeleton.mjs",
-    "test": "pnpm run check"
+    "build": "tsc -b tsconfig.build.json",
+    "check": "node scripts/check-skeleton.mjs && pnpm run build && node --test \"packages/*/dist/**/*.test.js\" \"packages/providers/*/dist/**/*.test.js\" \"entrypoints/*/dist/**/*.test.js\" \"apps/*/dist/**/*.test.js\" && node dist/brainctl.js doctor --config examples/config/runtime.yaml --pack assistant-packs/core",
+    "test": "pnpm run check",
+    "brainctl": "node dist/brainctl.js"
   },
   "engines": {
     "node": ">=24",
     "pnpm": ">=10"
+  },
+  "dependencies": {
+    "@brain/assistant-pack-schema": "workspace:*",
+    "@brain/workspace-schema": "workspace:*",
+    "commander": "^14.0.1",
+    "smol-toml": "^1.4.2",
+    "yaml": "^2.8.1",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/node": "^24.7.2",
+    "typescript": "^5.9.3"
   }
 }

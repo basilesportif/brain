@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "core",
+  "name": "Brain Core Assistant Pack",
+  "version": "0.0.0",
+  "description": "Portable setup and artifact workflow guidance for Brain runtimes.",
+  "skills": [
+    "skills/setup-self-host/SKILL.md",
+    "skills/generated-web-page/SKILL.md"
+  ],
+  "prompts": [],
+  "workflows": [
+    "workflows/static-page.json"
+  ],
+  "boundaries": {
+    "entrypointNeutral": true,
+    "providerNeutral": true,
+    "containsPrivateData": false
+  }
+}

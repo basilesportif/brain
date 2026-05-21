@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "id": "static-page",
+  "name": "Static generated page workflow",
+  "description": "Validate and publish static scratch pages through Brain web publisher boundaries.",
+  "skill": "generated-web-page"
+}
