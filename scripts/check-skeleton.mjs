@@ -13,8 +13,6 @@ const requiredPaths = [
   "README.md",
   "AGENTS.md",
   "CLAUDE.md",
-  "setup/AGENTS.md",
-  "setup/CLAUDE.md",
   "entrypoints/telegram/package.json",
   "apps/web/package.json",
   "packages/runtime-core/package.json",
@@ -71,7 +69,7 @@ for (const dir of privateBoundaryDirs) {
   }
 }
 
-for (const relativePath of ["setup/AGENTS.md", "docs/setup-plan.md", "assistant-packs/core/skills/setup-self-host/SKILL.md"]) {
+for (const relativePath of ["AGENTS.md", "docs/setup-plan.md", "assistant-packs/core/skills/setup-self-host/SKILL.md"]) {
   const content = await readFile(path.join(root, relativePath), "utf8");
   if (!content.includes("first-user")) {
     console.error(`${relativePath} must document first-user Telegram pairing as the default setup path`);

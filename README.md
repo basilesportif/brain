@@ -16,6 +16,16 @@ plans/                    Migration and consolidation plans.
 workspace/, private/, data/  User-owned/private boundaries; ignored except README placeholders.
 ```
 
+
+## Setup
+
+Clone or open this repository root in Codex or Claude Code, then say `setup`.
+The agent should stay in the repo root, read `AGENTS.md`, `CLAUDE.md` when
+running under Claude Code, `docs/setup-plan.md`, and
+`assistant-packs/core/skills/setup-self-host/SKILL.md`, then ask whether to set
+up a local private workspace or a remote Ubuntu server over SSH. Do not `cd`
+into a separate setup directory.
+
 ## Initial commands
 
 ```bash

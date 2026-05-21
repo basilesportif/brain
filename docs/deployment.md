@@ -2,6 +2,16 @@
 
 No live deployment is executed by this repository by default. Brain now includes non-mutating operations seams that render the commands and unit files an operator can review before installing anything.
 
+
+## Canonical setup UX
+
+For a first install, clone/open the Brain repo root in Codex or Claude Code and
+say `setup`. The agent should remain at the repository root, read the root agent
+guidance plus `docs/setup-plan.md` and
+`assistant-packs/core/skills/setup-self-host/SKILL.md`, ask local vs remote, and
+continue with the appropriate local workspace or remote SSH flow. Do not ask the
+user to enter a separate setup directory.
+
 Deployment docs and private notes should define:
 
 - Supported self-host target OS and prerequisites.

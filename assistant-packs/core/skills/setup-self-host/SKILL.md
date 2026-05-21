@@ -14,9 +14,10 @@ deployment handoff.
 
 ## Safety rules
 
-- Start from the repo root.
-- Read `AGENTS.md`, `CLAUDE.md` if running under Claude Code,
-  `docs/setup-plan.md`, and `setup/AGENTS.md` before changing anything.
+- Start from the repo root after the user says `setup`; do not `cd` into a
+  separate setup directory.
+- Read `AGENTS.md`, `CLAUDE.md` if running under Claude Code, and
+  `docs/setup-plan.md` before changing anything.
 - Ask the user to choose **local directory** or **remote server over SSH** before
   setup actions.
 - Ask before editing local `~/.ssh/config`, contacting a real host, writing a
@@ -28,6 +29,12 @@ deployment handoff.
   presence. Never print token values or raw chat/user IDs.
 - Run `pnpm run check` after setup/documentation edits and before declaring
   setup ready.
+
+## Canonical user flow
+
+The user clones/opens the Brain repo root in Codex or Claude Code and says
+`setup`. The agent then reads the referenced root docs/skill files and asks the
+first local-vs-remote question below.
 
 ## Required first prompt
 

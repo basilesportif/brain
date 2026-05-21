@@ -121,7 +121,7 @@ Legend:
 ### 9. Fresh-server setup
 
 - [x] Docs and assistant-pack skill describe local/remote setup questions, private workspace directories, server prerequisites, provider choice, Telegram bootstrap, secret metadata checks, and no-secrets summaries.
-- [~] `brainctl setup` creates local private directory scaffolding; top-level `setup/AGENTS.md`/`CLAUDE.md` now guide local/remote setup through prerequisites, private config/secrets placeholders, provider/Telegram metadata, and validation before any live deploy.
+- [~] `brainctl setup` creates local private directory scaffolding; root-level `AGENTS.md`/`CLAUDE.md` now guide local/remote setup through prerequisites, private config/secrets placeholders, provider/Telegram metadata, and validation before any live deploy.
 - [~] Fresh Ubuntu bootstrap automation remains partial: systemd templates and service env metadata/smoke planning exist, but remote bootstrap, reverse-proxy/webhook guidance, and remote smoke execution remain pending.
 
 ### 10. Migration and smoke tests
@@ -194,7 +194,7 @@ Self-audit after this pass: **DEPLOYABLE FEATURE-PARITY SURFACE: YES; LIVE-CUTOV
 - Wired provider-backed subagent execution into non-fake supervisor runtimes;
   static subagents remain only for explicit fake/test supervisor paths and
   local fake automation/doctor harnesses.
-- Added top-level `setup/AGENTS.md` plus `setup/CLAUDE.md` symlink with a
+- Added root-level `setup` UX guidance in `AGENTS.md`/`CLAUDE.md` with a
   concise local/remote setup flow: collect minimal target details, validate a
   dedicated Brain user/server prerequisites, clone/pull, prepare private config
   and secrets placeholders outside git, configure Codex-first provider metadata,

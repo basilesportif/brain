@@ -2,7 +2,7 @@
 
 Initial target: users run their own assistant server, one primary entrypoint, and a private workspace. SaaS can be considered later.
 
-The setup docs and skills should be readable by Codex or Claude Code itself so a user can start either assistant from this repo root and ask it to guide setup.
+The setup docs and skills should be readable by Codex or Claude Code itself so a user can clone/open this repo root, say `setup`, and let the agent ask local vs remote before continuing. Agents should not ask users to `cd` into a separate setup directory.
 
 ## Supported first setup paths
 
@@ -39,8 +39,7 @@ Self-host config should start from `examples/config/runtime.yaml` or `examples/c
 
 ## Agent-driven setup path
 
-Agents should use `docs/setup-plan.md` and `setup/AGENTS.md` as the current
-source of truth for the safe setup contract:
+Agents should use root-level `AGENTS.md`, `CLAUDE.md` when running under Claude Code, `docs/setup-plan.md`, and `assistant-packs/core/skills/setup-self-host/SKILL.md` as the current source of truth for the safe setup contract. The canonical user command is `setup` from the repository root:
 
 - `brainctl setup` for local private workspace scaffolding.
 - `brainctl doctor` for environment and credential-readiness checks.

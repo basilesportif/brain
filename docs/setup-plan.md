@@ -1,7 +1,7 @@
 # Guided setup plan
 
-Goal: a user can open this repo root with Codex or Claude Code, say "make
-this work", and the agent can guide a first local or remote bootstrap without
+Goal: a user can clone/open this repo root with Codex or Claude Code, say
+`setup`, and the agent can guide a first local or remote bootstrap without
 access to the maintainer's private workspace, integrations, credentials, or
 hosts.
 
@@ -12,19 +12,20 @@ live deployment unless the user explicitly confirms.
 
 ## Agent entrypoints
 
-When started from the repository root, Codex and Claude Code agents should:
+When started from the repository root, Codex and Claude Code agents should treat
+the root-level `setup` request as the setup entrypoint. Do not ask the user to
+change directories into `setup/`.
 
 1. Read `AGENTS.md`; Claude Code also reads `CLAUDE.md`.
 2. Read this setup plan.
 3. Read `assistant-packs/core/skills/setup-self-host/SKILL.md`.
-4. Read `setup/AGENTS.md` for the short setup checklist.
-5. For remote Ubuntu preparation, read the upstream helper skill at
+4. For remote Ubuntu preparation, read the upstream helper skill at
    `/home/tim/pkg/tim/assistant-agent-logic/config/skills/setup-server.md` and
    adapt only its public-safe, user-owned steps.
-6. Run `pnpm run check` before and after setup or documentation changes.
-7. Ask before touching any real remote host, local SSH config, systemd unit,
+5. Run `pnpm run check` before and after setup or documentation changes.
+6. Ask before touching any real remote host, local SSH config, systemd unit,
    secret file, or credential.
-8. Keep real workspace config, env files, tokens, Telegram IDs, logs, generated
+7. Keep real workspace config, env files, tokens, Telegram IDs, logs, generated
    artifacts, repo-registry state, hostnames, and deployment notes outside git.
 
 ## First question: local directory or remote SSH server?
