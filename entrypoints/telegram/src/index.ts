@@ -84,6 +84,13 @@ export interface TelegramPairingStore {
 export interface TelegramPairingOptions {
   enabled?: boolean;
   enabledOnEmptyAllowlist?: boolean;
+  /**
+   * `first-user` is the default bootstrap: when no explicit allowlist and no
+   * paired identities exist, the first Telegram user/chat that sends a message
+   * is persisted as the admin pair. `code` preserves the optional advanced
+   * `/pair <code>` flow.
+   */
+  mode?: "first-user" | "code";
   store: TelegramPairingStore;
   codeFactory?: () => string;
   replyOnPair?: boolean;
@@ -355,6 +362,7 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
       if (await this.handlePairingUpdate(update)) continue;
       const event = telegramUpdateToInboundEvent(update, { ...this.options, adminAllowlist: undefined });
       if (!event) continue;
+      await this.pairFirstUserIfNeeded(event);
       if (!(await this.isEventAllowed(event))) continue;
       const prepared = await this.prepareInboundEvent(event);
       this.lastEventId = prepared.id;
@@ -391,7 +399,8 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
     if (!pairing?.enabled) return { enabled: false, pending: false, users: 0, chats: 0, codePresent: false };
     await pairing.store.init?.();
     const [users, chats, code] = await Promise.all([pairing.store.listUsers(), pairing.store.listChats(), pairing.store.readPairingCode()]);
-    return { enabled: true, pending: Boolean(code), users: users.length, chats: chats.length, codePresent: Boolean(code) };
+    const pendingFirstUser = pairingMode(pairing) === "first-user" && (await this.shouldEnablePairing(pairing));
+    return { enabled: true, pending: pendingFirstUser || Boolean(code), users: users.length, chats: chats.length, codePresent: Boolean(code) };
   }
 
   private async preparePairing(): Promise<void> {
@@ -400,6 +409,7 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
     await pairing.store.init?.();
     const shouldEnable = await this.shouldEnablePairing(pairing);
     if (!shouldEnable) return;
+    if (pairingMode(pairing) === "first-user") return;
     const existing = await pairing.store.readPairingCode();
     if (!existing) await pairing.store.writePairingCode((pairing.codeFactory?.() ?? makeTelegramPairingCode()).trim());
   }
@@ -415,6 +425,7 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
   private async handlePairingUpdate(update: TelegramUpdateLike): Promise<boolean> {
     const pairing = this.options.pairing;
     if (!pairing?.enabled) return false;
+    if (pairingMode(pairing) !== "code" && !(await pairing.store.readPairingCode())) return false;
     const command = telegramPairCommand(update);
     if (!command) return false;
     const expected = await pairing.store.readPairingCode();
@@ -441,6 +452,23 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
       chatIds: [...(this.options.adminAllowlist?.chatIds ?? []), ...chats.map((chat) => chat.chatId)],
       denyWhenEmpty: this.options.adminAllowlist?.denyWhenEmpty ?? true,
     });
+  }
+
+  private async pairFirstUserIfNeeded(event: EntryPointInboundEvent): Promise<void> {
+    const pairing = this.options.pairing;
+    if (!pairing?.enabled || pairingMode(pairing) !== "first-user") return;
+    if (!(await this.shouldEnablePairing(pairing))) return;
+    const userId = event.actor?.id;
+    const chatId = event.conversation?.id;
+    if (userId === undefined || chatId === undefined) return;
+    await pairing.store.addIdentity(userId, chatId, true);
+    if (pairing.replyOnPair !== false && this.options.apiClient) {
+      await this.options.apiClient.call("sendMessage", compact({
+        chat_id: chatId,
+        text: "Paired this Telegram user and chat as the Brain admin.",
+        reply_to_message_id: typeof event.metadata?.telegramMessageId === "number" ? event.metadata.telegramMessageId : undefined,
+      })).catch(() => undefined);
+    }
   }
 
   private updateSource(): AsyncIterable<TelegramUpdateLike> {
@@ -896,6 +924,10 @@ function telegramPairCommand(update: TelegramUpdateLike): { code: string; userId
   const match = text.match(/^\/pair(?:@\w+)?\s+(\S+)$/i);
   if (!match || !match[1] || !message.from) return undefined;
   return { code: match[1], userId: String(message.from.id), chatId: String(message.chat.id), messageId: message.message_id };
+}
+
+function pairingMode(pairing: TelegramPairingOptions): "first-user" | "code" {
+  return pairing.mode ?? (pairing.codeFactory ? "code" : "first-user");
 }
 
 function makeTelegramPairingCode(): string {

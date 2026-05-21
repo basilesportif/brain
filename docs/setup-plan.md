@@ -59,8 +59,10 @@ Ask these questions explicitly. Defaults are suggestions, not assumptions.
 4. Should the initial primary entrypoint be Telegram? Initial bootstrap assumes
    `telegram-main` unless the user asks for a fake/smoke-test entrypoint only.
 5. Do you already have a Telegram bot token from BotFather?
-6. Which Telegram account should become the initial admin? Use a pairing flow or
-   user-supplied Telegram user/chat ID stored only in private config.
+6. Which Telegram admin bootstrap should be used? Default: first-user pairing,
+   where the first Telegram user/chat to message the newly configured bot is
+   persisted as the paired/admin identity in private state. Use a user-supplied
+   explicit allowlist or optional `/pair` code only if requested.
 7. Is generated web/page publishing needed now? Default: no; keep web preview
    disabled unless the user explicitly enables it.
 
@@ -165,8 +167,12 @@ on private workspace knowledge.
   explicitly chooses a fake entrypoint for smoke testing.
 - Bot token is stored privately, for example in the workspace secrets file or an
   adapter-owned env file with mode `0600`.
-- Admin pairing starts with either a user-provided admin Telegram ID or a short
-  one-time pairing code that the user sends to the bot; raw IDs stay private.
+- Admin pairing defaults to first-user pairing: after the bot token is configured
+  and the service starts, the first Telegram user/chat to message the bot is
+  persisted under private `state/telegram-pairing` as the paired/admin identity.
+  Raw IDs stay private.
+- Advanced paths remain supported when deliberately chosen: a user-provided
+  explicit admin allowlist or an optional one-time `/pair <code>` flow.
 - Once paired, the Telegram entrypoint should be able to receive setup commands
   so future integrations can be configured through Telegram.
 - No Composio or third-party integration token is required for this bootstrap.
@@ -220,6 +226,9 @@ on private workspace knowledge.
    ```bash
    pnpm run brainctl -- config validate <private-config>
    pnpm run brainctl -- secrets check --config <private-config>
+   pnpm run brainctl -- entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN \
+     --polling-state <workspace>/state/telegram-offset.json \
+     --pairing-state <workspace>/state/telegram-pairing
    pnpm run brainctl -- doctor --config <private-config> --pack assistant-packs/core
    pnpm run brainctl -- operations validate --config <private-config> --workspace <workspace-name> --repo <repo-root>
    pnpm run brainctl -- operations systemd --config <private-config> --workspace <workspace-name> --repo <repo-root>
@@ -228,8 +237,9 @@ on private workspace knowledge.
 8. Use `brainctl run --fake --once --fake-text help` only for fake/dev smoke.
    Config-driven `brainctl start`/`run` resolves the provider and entrypoint
    from runtime config by default.
-9. Summarize next steps to complete provider auth, Telegram admin pairing, and
-   any explicit live start confirmation.
+9. Summarize next steps to complete provider auth, Telegram first-user pairing
+   (or the explicitly selected allowlist/`/pair` advanced path), and any
+   explicit live start confirmation.
 
 ## Remote SSH setup flow
 
@@ -274,8 +284,7 @@ explicitly requested.
    Record its `ExecStart`, env file, working directory, restart policy, log
    command, and health command.
 10. Run metadata-only checks and report exactly what remains before a live start:
-    provider auth, Telegram bot token, admin pairing, service enable/start, and
-    optional webhook/web configuration.
+    provider auth, Telegram bot token, first-user pairing or selected admin bootstrap, service enable/start, and optional webhook/web configuration.
 
 ## Current `brainctl` CLI shape
 
@@ -286,6 +295,9 @@ pnpm run brainctl -- setup --workspace <name> --path <private-workspace-path>
 pnpm run brainctl -- doctor --config <runtime-config> --pack assistant-packs/core
 pnpm run brainctl -- config validate <runtime-config>
 pnpm run brainctl -- secrets check --config <runtime-config>
+pnpm run brainctl -- entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN \
+  --polling-state <workspace>/state/telegram-offset.json \
+  --pairing-state <workspace>/state/telegram-pairing
 pnpm run brainctl -- start --config <runtime-config> --workspace <name>
 pnpm run brainctl -- run --config <runtime-config> --workspace <name> --fake --once --fake-text help
 pnpm run brainctl -- operations validate --config <runtime-config> --workspace <name> --repo <checkout>
@@ -301,7 +313,7 @@ The CLI should print paths and actions, but not secret values.
 - Runtime config validates with one primary enabled entrypoint.
 - Provider adapter can authenticate or report a clear unauthenticated state.
 - Telegram adapter can validate token/admin-pairing metadata without exposing
-  token, chat ID, or user ID values.
+  token, chat ID, user ID, or pairing code values.
 - Telegram is ready enough that future integration setup can continue through
   Telegram after admin pairing.
 - No private data, generated artifacts, logs, tokens, hostnames, Composio config,

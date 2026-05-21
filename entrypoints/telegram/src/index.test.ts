@@ -123,6 +123,47 @@ test("Telegram pairing bootstrap stores one-time paired identities before allowl
 });
 
 
+test("Telegram first-user bootstrap pairs the first user/chat by default", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-telegram-first-user-"));
+  try {
+    const calls: Array<{ method: string; payload?: Record<string, unknown> }> = [];
+    const api: TelegramBotApi = {
+      async call(method, payload) {
+        calls.push({ method, payload });
+        return { ok: true, result: { message_id: 101 } };
+      },
+    };
+    const store = new FileTelegramPairingStore(root);
+    const adapter = new TelegramEntrypointAdapter({
+      workspaceId: "personal",
+      apiClient: api,
+      pairing: { enabled: true, store },
+      updates: [
+        { update_id: 710, message: { message_id: 1, text: "first hello", chat: { id: 123 }, from: { id: 7 } } },
+        { update_id: 711, message: { message_id: 2, text: "same chat intruder", chat: { id: 123 }, from: { id: 8 } } },
+        { update_id: 712, message: { message_id: 3, text: "same user other chat", chat: { id: 999 }, from: { id: 7 } } },
+        { update_id: 713, message: { message_id: 4, text: "paired admin again", chat: { id: 123 }, from: { id: 7 } } },
+      ],
+    });
+    await adapter.start();
+    assert.deepEqual(await adapter.pairingStatus(), { enabled: true, pending: true, users: 0, chats: 0, codePresent: false });
+
+    const events = [];
+    for await (const event of adapter.inboundEvents()) events.push(event);
+
+    assert.deepEqual(events.map((event) => event.text), ["first hello", "paired admin again"]);
+    assert.deepEqual((await store.listUsers()).map((user) => [user.userId, user.isAdmin]), [["7", true]]);
+    assert.deepEqual((await store.listChats()).map((chat) => chat.chatId), ["123"]);
+    assert.equal((await store.readPairingCode()), undefined);
+    assert.equal((await adapter.pairingStatus()).pending, false);
+    assert.equal(calls[0]?.method, "sendMessage");
+    assert.match(String(calls[0]?.payload?.text), /Paired this Telegram user and chat/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+
 test("Telegram polling skeleton maps getUpdates without a real token", async () => {
   const calls: string[] = [];
   const api: TelegramBotApi = {

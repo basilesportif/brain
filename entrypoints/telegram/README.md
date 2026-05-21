@@ -18,15 +18,25 @@ This adapter should preserve current Telegram behavior by translating chats, mes
 
 Current implementation includes:
 
-- a no-network `TelegramEntrypointAdapter` wrapper over supplied update iterables and outbound dispatch hooks;
-- injectable Telegram Bot API boundary for outbound sends, multipart local uploads, file metadata, and download resolution;
+- a no-network `TelegramEntrypointAdapter` wrapper over supplied update
+  iterables and outbound dispatch hooks;
+- injectable Telegram Bot API boundary for outbound sends, multipart local
+  uploads, file metadata, and download resolution;
 - token loading from literal/env/file refs with redacted metadata only;
-- durable polling offset storage for Telegram `getUpdates` without any Brain turn replay/idempotency store;
+- durable polling offset storage for Telegram `getUpdates` without any Brain
+  turn replay/idempotency store;
 - polling and a small webhook HTTP server skeleton that do not require a real token in tests;
 - private admin allowlist filtering by Telegram user/chat id;
-- one-time `/pair <code>` bootstrap state for paired user/chat identities before allowlist filtering; and
-- opt-in attachment download plus an injectable voice/audio/video transcription seam that stores downloaded files under private runtime paths and appends transcript text to inbound events; and
-- outbound mapping for replies, edits, photo/document/voice/audio/video artifacts, status actions, reactions, and delete-after-send cleanup for staged local artifacts.
+- first-user bootstrap that persists the first Telegram user/chat as paired
+  admin state when no explicit allowlist exists;
+- optional advanced one-time `/pair <code>` bootstrap state for paired user/chat
+  identities before allowlist filtering;
+- opt-in attachment download plus an injectable voice/audio/video transcription
+  seam that stores downloaded files under private runtime paths and appends
+  transcript text to inbound events; and
+- outbound mapping for replies, edits, photo/document/voice/audio/video
+  artifacts, status actions, reactions, and delete-after-send cleanup for staged
+  local artifacts.
 
 It is suitable for runtime smoke tests and mapping checks. Live polling/webhook startup is still intentionally a skeleton: no process manager, reverse proxy, token file, or deployment side effects are installed by this package.
 
@@ -36,7 +46,12 @@ The setup flow should make Telegram usable enough for future configuration work:
 
 1. Store the BotFather token only in a private workspace secret file or host secret store.
 2. Configure `telegram-main` as the only enabled entrypoint in `single-primary` mode.
-3. Pair the initial admin by private user/chat ID or by a one-time pairing code the user sends to the bot (`/pair <code>`). The temporary code and paired identities live under private adapter state; checks should report only counts/presence, not the code value.
+3. Pair the initial admin with default first-user pairing: after the bot token is
+   configured, the first Telegram user/chat to message the bot is stored as
+   paired/admin state. Explicit private allowlists and optional one-time
+   `/pair <code>` are advanced alternatives. Paired identities and any temporary
+   code live under private adapter state; checks report only counts/presence,
+   not raw IDs or code values.
 4. Prefer polling for first bootstrap because it only requires outbound HTTPS.
 5. Leave webhook URL, reverse proxy, TLS, generated pages, and additional integrations disabled unless the user explicitly enables them.
 6. After admin pairing, allow future integration setup commands to be received through Telegram.

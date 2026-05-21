@@ -135,9 +135,18 @@ Current `codex-chat` behavior should migrate as a single-primary workspace confi
 - Preserve existing Telegram chat/thread/file behavior inside `entrypoints/telegram` translation code, not in runtime-core prompts.
 - Map Telegram replies, edits, uploads, typing/status updates, and failures to generic Brain outbound actions.
 - Ensure any outbound action created while handling a Telegram inbound event defaults back to `telegram-main`.
-- Keep bot tokens, webhook secrets, polling config, chat allowlists, and Telegram API details in the Telegram adapter config/secret boundary.
-- For Telegram polling, persist only Telegram's provider-native update offset (for example under workspace `state/telegram-offset.json`). Do not build a separate durable turn replay or idempotency store.
-- Telegram one-time `/pair <code>` bootstrap is adapter-owned state. Brain stores paired user/chat metadata and the temporary pairing code under the configured private state directory; checks and docs should report only presence/count metadata, not the code value.
+- Keep bot tokens, webhook secrets, polling config, chat allowlists, pairing
+  state, and Telegram API details in the Telegram adapter config/secret
+  boundary.
+- For Telegram polling, persist only Telegram's provider-native update offset
+  (for example under workspace `state/telegram-offset.json`). Do not build a
+  separate durable turn replay or idempotency store.
+- Telegram first-user pairing is the default adapter-owned bootstrap: when no
+  explicit allowlist or paired identity exists, the first Telegram user/chat to
+  message the bot is persisted as paired/admin state under the configured
+  private state directory. Explicit allowlists and optional one-time
+  `/pair <code>` remain advanced paths. Checks and docs report only
+  presence/count metadata, not raw IDs or code values.
 - Telegram attachment download is explicit runtime configuration. Downloaded files belong under private workspace artifacts/state, and voice/audio/video transcription is an injected command/provider seam; Brain stores transcript text on the inbound event/attachment metadata but does not copy transcription tokens or private prompts into the repo.
 - Loop and monitor definitions are validated in-process. The default runtime/CLI behavior does not install crontabs, filesystem watchers, or shell monitors; explicit future operator commands should be required for host-level scheduling.
 - Do not enable web or iOS in the migrated workspace until multi-entrypoint routing, identity, permissions, notifications, and conflict handling have explicit config and tests.

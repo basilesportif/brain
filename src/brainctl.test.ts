@@ -114,6 +114,22 @@ test("brainctl operations and live validation commands are non-mutating by defau
     assert.equal(liveJson.details.sideEffects, "none");
     assert.equal(liveJson.details.plan.networkStarted, false);
     assert.equal(liveJson.details.plan.checks.find((check) => check.id === "codex-provider")?.mode, "plan");
+
+    const pairingState = path.join(root, "telegram-pairing");
+    await mkdir(pairingState, { recursive: true });
+    await writeFile(path.join(pairingState, "telegram_users.json"), `${JSON.stringify([{ userId: "7", isAdmin: true }])}\n`);
+    await writeFile(path.join(pairingState, "telegram_chats.json"), `${JSON.stringify([{ chatId: "123" }])}\n`);
+    const entrypoint = spawnBrainctl(["entrypoint", "check", "telegram", "--workspace", "personal", "--pairing-state", pairingState]);
+    assert.equal(entrypoint.status, 0, entrypoint.stderr);
+    const entrypointJson = JSON.parse(entrypoint.stdout) as { ok: boolean; details: { pairing: { users: number; chats: number; codePresent: boolean; rawIdentifiersPrinted: boolean } } };
+    assert.equal(entrypointJson.ok, true);
+    assert.deepEqual(entrypointJson.details.pairing, {
+      stateDir: pairingState,
+      users: 1,
+      chats: 1,
+      codePresent: false,
+      rawIdentifiersPrinted: false,
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

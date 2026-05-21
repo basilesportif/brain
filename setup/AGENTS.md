@@ -1,9 +1,9 @@
 # Brain setup agent guide
 
-Use this folder when a user asks Codex or Claude Code to set up Brain. Keep the
-flow simple, inspectable, and safe: do not use real tokens, copy private data, or
-deploy/start a live service until the user explicitly confirms the final live
-cutover step.
+Use this folder as the entrypoint when a user asks Codex or Claude Code to set
+up Brain. Keep the flow simple, inspectable, and safe: do not use real tokens,
+copy private data, or deploy/start a live service until the user explicitly
+confirms the final live cutover step.
 
 ## First question
 
@@ -24,8 +24,12 @@ Common:
    no real Claude Code wiring should be installed yet.
 3. Primary entrypoint, default `telegram-main`.
 4. Private workspace path outside git.
-5. Whether provider auth, Telegram bot token, and Telegram admin pairing are
-   ready now or should remain placeholders.
+5. Whether provider auth and the Telegram bot token are ready now or should
+   remain placeholders.
+6. Telegram admin bootstrap method, default `first-user`: the first Telegram
+   user/chat that messages the newly configured bot is persisted as paired/admin
+   private state. Use an explicit allowlist or optional `/pair` code only if the
+   user asks for that advanced behavior.
 
 Remote-only:
 
@@ -63,11 +67,14 @@ Remote-only:
 8. Configure Telegram metadata:
    - token env/file ref,
    - polling as the first bootstrap mode unless the user requests webhook,
-   - one-time pairing code or admin metadata stored privately.
+   - first-user pairing state directory under private `state/telegram-pairing`,
+     or explicit allowlist/optional `/pair` code metadata if the user chose an
+     advanced path.
 9. Run validations from the repo root, using private paths where applicable:
    - `pnpm run check`,
    - `pnpm run brainctl -- config validate <private-runtime-config>`,
    - `pnpm run brainctl -- secrets check --config <private-runtime-config>`,
+   - `pnpm run brainctl -- entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN --polling-state <private-workspace>/state/telegram-offset.json --pairing-state <private-workspace>/state/telegram-pairing`,
    - `pnpm run brainctl -- doctor --config <private-runtime-config> --pack assistant-packs/core`,
    - `pnpm run brainctl -- operations validate --config <private-runtime-config> --workspace <workspace> --repo <checkout>`,
    - `pnpm run brainctl -- operations systemd --config <private-runtime-config> --workspace <workspace> --repo <checkout>`.
@@ -76,7 +83,9 @@ Remote-only:
 
 ## Safety rules
 
-- Print only secret metadata: existence, owner, mode, size, and key counts.
+- Print only secret/pairing metadata: existence, owner, mode, size, key counts,
+  paired user count, paired chat count, and code presence. Never print raw
+  Telegram user/chat IDs or pairing code values.
 - Do not inspect, echo, or copy secret values.
 - Do not copy private workspaces, logs, transcripts, generated artifacts, or
   repo-registry state into git.

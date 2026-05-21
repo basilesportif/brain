@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readdir, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
@@ -12,6 +12,9 @@ const requiredPaths = [
   "pnpm-workspace.yaml",
   "README.md",
   "AGENTS.md",
+  "CLAUDE.md",
+  "setup/AGENTS.md",
+  "setup/CLAUDE.md",
   "entrypoints/telegram/package.json",
   "apps/web/package.json",
   "packages/runtime-core/package.json",
@@ -64,6 +67,14 @@ for (const dir of privateBoundaryDirs) {
   const unexpected = entries.filter((entry) => entry !== "README.md");
   if (unexpected.length > 0) {
     console.error(`${dir}/ contains non-placeholder entries: ${unexpected.join(", ")}`);
+    failed = true;
+  }
+}
+
+for (const relativePath of ["setup/AGENTS.md", "docs/setup-plan.md", "assistant-packs/core/skills/setup-self-host/SKILL.md"]) {
+  const content = await readFile(path.join(root, relativePath), "utf8");
+  if (!content.includes("first-user")) {
+    console.error(`${relativePath} must document first-user Telegram pairing as the default setup path`);
     failed = true;
   }
 }

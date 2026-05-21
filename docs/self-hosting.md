@@ -28,9 +28,10 @@ The setup docs and skills should be readable by Codex or Claude Code itself so a
   - Claude Code provider hides SDK/subagent mechanics behind its adapter boundary.
 - Initial entrypoint should be Telegram as `telegram-main` in single-primary
   mode unless the user explicitly chooses a fake smoke-test entrypoint.
-- Telegram bootstrap requires only bot token and admin pairing metadata in a
-  private secret boundary. It should be enough to continue future integration
-  setup through Telegram after pairing.
+- Telegram bootstrap requires only bot token plus first-user admin pairing state
+  in a private boundary by default. Explicit admin allowlists and optional
+  `/pair` code bootstrap remain advanced paths. This should be enough to
+  continue future integration setup through Telegram after pairing.
 - Composio and other third-party integrations are optional follow-ups, never
   required for first bootstrap.
 

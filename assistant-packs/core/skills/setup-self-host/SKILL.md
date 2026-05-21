@@ -55,9 +55,11 @@ Then collect the path-specific fields below.
    smoke testing.
 5. Telegram bot token from BotFather ready? If yes, store privately; if no,
    leave token pending.
-6. Initial Telegram admin pairing method?
-   - user supplies an admin ID privately,
-   - setup creates a one-time pairing code for the user to send to the bot,
+6. Initial Telegram admin bootstrap method?
+   - default: first-user pairing, where the first Telegram user/chat to message
+     the newly configured bot becomes paired/admin state,
+   - user supplies an explicit admin allowlist privately,
+   - optional advanced one-time `/pair <code>` flow,
    - not ready; leave pairing pending.
 7. Optional generated pages/web preview? Default: disabled.
 
@@ -84,7 +86,8 @@ Then collect the path-specific fields below.
    - exactly one enabled entrypoint in `single-primary` mode,
    - optional `web-preview` disabled.
 6. Store provider auth and Telegram token/admin-pairing data only in workspace
-   secret files or the user's chosen secret store.
+   secret files, private `state/telegram-pairing`, or the user's chosen secret
+   store.
 7. Run metadata-only validation:
    - workspace exists outside git,
    - expected directories exist,
@@ -132,8 +135,8 @@ Use this flow only after the user chooses remote mode and confirms the host.
    path, `ExecStart`, restart policy, log command, health command, and
    rollback/update notes.
 10. Report remaining blockers before any live start: provider auth, Telegram bot
-    token, Telegram admin pairing, service enable/start, webhook/firewall, and
-    optional web preview.
+    token, first-user pairing or selected admin bootstrap, service enable/start,
+    webhook/firewall, and optional web preview.
 
 ## Telegram bootstrap minimum
 
@@ -141,7 +144,9 @@ The initial Telegram setup is successful when:
 
 - `telegram-main` is configured as the single primary entrypoint.
 - A private bot token secret is present or clearly marked pending.
-- Admin pairing has either a private admin ID or a one-time pairing code pending.
+- Admin pairing defaults to first-user pairing with private
+  `state/telegram-pairing` persistence; an explicit private admin allowlist or
+  optional `/pair` code is used only when requested.
 - The setup summary explains that future integrations can be configured through
   Telegram after admin pairing.
 - No Composio or third-party integration token is required.
@@ -163,7 +168,8 @@ Before a new server test, confirm:
 - Repo clone path and workspace path known; workspace is outside the checkout.
 - systemd service name, env file path, logs, health, restart, update, backup,
   and rollback commands documented.
-- Telegram token/admin pairing metadata ready or pending.
+- Telegram token/admin pairing metadata ready or pending; checks report only
+  counts and presence, never raw user/chat IDs or pairing code values.
 - Generated web/pages disabled unless explicitly enabled.
 - Firewall/ports: outbound HTTPS for polling; inbound HTTPS only for optional
   webhook/web preview.
@@ -175,6 +181,9 @@ pnpm run check
 pnpm run brainctl -- setup --workspace <name> --path <workspace>
 pnpm run brainctl -- config validate <workspace>/config/runtime.yaml
 pnpm run brainctl -- secrets check --config <workspace>/config/runtime.yaml
+pnpm run brainctl -- entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN \
+  --polling-state <workspace>/state/telegram-offset.json \
+  --pairing-state <workspace>/state/telegram-pairing
 pnpm run brainctl -- doctor --config <workspace>/config/runtime.yaml --pack assistant-packs/core
 pnpm run brainctl -- operations validate --config <workspace>/config/runtime.yaml --workspace <name> --repo <checkout>
 pnpm run brainctl -- operations systemd --config <workspace>/config/runtime.yaml --workspace <name> --repo <checkout>

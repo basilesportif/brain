@@ -10,7 +10,7 @@ Deployment docs and private notes should define:
 - Node/pnpm and optional Bun/Docker requirements.
 - Provider auth boundaries for Codex provider/app-server and Claude Code
   SDK/subagents.
-- Telegram first-entrypoint bootstrap, bot token storage, and admin pairing.
+- Telegram first-entrypoint bootstrap, bot token storage, and first-user admin pairing.
 - Process manager choice (`systemd`, Docker, or both).
 - Reverse proxy/TLS and firewall recommendations. Polling-mode Telegram needs
   outbound HTTPS only; webhook or web preview needs inbound HTTPS.

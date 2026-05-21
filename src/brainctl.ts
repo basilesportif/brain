@@ -64,7 +64,7 @@ program.command("start")
   .option("--telegram-polling", "enable live Telegram getUpdates polling; requires a token ref")
   .option("--telegram-max-polls <n>", "maximum Telegram polls before stopping", parseNumberOption)
   .option("--polling-state <path>", "Telegram polling offset state path")
-  .option("--telegram-pairing", "enable one-time /pair bootstrap state")
+  .option("--telegram-pairing", "use optional one-time /pair code bootstrap instead of default first-user pairing")
   .option("--telegram-pairing-state <dir>", "directory for Telegram paired identity state")
   .option("--telegram-downloads", "download Telegram attachments to the private artifact directory before provider turns")
   .option("--telegram-download-dir <path>", "directory for downloaded Telegram attachments")
@@ -93,7 +93,7 @@ program.command("run")
   .option("--telegram-polling", "enable live Telegram getUpdates polling; requires a token ref")
   .option("--telegram-max-polls <n>", "maximum Telegram polls before stopping", parseNumberOption)
   .option("--polling-state <path>", "Telegram polling offset state path")
-  .option("--telegram-pairing", "enable one-time /pair bootstrap state")
+  .option("--telegram-pairing", "use optional one-time /pair code bootstrap instead of default first-user pairing")
   .option("--telegram-pairing-state <dir>", "directory for Telegram paired identity state")
   .option("--telegram-downloads", "download Telegram attachments to the private artifact directory before provider turns")
   .option("--telegram-download-dir <path>", "directory for downloaded Telegram attachments")
@@ -254,6 +254,7 @@ entrypoint.command("check")
   .option("--token-env <name>", "Telegram token env var to verify without printing")
   .option("--token-file <path>", "Telegram token file to verify without printing")
   .option("--polling-state <path>", "Telegram durable polling offset state path to inspect")
+  .option("--pairing-state <dir>", "Telegram paired/admin identity state directory to inspect")
   .action(async (entrypointId, options) => exitWith(await entrypointCheckCommand(entrypointId, options)));
 
 const runtime = program.command("runtime").description("Runtime state inspection commands");
@@ -383,6 +384,7 @@ async function startCommand(options: SupervisorRunCommandOptions & { foreground?
         artifactRoot: paths.artifactRoot,
         logPath: paths.logPath,
         liveTelegramPolling: Boolean(options.telegramPolling),
+        telegramBootstrapPairing: options.telegramPairing ? "optional /pair code" : "first-user",
         deployment: "not performed",
       },
     };
@@ -878,10 +880,11 @@ async function createCliEntrypoint(selection: ResolvedSupervisorRuntime, options
       maxPolls: options.telegramMaxPolls,
       stateStore: new FileTelegramPollingStateStore(path.resolve(options.pollingState ?? path.join(paths.stateRoot, "telegram-offset.json"))),
     } : undefined,
-    pairing: options.telegramPairing || options.telegramPairingState ? {
+    pairing: {
       enabled: true,
+      mode: options.telegramPairing ? "code" : "first-user",
       store: new FileTelegramPairingStore(pairingState),
-    } : undefined,
+    },
     attachmentHandling: options.telegramDownloads || options.telegramDownloadDir || options.telegramTranscriptionCommand ? {
       download: Boolean(options.telegramDownloads || options.telegramDownloadDir),
       transcriber: options.telegramTranscriptionCommand ? commandTranscriber(options.telegramTranscriptionCommand) : undefined,
@@ -1125,7 +1128,7 @@ async function providerSmokeCommand(providerId: string, options: { workspace: st
   }
 }
 
-async function entrypointCheckCommand(entrypointId: string, options: { workspace: string; tokenEnv?: string; tokenFile?: string; pollingState?: string }): Promise<CliResult> {
+async function entrypointCheckCommand(entrypointId: string, options: { workspace: string; tokenEnv?: string; tokenFile?: string; pollingState?: string; pairingState?: string }): Promise<CliResult> {
   if (entrypointId !== "telegram") {
     return { ok: false, summary: `unknown entrypoint: ${entrypointId}`, details: { supported: ["telegram"] } };
   }
@@ -1139,14 +1142,29 @@ async function entrypointCheckCommand(entrypointId: string, options: { workspace
     const polling = options.pollingState
       ? { statePath: path.resolve(options.pollingState), offset: await new FileTelegramPollingStateStore(path.resolve(options.pollingState)).getOffset() }
       : undefined;
+    const pairing = options.pairingState
+      ? await telegramPairingStateMetadata(path.resolve(options.pairingState))
+      : undefined;
     return {
       ok: health.ok,
       summary: "telegram entrypoint boundary check passed",
-      details: { health, liveTokenRequired: false, token: token ? { present: token.present, source: token.source, redacted: token.redacted } : "not checked", polling, pollingStarted: false, webhookStarted: false },
+      details: { health, liveTokenRequired: false, token: token ? { present: token.present, source: token.source, redacted: token.redacted } : "not checked", polling, pairing, pollingStarted: false, webhookStarted: false },
     };
   } finally {
     await adapter.stop();
   }
+}
+
+async function telegramPairingStateMetadata(stateDir: string): Promise<Record<string, unknown>> {
+  const store = new FileTelegramPairingStore(stateDir);
+  const [users, chats, code] = await Promise.all([store.listUsers(), store.listChats(), store.readPairingCode()]);
+  return {
+    stateDir,
+    users: users.length,
+    chats: chats.length,
+    codePresent: Boolean(code),
+    rawIdentifiersPrinted: false,
+  };
 }
 
 async function runtimeStatusCommand(options: { workspace: string; state: string }): Promise<CliResult> {

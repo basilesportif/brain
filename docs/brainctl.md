@@ -14,7 +14,9 @@ pnpm run brainctl -- provider check codex --transport stub
 pnpm run brainctl -- provider smoke codex --transport stub --prompt ping
 pnpm run brainctl -- provider check codex --transport app-server --app-server-url ws://127.0.0.1:9000 --timeout-ms 3000
 pnpm run brainctl -- provider check claude-code --transport stub
-pnpm run brainctl -- entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN --polling-state ~/.brain/workspaces/personal/state/telegram-offset.json
+pnpm run brainctl -- entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN \
+  --polling-state ~/.brain/workspaces/personal/state/telegram-offset.json \
+  --pairing-state ~/.brain/workspaces/personal/state/telegram-pairing
 pnpm run brainctl -- start --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl -- run --config examples/config/runtime.yaml --workspace personal --fake --once --fake-text help
 pnpm run brainctl -- health --config examples/config/runtime.yaml --workspace personal
@@ -58,7 +60,7 @@ pnpm run brainctl -- health --config examples/config/runtime.yaml --workspace pe
 pnpm run brainctl -- logs --file ~/.brain/workspaces/personal/logs/runtime.jsonl --lines 100
 ```
 
-`start` defaults to a dry-run plan. Use `start --foreground` or `run` to enter the foreground supervisor. Provider and entrypoint default to the selected workspace's runtime config; pass `--fake` or explicit `--provider fake --entrypoint fake` for CI/fresh-checkout smoke. Explicit live Telegram polling requires `--entrypoint telegram --telegram-polling` plus `--telegram-token-env` or `--telegram-token-file`; polling offsets remain Telegram-native state only. Attachment download and voice/audio/video transcription are opt-in with `--telegram-downloads`, `--telegram-download-dir`, and a private `--telegram-transcription-command` seam; no transcription provider keys belong in the repo.
+`start` defaults to a dry-run plan. Use `start --foreground` or `run` to enter the foreground supervisor. Provider and entrypoint default to the selected workspace's runtime config; pass `--fake` or explicit `--provider fake --entrypoint fake` for CI/fresh-checkout smoke. Explicit live Telegram polling requires `--entrypoint telegram --telegram-polling` plus `--telegram-token-env` or `--telegram-token-file`; polling offsets remain Telegram-native state only. Telegram bootstrap uses first-user pairing by default and stores paired identity state under the private state root; pass `--telegram-pairing` only for the optional advanced `/pair` code flow. Attachment download and voice/audio/video transcription are opt-in with `--telegram-downloads`, `--telegram-download-dir`, and a private `--telegram-transcription-command` seam; no transcription provider keys belong in the repo.
 
 The supervisor intercepts service commands before provider turns when configured: `help`, `health`, `logs`/`introspect`, `agents`, `agent status`, `agent kill`, `agent steer`, `agent backend`, `employees`, `employee status/start/stop/steer`, and `update`/`deploy`. Backend mutation and deploy/update remain safe seams only. Employee commands update durable lifecycle records; pass `--employee-runtime` when running the supervisor to back Employee start/steer/stop with the selected provider session.
 
@@ -96,7 +98,7 @@ pnpm run brainctl -- validate live --config examples/config/runtime.yaml --works
 - `pack validate` checks assistant-pack manifests, skill frontmatter, and portable public-safety hygiene.
 - `provider check` instantiates provider adapters and reports health without sending a real user task. Codex `app-server` checks can point at an existing WebSocket URL or, when a binary is supplied, exercise the provider-owned app-server protocol startup path.
 - `provider smoke` runs a single provider turn; non-stub transports require `--allow-live`.
-- `entrypoint check` instantiates entrypoint adapters without requiring live credentials. Optional Telegram token and polling-state flags report only redacted token metadata and durable offset metadata.
+- `entrypoint check` instantiates entrypoint adapters without requiring live credentials. Optional Telegram token, polling-state, and pairing-state flags report only redacted token metadata, durable offset metadata, and paired identity counts/presence.
 - `start` prints a dry-run supervisor start plan by default. `start --foreground` and `run` enter the foreground supervisor; provider/entrypoint default to runtime config, and `--fake` keeps explicit test/dev smoke side effects local.
 - `health` inspects config, state, and log readiness without starting live processes.
 - `status` combines health, runtime state/log metadata, and operations preflight readiness without starting live processes.
