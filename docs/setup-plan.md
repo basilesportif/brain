@@ -79,17 +79,22 @@ Ask these questions explicitly. Defaults are suggestions, not assumptions.
    where the first Telegram user/chat to message the newly configured bot is
    persisted as the paired/admin identity in private state. Use a user-supplied
    explicit allowlist or optional `/pair` code only if requested.
-7. Is generated web/page publishing needed now? Default: no; keep web preview
+7. Should voice/audio transcription be enabled for Telegram attachments?
+   Default: no. If yes, use `transcription.provider: openai`, store the OpenAI
+   key only as a private ref such as `env:OPENAI_API_KEY` or `file:/...`, choose
+   the model, and scope it to `telegram-main` with `voice`/`audio` attachment
+   kinds. Never paste or commit the key.
+8. Is generated web/page publishing needed now? Default: no; keep web preview
    disabled unless the user explicitly enables it. If yes, choose domain vs
    direct IP, public base URL, publish root, and Caddy/reverse-proxy plan. DNS
    is needed for a domain and not needed for direct-IP publishing; setup never
    changes DNS.
-8. Should private workspace backup be configured now?
+9. Should private workspace backup be configured now?
    - `none` — default/no backup.
    - `local-snapshot` — local snapshot root and retention notes.
    - `private-git` — private repo path, optional remote, branch, include/exclude
      policy. Safe defaults exclude secrets, logs, tmp, and caches.
-9. Should optional Google Calendar or chat data-source access be configured via
+10. Should optional Google Calendar or chat data-source access be configured via
    Composio? Default: no. If yes, collect only env/file refs for the Composio
    API key and connected-account metadata; never collect or print credential
    values.
@@ -185,8 +190,8 @@ on private workspace knowledge.
   this repo.
 - Expected secret/config refs include provider auth, Telegram bot token,
   Telegram admin pairing data, optional webhook secret, optional web preview
-  config, optional Composio API key and connected-account metadata refs, and
-  host-specific service env.
+  config, optional OpenAI transcription API key ref, optional Composio API key
+  and connected-account metadata refs, and host-specific service env.
 - Setup summaries print only metadata: file existence, ownership, permissions,
   size, and key counts; never secret values.
 
@@ -213,6 +218,10 @@ on private workspace knowledge.
   private Brain secret reference, restart Brain, and re-run metadata-only secret
   checks. Setup output still reports only redacted token metadata.
 - No Composio or third-party integration token is required for this bootstrap.
+- Voice/audio transcription is optional. If enabled, the OpenAI key lives only
+  behind `transcription.apiKeyRef` (for example `env:OPENAI_API_KEY`) in the
+  private workspace or host secret store; setup/status/secrets checks must never
+  print the key value.
 
 ### Networking, firewall, and web optionality
 

@@ -82,11 +82,17 @@ Then collect the path-specific fields below.
    - user supplies an explicit admin allowlist privately,
    - optional advanced one-time `/pair <code>` flow,
    - not ready; leave pairing pending.
-7. Optional generated pages/web preview? Default: disabled.
-8. Optional private workspace backup? Default: none. Offer `local-snapshot` or
+7. Optional Telegram voice/audio transcription? Default: disabled. If enabled,
+   configure `transcription.provider: openai`, `apiKeyRef` such as
+   `env:OPENAI_API_KEY`, a model such as `gpt-4o-mini-transcribe`, and scope it
+   to `telegram-main` with `voice`/`audio` attachment kinds. Store the OpenAI
+   key only in the private workspace or host secret store; never paste it into
+   repo files, prompts, logs, or setup summaries.
+8. Optional generated pages/web preview? Default: disabled.
+9. Optional private workspace backup? Default: none. Offer `local-snapshot` or
    `private-git` with private repo path, optional remote, branch, and safe
    include/exclude defaults that exclude secrets/logs/tmp/caches.
-9. Optional generated web publishing? If yes, ask domain vs direct IP, public
+10. Optional generated web publishing? If yes, ask domain vs direct IP, public
    base URL, publish root, Caddy/reverse-proxy note, and explain DNS is needed
    for domains but not direct IP. Do not change DNS.
 10. Optional Google Calendar/chat through Composio? If yes, collect only env/file
@@ -195,6 +201,10 @@ The initial Telegram setup is successful when:
 - The setup summary explains that future integrations can be configured through
   Telegram after admin pairing.
 - No Composio or third-party integration token is required.
+- Voice/audio transcription is optional. If requested, use the runtime
+  `transcription` config with an OpenAI secret ref such as
+  `env:OPENAI_API_KEY`; setup may check only key presence metadata and must not
+  print or store the value in git.
 
 Prefer polling for the first bootstrap because it needs only outbound HTTPS.
 Webhook mode, reverse proxy, TLS, firewall rules, generated pages, and web

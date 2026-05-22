@@ -56,6 +56,17 @@ workspaces:
       reverseProxy:
         kind: caddy
         note: Configure Caddy/reverse proxy after operator confirmation; brainctl never changes DNS.
+    transcription:
+      enabled: false
+      provider: openai
+      apiKeyRef: env:OPENAI_API_KEY
+      model: gpt-4o-mini-transcribe
+      scope:
+        entrypointIds:
+          - telegram-main
+        attachmentKinds:
+          - voice
+          - audio
     integrations:
       composio:
         enabled: false

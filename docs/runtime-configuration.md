@@ -63,6 +63,14 @@ workspaces:
       reverseProxy:
         kind: caddy
         note: Operator configures Caddy/reverse proxy; brainctl does not change DNS.
+    transcription:
+      enabled: false
+      provider: openai
+      apiKeyRef: env:OPENAI_API_KEY
+      model: gpt-4o-mini-transcribe
+      scope:
+        entrypointIds: [telegram-main]
+        attachmentKinds: [voice, audio]
     integrations:
       composio:
         enabled: false
@@ -132,6 +140,16 @@ domain = "me.example.test"
 baseUrl = "https://me.example.test/pages"
 publishRoot = "/srv/brain/pages"
 
+[workspaces.personal.transcription]
+enabled = false
+provider = "openai"
+apiKeyRef = "env:OPENAI_API_KEY"
+model = "gpt-4o-mini-transcribe"
+
+[workspaces.personal.transcription.scope]
+entrypointIds = ["telegram-main"]
+attachmentKinds = ["voice", "audio"]
+
 [workspaces.personal.integrations.composio]
 enabled = false
 apiKeyRef = "env:COMPOSIO_API_KEY"
@@ -152,6 +170,11 @@ as missing optional pieces when absent or disabled:
 - `integrations.composio`: optional Composio refs for Google Calendar and chat
   data sources. Store real API keys and connected-account metadata in env/file
   refs outside git; status commands print only metadata.
+- `transcription`: optional voice/audio attachment transcription. The initial
+  provider is `openai` with an `apiKeyRef` such as `env:OPENAI_API_KEY`, a model
+  such as `gpt-4o-mini-transcribe`, and an explicit scope for entrypoint IDs and
+  attachment kinds. Store the key in the private workspace/host env, never in
+  git; `brainctl secrets check` reports only presence metadata.
 
 ## Validation rules
 
@@ -170,6 +193,8 @@ Runtime config validation should reject configurations that violate any of these
 11. `backup.strategy: private-git` requires `backup.privateGit.repoPath`.
 12. `backup.strategy: local-snapshot` requires `backup.localSnapshot.root`.
 13. Enabled `webPublishing` requires `baseUrl` or `publicBaseUrl`.
+14. Enabled `transcription.provider: openai` requires `transcription.apiKeyRef`;
+    scoped entrypoint IDs must exist in `enabledEntrypoints`.
 
 ## Prompt context shape
 
@@ -218,6 +243,6 @@ Current `codex-chat` behavior should migrate as a single-primary workspace confi
   private state directory. Explicit allowlists and optional one-time
   `/pair <code>` remain advanced paths. Checks and docs report only
   presence/count metadata, not raw IDs or code values.
-- Telegram attachment download is explicit runtime configuration. Downloaded files belong under private workspace artifacts/state, and voice/audio/video transcription is an injected command/provider seam; Brain stores transcript text on the inbound event/attachment metadata but does not copy transcription tokens or private prompts into the repo.
+- Telegram attachment download is explicit runtime configuration. Downloaded files belong under private workspace artifacts/state, and voice/audio transcription can be configured through workspace `transcription` (OpenAI) or through the CLI command seam for private deployments. Brain stores transcript text on the inbound event/attachment metadata but does not copy transcription tokens or private prompts into the repo.
 - Loop and monitor definitions are validated in-process. The default runtime/CLI behavior does not install crontabs, filesystem watchers, or shell monitors; explicit future operator commands should be required for host-level scheduling.
 - Do not enable web or iOS in the migrated workspace until multi-entrypoint routing, identity, permissions, notifications, and conflict handling have explicit config and tests.

@@ -31,9 +31,10 @@ Current implementation includes:
   admin state when no explicit allowlist exists;
 - optional advanced one-time `/pair <code>` bootstrap state for paired user/chat
   identities before allowlist filtering;
-- opt-in attachment download plus an injectable voice/audio/video transcription
-  seam that stores downloaded files under private runtime paths and appends
-  transcript text to inbound events; and
+- opt-in attachment download plus configurable voice/audio transcription from
+  runtime config (`transcription.provider: openai` with a private `apiKeyRef`)
+  or an injectable command seam, storing downloaded files under private runtime
+  paths and appending transcript text to inbound events; and
 - outbound mapping for replies, edits, photo/document/voice/audio/video
   artifacts, status actions, reactions, and delete-after-send cleanup for staged
   local artifacts.

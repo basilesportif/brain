@@ -10,7 +10,7 @@ import { parse as parseToml } from "smol-toml";
 import YAML from "yaml";
 import { validateAssistantPack } from "@brain/assistant-pack-schema";
 import { FakeEntrypointAdapter } from "@brain/entrypoint-protocol";
-import { defaultBackupExclude, defaultBackupInclude, validateWorkspaceConfig, type BrainConfig, type EntrypointConfig, type WorkspaceConfig } from "@brain/workspace-schema";
+import { defaultBackupExclude, defaultBackupInclude, validateWorkspaceConfig, type BrainConfig, type EntrypointConfig, type TranscriptionConfig, type WorkspaceConfig } from "@brain/workspace-schema";
 import { AutomationRuntime, BrainRuntime, BrainSupervisor, EchoProviderAdapter, EmployeeLifecycle, FakeProviderAdapter, FileAutomationLockStore, FileAutomationSpool, FileEmployeeStore, FileSubagentJobStore, ProviderEmployeeRuntime, ProviderSubagentExecutor, RuntimeCommandInterceptor, RuntimeEntrypointBridge, StaticSubagentExecutor, SubagentLifecycle, createGuardedLiveValidationPlan, createOperationsPlan, parseBrainDirectives, renderSystemdService, type BrainSupervisorLogRecord, type OperationsPlan, type ProviderAdapter, type ProviderTurnEvent, type RuntimeLogEntry, type SubagentExecutor } from "@brain/runtime-core";
 import { FileTelegramPairingStore, FileTelegramPollingStateStore, TelegramBotApiClient, TelegramEntrypointAdapter, loadTelegramToken, type TelegramAttachmentTranscriber } from "@brain/entrypoint-telegram";
 import { createCodexProvider, type CodexTransportKind } from "@brain/provider-codex";
@@ -456,6 +456,7 @@ async function startCommand(options: SupervisorRunCommandOptions & { foreground?
         logPath: paths.logPath,
         liveTelegramPolling: Boolean(options.telegramPolling),
         telegramBootstrapPairing: options.telegramPairing ? "optional /pair code" : "first-user",
+        telegramTranscription: publicTelegramTranscriptionRuntime(telegramTranscriptionRuntime(selection.runtime, options)),
         deployment: "not performed",
       },
     };
@@ -538,6 +539,7 @@ async function runCommand(options: SupervisorRunCommandOptions): Promise<CliResu
         stateRoot: paths.stateRoot,
         artifactRoot: paths.artifactRoot,
         logPath: paths.logPath,
+        telegramTranscription: publicTelegramTranscriptionRuntime(telegramTranscriptionRuntime(selection.runtime, options)),
         health,
       },
     };
@@ -1196,10 +1198,17 @@ async function createCliEntrypoint(selection: ResolvedSupervisorRuntime, options
   }
   if (kind !== "telegram") throw new Error(`unknown entrypoint: ${selection.entrypointKind}`);
   const downloadDir = path.resolve(options.telegramDownloadDir ?? path.join(paths.stateRoot, "..", "artifacts", "telegram-downloads"));
+  const transcription = telegramTranscriptionRuntime(selection, options);
+  const needsTelegramDownloads = Boolean(options.telegramDownloads || options.telegramDownloadDir || transcription.enabled);
   const apiClient = options.telegramPolling
-    ? await TelegramBotApiClient.fromTokenRef({ tokenEnv: options.telegramTokenEnv, tokenFile: options.telegramTokenFile, required: true, downloadDir: options.telegramDownloads || options.telegramDownloadDir ? downloadDir : undefined })
+    ? await TelegramBotApiClient.fromTokenRef({ tokenEnv: options.telegramTokenEnv, tokenFile: options.telegramTokenFile, required: true, downloadDir: needsTelegramDownloads ? downloadDir : undefined })
     : undefined;
   const pairingState = options.telegramPairingState ? path.resolve(options.telegramPairingState) : path.join(paths.stateRoot, "telegram-pairing");
+  const transcriber = options.telegramTranscriptionCommand
+    ? commandTranscriber(options.telegramTranscriptionCommand)
+    : transcription.provider === "openai" && transcription.apiKeyRef
+      ? openAiTranscriber({ apiKeyRef: transcription.apiKeyRef, model: transcription.model ?? "gpt-4o-mini-transcribe" })
+      : undefined;
   return new TelegramEntrypointAdapter({
     workspaceId: selection.workspaceId,
     entrypointId: selection.primaryEntrypointId,
@@ -1215,9 +1224,10 @@ async function createCliEntrypoint(selection: ResolvedSupervisorRuntime, options
       mode: options.telegramPairing ? "code" : "first-user",
       store: new FileTelegramPairingStore(pairingState),
     },
-    attachmentHandling: options.telegramDownloads || options.telegramDownloadDir || options.telegramTranscriptionCommand ? {
-      download: Boolean(options.telegramDownloads || options.telegramDownloadDir),
-      transcriber: options.telegramTranscriptionCommand ? commandTranscriber(options.telegramTranscriptionCommand) : undefined,
+    attachmentHandling: needsTelegramDownloads || transcriber ? {
+      download: needsTelegramDownloads,
+      transcriber,
+      transcribeKinds: transcription.attachmentKinds,
     } : undefined,
   });
 }
@@ -1231,6 +1241,114 @@ function commandTranscriber(command: string): TelegramAttachmentTranscriber {
       return { text: (result.stdout ?? "").trim() };
     },
   };
+}
+
+type TelegramTranscriptionRuntime = {
+  enabled: boolean;
+  provider?: "openai" | "command";
+  source: "config" | "cli" | "disabled";
+  apiKeyRefPresent: boolean;
+  apiKeyRef?: string;
+  model?: string;
+  attachmentKinds: Array<"voice" | "audio" | "video">;
+  scopedToEntrypoint: boolean;
+};
+
+function telegramTranscriptionRuntime(selection: ResolvedSupervisorRuntime, options: Pick<SupervisorRunCommandOptions, "telegramTranscriptionCommand">): TelegramTranscriptionRuntime {
+  const config = selection.workspace.transcription;
+  const configured = transcriptionAppliesToEntrypoint(config, selection.primaryEntrypointId);
+  if (options.telegramTranscriptionCommand) {
+    return {
+      enabled: true,
+      provider: "command",
+      source: "cli",
+      apiKeyRefPresent: false,
+      attachmentKinds: [...(config?.scope?.attachmentKinds ?? ["voice", "audio", "video"])],
+      scopedToEntrypoint: true,
+    };
+  }
+  if (!configured.enabled || !config?.apiKeyRef) {
+    return {
+      enabled: false,
+      source: "disabled",
+      apiKeyRefPresent: Boolean(config?.apiKeyRef),
+      model: config?.model,
+      attachmentKinds: configured.attachmentKinds,
+      scopedToEntrypoint: configured.scopedToEntrypoint,
+    };
+  }
+  return {
+    enabled: true,
+    provider: "openai",
+    source: "config",
+    apiKeyRefPresent: true,
+    apiKeyRef: config.apiKeyRef,
+    model: config.model,
+    attachmentKinds: configured.attachmentKinds,
+    scopedToEntrypoint: configured.scopedToEntrypoint,
+  };
+}
+
+function publicTelegramTranscriptionRuntime(runtime: TelegramTranscriptionRuntime): Omit<TelegramTranscriptionRuntime, "apiKeyRef"> {
+  const { apiKeyRef: _apiKeyRef, ...safe } = runtime;
+  return safe;
+}
+
+function transcriptionAppliesToEntrypoint(config: TranscriptionConfig | undefined, entrypointId: string): { enabled: boolean; scopedToEntrypoint: boolean; attachmentKinds: Array<"voice" | "audio" | "video"> } {
+  const entrypointIds = config?.scope?.entrypointIds ?? [];
+  const scopedToEntrypoint = entrypointIds.length === 0 || entrypointIds.includes(entrypointId);
+  return {
+    enabled: Boolean(config?.enabled && scopedToEntrypoint),
+    scopedToEntrypoint,
+    attachmentKinds: [...(config?.scope?.attachmentKinds ?? ["voice", "audio"])],
+  };
+}
+
+function setupTranscriptionStatus(workspace: WorkspaceConfig | undefined) {
+  const config = workspace?.transcription;
+  const attachmentKinds = config?.scope?.attachmentKinds ?? ["voice", "audio"];
+  const entrypointIds = config?.scope?.entrypointIds ?? [];
+  return {
+    enabled: config?.enabled ?? false,
+    provider: config?.provider ?? "openai",
+    apiKeyRefPresent: Boolean(config?.apiKeyRef),
+    model: config?.model ?? "gpt-4o-mini-transcribe",
+    scope: {
+      entrypointIds: entrypointIds.length > 0 ? entrypointIds : "all-enabled-entrypoints",
+      attachmentKinds,
+    },
+    secretValuesPrinted: false,
+  };
+}
+
+function openAiTranscriber(options: { apiKeyRef: string; model: string; endpoint?: string; fetchImpl?: typeof fetch }): TelegramAttachmentTranscriber {
+  return {
+    async transcribe(input) {
+      const apiKey = await readSecretRefValue(options.apiKeyRef);
+      if (!apiKey) throw new Error(`OpenAI transcription API key is missing for ${options.apiKeyRef}`);
+      const bytes = await readFile(input.path);
+      const body = new FormData();
+      body.set("model", options.model);
+      body.set("file", new Blob([new Uint8Array(bytes)], { type: input.attachment.mimeType ?? "application/octet-stream" }), input.attachment.originalName ?? path.basename(input.path));
+      const response = await (options.fetchImpl ?? fetch)(options.endpoint ?? "https://api.openai.com/v1/audio/transcriptions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}` },
+        body,
+      });
+      const payload = await response.text();
+      if (!response.ok) throw new Error(`OpenAI transcription failed with HTTP ${response.status}: ${redactString(payload).slice(0, 500)}`);
+      const parsed = JSON.parse(payload) as { text?: unknown };
+      if (typeof parsed.text !== "string") throw new Error("OpenAI transcription response did not include text");
+      return { text: parsed.text.trim() };
+    },
+  };
+}
+
+async function readSecretRefValue(ref: string): Promise<string | undefined> {
+  const normalized = asSecretRef(ref);
+  if (normalized.startsWith("env:")) return process.env[normalized.slice("env:".length)];
+  if (normalized.startsWith("file:")) return (await readFile(normalized.slice("file:".length), "utf8")).trim();
+  return undefined;
 }
 
 async function appendSupervisorLog(filePath: string, record: BrainSupervisorLogRecord): Promise<void> {
@@ -1377,6 +1495,7 @@ async function setupInspectDetails(options: SetupInspectOptions) {
   const backup = setupBackupStatus(workspace, workspaceRoot);
   const webPublishing = setupWebPublishingStatus(workspace);
   const composio = await setupComposioStatus(workspace);
+  const transcription = setupTranscriptionStatus(workspace);
   const plan = buildSetupPlan({
     config,
     workspace,
@@ -1386,6 +1505,7 @@ async function setupInspectDetails(options: SetupInspectOptions) {
     backup,
     webPublishing,
     composio,
+    transcription,
   });
 
   return {
@@ -1421,6 +1541,7 @@ async function setupInspectDetails(options: SetupInspectOptions) {
     backup,
     webPublishing,
     composio,
+    transcription,
     plan,
   };
 }
@@ -1434,6 +1555,7 @@ function buildSetupPlan(input: {
   backup: ReturnType<typeof setupBackupStatus>;
   webPublishing: ReturnType<typeof setupWebPublishingStatus>;
   composio: Awaited<ReturnType<typeof setupComposioStatus>>;
+  transcription: ReturnType<typeof setupTranscriptionStatus>;
 }) {
   const configured: string[] = [];
   const missing_required: string[] = [];
@@ -1472,6 +1594,10 @@ function buildSetupPlan(input: {
 
   if (!input.composio.enabled) missing_optional.push("Composio Google Calendar/chat not configured/enabled");
   else configured.push("Composio integration config present");
+
+  if (!input.transcription.enabled) missing_optional.push("voice/audio transcription not configured/enabled");
+  else if (!input.transcription.apiKeyRefPresent) missing_required.push("OpenAI transcription API key ref missing");
+  else configured.push("OpenAI voice/audio transcription config present");
 
   return { configured, missing_required, missing_optional, unsafe_to_overwrite };
 }
@@ -1893,6 +2019,7 @@ function configSummary(config: BrainConfig | undefined) {
       backup: { strategy: workspace.backup?.strategy ?? "none" },
       webPublishing: { enabled: workspace.webPublishing?.enabled ?? false, mode: workspace.webPublishing?.mode ?? "disabled" },
       composio: { enabled: workspace.integrations?.composio?.enabled ?? false },
+      transcription: setupTranscriptionStatus(workspace),
     }])),
   };
 }
@@ -1915,6 +2042,7 @@ function collectConfigRefs(config: BrainConfig): ConfigRef[] {
     if (chat?.connectedAccountRef) refs.push({ workspaceId, ref: chat.connectedAccountRef, source: "integrations.composio.dataSources.chat.connectedAccountRef" });
     if (chat?.metadataRef) refs.push({ workspaceId, ref: chat.metadataRef, source: "integrations.composio.dataSources.chat.metadataRef", optional: true });
     for (const ref of chat?.requiredEnvRefs ?? []) refs.push({ workspaceId, ref: asSecretRef(ref), source: "integrations.composio.dataSources.chat.requiredEnvRefs" });
+    if (workspace.transcription?.apiKeyRef) refs.push({ workspaceId, ref: asSecretRef(workspace.transcription.apiKeyRef), source: "transcription.apiKeyRef" });
   }
   return refs;
 }

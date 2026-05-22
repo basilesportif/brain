@@ -177,6 +177,54 @@ test("brainctl run/start/operations resolve Telegram and Codex from runtime conf
   }
 });
 
+test("brainctl wires runtime OpenAI transcription config into Telegram without exposing key values", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-transcription-"));
+  try {
+    const workspace = path.join(root, "workspace");
+    const backupRepo = path.join(root, "backup-repo");
+    const config = path.join(root, "runtime.yaml");
+    await writeFile(config, testRuntimeConfig(workspace, backupRepo, { transcriptionEnabled: true }));
+
+    const secretValue = "sk-test-transcription-secret-value-must-not-print";
+    const setup = spawnBrainctl(["setup", "inspect", "--config", config, "--workspace", "personal", "--path", workspace], { OPENAI_API_KEY: secretValue });
+    assert.equal(setup.status, 1, setup.stderr);
+    assert.doesNotMatch(setup.stdout, new RegExp(secretValue));
+    const setupJson = JSON.parse(setup.stdout) as { details: { transcription: { enabled: boolean; apiKeyRefPresent: boolean; secretValuesPrinted: boolean }; secretRefs: Array<{ source: string; kind: string; present: boolean; value: string }> } };
+    assert.equal(setupJson.details.transcription.enabled, true);
+    assert.equal(setupJson.details.transcription.apiKeyRefPresent, true);
+    assert.equal(setupJson.details.transcription.secretValuesPrinted, false);
+    assert.ok(setupJson.details.secretRefs.some((ref) => ref.source === "transcription.apiKeyRef" && ref.kind === "env" && ref.present && ref.value === "redacted"));
+
+    const setupStatus = spawnBrainctl(["setup", "status", "--config", config, "--workspace", "personal", "--path", workspace], { OPENAI_API_KEY: secretValue });
+    assert.equal(setupStatus.status, 1, setupStatus.stderr);
+    assert.doesNotMatch(setupStatus.stdout, new RegExp(secretValue));
+    const setupStatusJson = JSON.parse(setupStatus.stdout) as { details: { transcription: { secretValuesPrinted: boolean } } };
+    assert.equal(setupStatusJson.details.transcription.secretValuesPrinted, false);
+
+    const dryRun = spawnBrainctl(["start", "--config", config, "--workspace", "personal"], { OPENAI_API_KEY: secretValue });
+    assert.equal(dryRun.status, 0, dryRun.stderr);
+    assert.doesNotMatch(dryRun.stdout, new RegExp(secretValue));
+    const dryRunJson = JSON.parse(dryRun.stdout) as { details: { telegramTranscription: { enabled: boolean; provider: string; source: string; apiKeyRefPresent: boolean; attachmentKinds: string[] } } };
+    assert.deepEqual(dryRunJson.details.telegramTranscription, {
+      enabled: true,
+      provider: "openai",
+      source: "config",
+      apiKeyRefPresent: true,
+      model: "gpt-4o-mini-transcribe",
+      attachmentKinds: ["voice", "audio"],
+      scopedToEntrypoint: true,
+    });
+
+    const secrets = spawnBrainctl(["secrets", "check", "--config", config], { OPENAI_API_KEY: secretValue });
+    assert.equal(secrets.status, 0, secrets.stderr);
+    assert.doesNotMatch(secrets.stdout, new RegExp(secretValue));
+    const secretsJson = JSON.parse(secrets.stdout) as { details: Array<{ source: string; kind: string; present: boolean; value?: string }> };
+    assert.ok(secretsJson.details.some((ref) => ref.source === "transcription.apiKeyRef" && ref.kind === "env" && ref.present && ref.value === "redacted"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("brainctl status, provider smoke, automation monitor, and web wrappers are safe and testable", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brainctl-parity-"));
   try {
@@ -333,7 +381,7 @@ test("brainctl backup, web setup, and Composio status are safe and metadata-only
   }
 });
 
-function testRuntimeConfig(workspace: string, backupRepo: string, options: { composioEnabled?: boolean; webEnabled?: boolean } = {}): string {
+function testRuntimeConfig(workspace: string, backupRepo: string, options: { composioEnabled?: boolean; webEnabled?: boolean; transcriptionEnabled?: boolean } = {}): string {
   return [
     "runtime:",
     "  activeEntrypointMode: single-primary",
@@ -363,6 +411,17 @@ function testRuntimeConfig(workspace: string, backupRepo: string, options: { com
     `      mode: ${options.webEnabled ? "domain" : "disabled"}`,
     "      baseUrl: https://example.test/pages",
     `      publishRoot: ${JSON.stringify(path.join(workspace, "pages"))}`,
+    "    transcription:",
+    `      enabled: ${options.transcriptionEnabled ? "true" : "false"}`,
+    "      provider: openai",
+    "      apiKeyRef: env:OPENAI_API_KEY",
+    "      model: gpt-4o-mini-transcribe",
+    "      scope:",
+    "        entrypointIds:",
+    "          - telegram-main",
+    "        attachmentKinds:",
+    "          - voice",
+    "          - audio",
     "    integrations:",
     "      composio:",
     `        enabled: ${options.composioEnabled ? "true" : "false"}`,

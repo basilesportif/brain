@@ -53,6 +53,16 @@ publishRoot = "/srv/brain/pages"
 kind = "caddy"
 note = "Configure Caddy/reverse proxy after operator confirmation; brainctl never changes DNS."
 
+[workspaces.personal.transcription]
+enabled = false
+provider = "openai"
+apiKeyRef = "env:OPENAI_API_KEY"
+model = "gpt-4o-mini-transcribe"
+
+[workspaces.personal.transcription.scope]
+entrypointIds = ["telegram-main"]
+attachmentKinds = ["voice", "audio"]
+
 [workspaces.personal.integrations.composio]
 enabled = false
 apiKeyRef = "env:COMPOSIO_API_KEY"

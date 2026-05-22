@@ -93,3 +93,37 @@ test("requires backup destinations and web base URL when optional surfaces are e
   assert.match(messages, /backup\.privateGit\.repoPath/);
   assert.match(messages, /webPublishing\.baseUrl/);
 });
+
+
+test("accepts OpenAI transcription config and defaults attachment scope", () => {
+  const input = structuredClone(base);
+  Object.assign(input.workspaces.personal, {
+    transcription: {
+      enabled: true,
+      provider: "openai",
+      apiKeyRef: "env:OPENAI_API_KEY",
+      model: "gpt-4o-mini-transcribe",
+      scope: { entrypointIds: ["telegram-main"], attachmentKinds: ["voice", "audio"] },
+    },
+  });
+  const result = validateWorkspaceConfig(input);
+  assert.equal(result.ok, true, JSON.stringify(result.issues));
+  assert.equal(result.config?.workspaces.personal.transcription?.provider, "openai");
+  assert.deepEqual(result.config?.workspaces.personal.transcription?.scope.attachmentKinds, ["voice", "audio"]);
+});
+
+test("requires OpenAI transcription key ref and valid entrypoint scope when enabled", () => {
+  const input = structuredClone(base);
+  Object.assign(input.workspaces.personal, {
+    transcription: {
+      enabled: true,
+      provider: "openai",
+      scope: { entrypointIds: ["missing-entrypoint"], attachmentKinds: ["voice"] },
+    },
+  });
+  const result = validateWorkspaceConfig(input);
+  assert.equal(result.ok, false);
+  const messages = result.issues.map((issue) => `${issue.path}: ${issue.message}`).join("\n");
+  assert.match(messages, /transcription\.apiKeyRef/);
+  assert.match(messages, /missing-entrypoint/);
+});

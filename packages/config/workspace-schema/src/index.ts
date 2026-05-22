@@ -102,6 +102,22 @@ export const composioConfigSchema = z.object({
 }).strict().default({ enabled: false, dataSources: {} });
 export type ComposioConfig = z.infer<typeof composioConfigSchema>;
 
+
+export const transcriptionAttachmentKindSchema = z.enum(["voice", "audio", "video"]);
+export type TranscriptionAttachmentKind = z.infer<typeof transcriptionAttachmentKindSchema>;
+
+export const transcriptionConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  provider: z.enum(["openai"]).default("openai"),
+  apiKeyRef: z.string().min(1).optional(),
+  model: z.string().min(1).default("gpt-4o-mini-transcribe"),
+  scope: z.object({
+    entrypointIds: z.array(z.string().min(1)).default([]),
+    attachmentKinds: z.array(transcriptionAttachmentKindSchema).min(1).default(["voice", "audio"]),
+  }).strict().default({ entrypointIds: [], attachmentKinds: ["voice", "audio"] }),
+}).strict().default({ enabled: false, provider: "openai", model: "gpt-4o-mini-transcribe", scope: { entrypointIds: [], attachmentKinds: ["voice", "audio"] } });
+export type TranscriptionConfig = z.infer<typeof transcriptionConfigSchema>;
+
 export const integrationsConfigSchema = z.object({
   composio: composioConfigSchema.optional(),
 }).strict().default({});
@@ -118,6 +134,7 @@ export const workspaceConfigSchema = z.object({
   backup: backupConfigSchema.optional(),
   webPublishing: webPublishingConfigSchema.optional(),
   integrations: integrationsConfigSchema.optional(),
+  transcription: transcriptionConfigSchema.optional(),
 }).strict();
 export type WorkspaceConfig = z.infer<typeof workspaceConfigSchema>;
 
@@ -190,6 +207,16 @@ export function validateWorkspaceConfig(input: unknown): WorkspaceValidationResu
 
     if ((workspace.webPublishing?.enabled ?? false) && !(workspace.webPublishing?.baseUrl ?? workspace.webPublishing?.publicBaseUrl)) {
       issues.push({ path: `${prefix}.webPublishing.baseUrl`, message: "enabled web publishing requires baseUrl or publicBaseUrl" });
+    }
+
+    if ((workspace.transcription?.enabled ?? false) && !workspace.transcription?.apiKeyRef) {
+      issues.push({ path: `${prefix}.transcription.apiKeyRef`, message: "enabled OpenAI transcription requires apiKeyRef" });
+    }
+
+    for (const entrypointId of workspace.transcription?.scope?.entrypointIds ?? []) {
+      if (!entries[entrypointId]) {
+        issues.push({ path: `${prefix}.transcription.scope.entrypointIds`, message: `transcription scope entrypoint does not exist: ${entrypointId}` });
+      }
     }
 
     const route = workspace.outboundDefaults?.route ?? "originating-entrypoint";
