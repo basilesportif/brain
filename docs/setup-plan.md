@@ -69,7 +69,12 @@ Ask these questions explicitly. Defaults are suggestions, not assumptions.
    - Not ready yet; create placeholders and report unauthenticated state.
 4. Should the initial primary entrypoint be Telegram? Initial bootstrap assumes
    `telegram-main` unless the user asks for a fake/smoke-test entrypoint only.
-5. Do you already have a Telegram bot token from BotFather?
+5. Do you already have a Telegram bot token from BotFather? If not, tell the
+   user how to create one before live start: open Telegram, message
+   `@BotFather`, send `/newbot`, choose a display name, choose a unique
+   username ending in `bot`, copy the returned token into Brain's private
+   `secrets.env` or the configured secret reference, and never commit or print
+   the token.
 6. Which Telegram admin bootstrap should be used? Default: first-user pairing,
    where the first Telegram user/chat to message the newly configured bot is
    persisted as the paired/admin identity in private state. Use a user-supplied
@@ -189,8 +194,13 @@ on private workspace knowledge.
 
 - Telegram is the initial primary entrypoint (`telegram-main`) unless the user
   explicitly chooses a fake entrypoint for smoke testing.
-- Bot token is stored privately, for example in the workspace secrets file or an
-  adapter-owned env file with mode `0600`.
+- If the user does not already have a bot token, setup must give the concrete
+  BotFather flow: open Telegram, message `@BotFather`, send `/newbot`, choose a
+  display name, choose a unique username ending in `bot`, and copy the returned
+  token into Brain's private `secrets.env` or configured secret-store reference.
+- Bot token is stored privately, for example in the workspace secrets file,
+  `secrets.env`, an adapter-owned env file with mode `0600`, or a host secret
+  store. Never commit it, print it, or include it in setup summaries/logs.
 - Admin pairing defaults to first-user pairing: after the bot token is configured
   and the service starts, the first Telegram user/chat to message the bot is
   persisted under private `state/telegram-pairing` as the paired/admin identity.
@@ -199,6 +209,9 @@ on private workspace knowledge.
   explicit admin allowlist or an optional one-time `/pair <code>` flow.
 - Once paired, the Telegram entrypoint should be able to receive setup commands
   so future integrations can be configured through Telegram.
+- If the token is leaked, rotate it in `@BotFather` with `/revoke`, replace the
+  private Brain secret reference, restart Brain, and re-run metadata-only secret
+  checks. Setup output still reports only redacted token metadata.
 - No Composio or third-party integration token is required for this bootstrap.
 
 ### Networking, firewall, and web optionality

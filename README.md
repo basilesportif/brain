@@ -26,6 +26,13 @@ running under Claude Code, `docs/setup-plan.md`, and
 up a local private workspace or a remote Ubuntu server over SSH. Do not `cd`
 into a separate setup directory.
 
+For the default Telegram entrypoint, setup will ask for a BotFather token. If
+you do not have one yet, open Telegram, message `@BotFather`, run `/newbot`,
+choose a bot name and a unique username ending in `bot`, then save the returned
+token only in Brain's private `secrets.env` or configured secret reference.
+Never commit the token. After Brain starts, send the bot its first message to
+complete first-user pairing; rotate leaked tokens with BotFather `/revoke`.
+
 ## Initial commands
 
 ```bash

@@ -44,7 +44,11 @@ It is suitable for runtime smoke tests and mapping checks. Live polling/webhook 
 
 The setup flow should make Telegram usable enough for future configuration work:
 
-1. Store the BotFather token only in a private workspace secret file or host secret store.
+1. Create or provide the BotFather token. To create a new bot, open Telegram,
+   message `@BotFather`, send `/newbot`, choose a display name, choose a unique
+   username ending in `bot`, and copy the returned token into Brain's private
+   `secrets.env` or configured secret-store reference. Never commit, print, or
+   log the token.
 2. Configure `telegram-main` as the only enabled entrypoint in `single-primary` mode.
 3. Pair the initial admin with default first-user pairing: after the bot token is
    configured, the first Telegram user/chat to message the bot is stored as
@@ -55,5 +59,9 @@ The setup flow should make Telegram usable enough for future configuration work:
 4. Prefer polling for first bootstrap because it only requires outbound HTTPS.
 5. Leave webhook URL, reverse proxy, TLS, generated pages, and additional integrations disabled unless the user explicitly enables them.
 6. After admin pairing, allow future integration setup commands to be received through Telegram.
+
+If the bot token is leaked, rotate it immediately in `@BotFather` with
+`/revoke`, update the private Brain secret, restart Brain, and re-run
+metadata-only checks. Check output must stay redacted.
 
 Composio and other optional integration tokens are not required for this bootstrap.

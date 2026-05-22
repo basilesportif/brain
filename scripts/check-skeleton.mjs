@@ -77,6 +77,20 @@ for (const relativePath of ["AGENTS.md", "docs/setup-plan.md", "assistant-packs/
   }
 }
 
+for (const relativePath of [
+  "README.md",
+  "docs/setup-plan.md",
+  "docs/self-hosting.md",
+  "entrypoints/telegram/README.md",
+  "assistant-packs/core/skills/setup-self-host/SKILL.md"
+]) {
+  const content = await readFile(path.join(root, relativePath), "utf8");
+  if (!content.includes("@BotFather") || !content.includes("/newbot") || !content.includes("/revoke")) {
+    console.error(`${relativePath} must document BotFather /newbot setup and /revoke rotation guidance`);
+    failed = true;
+  }
+}
+
 if (failed) {
   process.exit(1);
 }

@@ -64,8 +64,18 @@ Then collect the path-specific fields below.
 4. Initial entrypoint? Default: Telegram as `telegram-main` in single-primary
    mode. Use fake entrypoint only if the user explicitly declines Telegram for
    smoke testing.
-5. Telegram bot token from BotFather ready? If yes, store privately; if no,
-   leave token pending.
+5. Telegram bot token from BotFather ready? If not, guide the user to create
+   one before live start:
+   - open Telegram and message `@BotFather`,
+   - send `/newbot`,
+   - choose a display name,
+   - choose a unique username ending in `bot` such as `my_brain_bot`,
+   - copy the returned token into the private Brain `secrets.env` or the
+     configured secret-store reference,
+   - never commit or paste the token into repo files, chat transcripts, logs,
+     or setup summaries.
+   If yes, store privately; if no, leave token pending with those exact next
+   steps.
 6. Initial Telegram admin bootstrap method?
    - default: first-user pairing, where the first Telegram user/chat to message
      the newly configured bot becomes paired/admin state,
@@ -174,7 +184,11 @@ Use this flow only after the user chooses remote mode and confirms the host.
 The initial Telegram setup is successful when:
 
 - `telegram-main` is configured as the single primary entrypoint.
-- A private bot token secret is present or clearly marked pending.
+- A private bot token secret is present or clearly marked pending. If missing,
+  setup tells the user to open Telegram, message `@BotFather`, run `/newbot`,
+  choose a bot display name and a unique username ending in `bot`, then copy the
+  resulting token only into private Brain `secrets.env` or the configured secret
+  reference. The token must never be committed or printed.
 - Admin pairing defaults to first-user pairing with private
   `state/telegram-pairing` persistence; an explicit private admin allowlist or
   optional `/pair` code is used only when requested.
@@ -185,6 +199,12 @@ The initial Telegram setup is successful when:
 Prefer polling for the first bootstrap because it needs only outbound HTTPS.
 Webhook mode, reverse proxy, TLS, firewall rules, generated pages, and web
 preview are optional follow-up setup.
+
+After Brain starts with the token, the user should send the bot its first
+Telegram message to complete first-user pairing. If the token is ever leaked,
+tell the user to rotate it immediately in `@BotFather` with `/revoke`, update
+the private Brain secret, restart Brain, and verify setup checks still report
+only redacted token metadata.
 
 ## Fresh remote prerequisites checklist
 

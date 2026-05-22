@@ -29,9 +29,16 @@ The setup docs and skills should be readable by Codex or Claude Code itself so a
 - Initial entrypoint should be Telegram as `telegram-main` in single-primary
   mode unless the user explicitly chooses a fake smoke-test entrypoint.
 - Telegram bootstrap requires only bot token plus first-user admin pairing state
-  in a private boundary by default. Explicit admin allowlists and optional
-  `/pair` code bootstrap remain advanced paths. This should be enough to
-  continue future integration setup through Telegram after pairing.
+  in a private boundary by default. If the user needs a new bot, setup should
+  tell them to open Telegram, message `@BotFather`, send `/newbot`, choose a
+  display name and a unique username ending in `bot`, copy the returned token
+  into Brain's private `secrets.env` or configured secret reference, and never
+  commit or print it. After Brain starts, the user sends the bot the first
+  message to complete first-user pairing. If the token leaks, rotate it with
+  BotFather `/revoke`, update the private secret, and restart Brain. Explicit
+  admin allowlists and optional `/pair` code bootstrap remain advanced paths.
+  This should be enough to continue future integration setup through Telegram
+  after pairing.
 - Composio and other third-party integrations are optional follow-ups, never
   required for first bootstrap.
 - Running setup again should always offer missing optional components without
