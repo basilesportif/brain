@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { FileTelegramPairingStore, FileTelegramPollingStateStore, TelegramBotApiClient, TelegramEntrypointAdapter, createTelegramWebhookServer, handleTelegramWebhookUpdate, loadTelegramToken, outboundActionToTelegramIntent, pollTelegramUpdates, resolveTelegramAttachmentDownload, telegramUpdateToInboundEvent, type TelegramBotApi, type TelegramCallIntent } from "./index.js";
+import { FileTelegramPairingStore, FileTelegramPollingStateStore, OpenAITelegramAttachmentTranscriber, TelegramBotApiClient, TelegramEntrypointAdapter, createTelegramWebhookServer, handleTelegramWebhookUpdate, loadTelegramToken, outboundActionToTelegramIntent, pollTelegramUpdates, resolveTelegramAttachmentDownload, telegramUpdateToInboundEvent, type OpenAIAudioTranscriptionClient, type TelegramBotApi, type TelegramCallIntent } from "./index.js";
 
 test("maps Telegram message-like updates into Brain inbound events", () => {
   const event = telegramUpdateToInboundEvent({
@@ -306,6 +306,127 @@ test("Telegram adapter labels audio transcripts like codex-chat and does not tra
   assert.equal(events[0]?.text, "Audio transcript:\ntranscribed audio\nAudio path: /tmp/song.mp3");
   assert.equal(events[1]?.text, "");
   assert.deepEqual(transcribed, ["audio"]);
+});
+
+
+test("Telegram adapter matches codex-chat disabled transcription parity for voice and audio", async () => {
+  const calls: Array<{ method: string; payload?: Record<string, unknown> }> = [];
+  const api: TelegramBotApi = {
+    async call(method, payload) {
+      calls.push({ method, payload });
+      return { ok: true, result: { message_id: 99 } };
+    },
+  };
+  const adapter = new TelegramEntrypointAdapter({
+    workspaceId: "personal",
+    apiClient: api,
+    attachmentHandling: {
+      transcribeKinds: ["voice", "audio"],
+      transcriptionFailureMode: "codex-chat",
+    },
+    updates: [
+      { update_id: 803, message: { message_id: 3, chat: { id: 123 }, from: { id: 7 }, voice: { file_id: "voice_file", file_unique_id: "voice_unique", mime_type: "audio/ogg" } } },
+      { update_id: 804, message: { message_id: 4, chat: { id: 123 }, from: { id: 7 }, audio: { file_id: "audio_file", file_unique_id: "audio_unique", file_name: "song.mp3", mime_type: "audio/mpeg" } } },
+    ],
+  });
+  await adapter.start();
+  const events = [];
+  for await (const event of adapter.inboundEvents()) events.push(event);
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.attachments?.[0]?.kind, "audio");
+  assert.equal(events[0]?.text, "");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.method, "sendMessage");
+  assert.deepEqual(calls[0]?.payload, {
+    chat_id: "123",
+    text: "Voice transcription is not enabled.",
+    reply_to_message_id: 3,
+  });
+});
+
+test("Telegram adapter drops voice events when OpenAI transcription key is missing", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-telegram-missing-key-"));
+  const oldKey = process.env.BRAIN_TEST_MISSING_OPENAI_KEY;
+  try {
+    delete process.env.BRAIN_TEST_MISSING_OPENAI_KEY;
+    const audioPath = path.join(root, "voice.ogg");
+    await writeFile(audioPath, "fake ogg/opus bytes");
+    const calls: Array<{ method: string; payload?: Record<string, unknown> }> = [];
+    const api: TelegramBotApi = {
+      async call(method, payload) {
+        calls.push({ method, payload });
+        if (method === "getFile") return { ok: true, result: { file_id: payload?.file_id, file_path: "voice.ogg", file_size: 12 } };
+        return { ok: true, result: { message_id: 99 } };
+      },
+      async downloadFile(filePath) {
+        return { localPath: audioPath, filePath, bytes: new TextEncoder().encode("fake ogg/opus bytes") };
+      },
+    };
+    const adapter = new TelegramEntrypointAdapter({
+      workspaceId: "personal",
+      apiClient: api,
+      attachmentHandling: {
+        download: true,
+        transcriber: new OpenAITelegramAttachmentTranscriber({ apiKeyRef: "env:BRAIN_TEST_MISSING_OPENAI_KEY" }),
+        transcribeKinds: ["voice", "audio"],
+        transcriptionFailureMode: "codex-chat",
+      },
+      updates: [
+        { update_id: 805, message: { message_id: 5, chat: { id: 123 }, from: { id: 7 }, voice: { file_id: "voice_file", file_unique_id: "voice_unique", mime_type: "audio/ogg" } } },
+      ],
+    });
+    await adapter.start();
+    const events = [];
+    for await (const event of adapter.inboundEvents()) events.push(event);
+
+    assert.equal(events.length, 0);
+    assert.deepEqual(calls.map((call) => call.method), ["getFile"]);
+  } finally {
+    if (oldKey === undefined) delete process.env.BRAIN_TEST_MISSING_OPENAI_KEY;
+    else process.env.BRAIN_TEST_MISSING_OPENAI_KEY = oldKey;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Telegram adapter drops audio events when configured OpenAI transcription errors", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-telegram-openai-error-"));
+  try {
+    const audioPath = path.join(root, "song.mp3");
+    await writeFile(audioPath, "fake mp3 bytes");
+    const api: TelegramBotApi = {
+      async call(method, payload) {
+        if (method === "getFile") return { ok: true, result: { file_id: payload?.file_id, file_path: "song.mp3", file_size: 12 } };
+        throw new Error(`unexpected method ${method}`);
+      },
+      async downloadFile(filePath) {
+        return { localPath: audioPath, filePath, bytes: new TextEncoder().encode("fake mp3 bytes") };
+      },
+    };
+    const client: OpenAIAudioTranscriptionClient = {
+      audio: { transcriptions: { async create() { throw new Error("OpenAI transcription failed"); } } },
+    };
+    const adapter = new TelegramEntrypointAdapter({
+      workspaceId: "personal",
+      apiClient: api,
+      attachmentHandling: {
+        download: true,
+        transcriber: new OpenAITelegramAttachmentTranscriber({ apiKeyRef: "env:UNUSED_WITH_INJECTED_CLIENT", client }),
+        transcribeKinds: ["voice", "audio"],
+        transcriptionFailureMode: "codex-chat",
+      },
+      updates: [
+        { update_id: 806, message: { message_id: 6, chat: { id: 123 }, from: { id: 7 }, audio: { file_id: "audio_file", file_unique_id: "audio_unique", file_name: "song.mp3", mime_type: "audio/mpeg" } } },
+      ],
+    });
+    await adapter.start();
+    const events = [];
+    for await (const event of adapter.inboundEvents()) events.push(event);
+
+    assert.equal(events.length, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("Telegram attachment downloads enforce codex-chat size limits before and after fetch", async () => {

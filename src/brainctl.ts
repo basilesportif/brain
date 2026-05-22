@@ -1201,6 +1201,11 @@ async function createCliEntrypoint(selection: ResolvedSupervisorRuntime, options
   const downloadDir = path.resolve(options.telegramDownloadDir ?? path.join(paths.stateRoot, "..", "artifacts", "telegram-downloads"));
   const transcription = telegramTranscriptionRuntime(selection, options);
   const needsTelegramDownloads = Boolean(options.telegramDownloads || options.telegramDownloadDir || transcription.enabled);
+  // Keep codex-chat Telegram voice/audio user-visible behavior at the adapter
+  // edge even when Brain's runtime/provider remains entrypoint-generic. In
+  // particular, a disabled/unavailable voice transcriber should reply at
+  // Telegram ingress and not become a generic provider event.
+  const needsTelegramAttachmentParity = kind === "telegram";
   const apiClient = options.telegramPolling
     ? await TelegramBotApiClient.fromTokenRef({ tokenEnv: options.telegramTokenEnv, tokenFile: options.telegramTokenFile, required: true, downloadDir: needsTelegramDownloads ? downloadDir : undefined, downloadMaxBytes: TELEGRAM_DOWNLOAD_MAX_BYTES })
     : undefined;
@@ -1231,10 +1236,11 @@ async function createCliEntrypoint(selection: ResolvedSupervisorRuntime, options
       mode: options.telegramPairing ? "code" : "first-user",
       store: new FileTelegramPairingStore(pairingState),
     },
-    attachmentHandling: needsTelegramDownloads || transcriber ? {
+    attachmentHandling: needsTelegramAttachmentParity || needsTelegramDownloads || transcriber ? {
       download: needsTelegramDownloads,
       transcriber,
       transcribeKinds: transcription.attachmentKinds,
+      transcriptionFailureMode: "codex-chat",
     } : undefined,
   });
 }

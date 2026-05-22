@@ -140,6 +140,16 @@ export interface TelegramAttachmentHandlingOptions {
   transcriber?: TelegramAttachmentTranscriber;
   transcribeKinds?: Array<BrainAttachment["kind"]>;
   appendTranscriptToText?: boolean;
+  /**
+   * `codex-chat` preserves the legacy Telegram UX at the adapter edge:
+   * - voice with transcription unavailable sends the same disabled notice and
+   *   is not yielded to Brain runtime/provider prompts;
+   * - audio with transcription disabled remains a plain attachment event;
+   * - transcription errors for configured voice/audio are kept as metadata
+   *   only when codex-chat mode is disabled, otherwise the event is dropped like
+   *   codex-chat's handler failure before enqueue.
+   */
+  transcriptionFailureMode?: "codex-chat" | "generic-metadata";
 }
 
 export interface TelegramBotApi {
@@ -366,6 +376,7 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
       await this.pairFirstUserIfNeeded(event);
       if (!(await this.isEventAllowed(event))) continue;
       const prepared = await this.prepareInboundEvent(event);
+      if (!prepared) continue;
       this.lastEventId = prepared.id;
       yield prepared;
     }
@@ -478,7 +489,7 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
     return toAsyncIterable([]);
   }
 
-  private async prepareInboundEvent(event: EntryPointInboundEvent): Promise<EntryPointInboundEvent> {
+  private async prepareInboundEvent(event: EntryPointInboundEvent): Promise<EntryPointInboundEvent | undefined> {
     const handling = this.options.attachmentHandling;
     if (!handling || !event.attachments?.length) return event;
 
@@ -500,7 +511,14 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
         }
       }
 
-      if (shouldTranscribeAttachment(next, handling)) {
+      const shouldAttemptTranscription = shouldTranscribeAttachmentKind(next, handling);
+      const codexChatFailureMode = (handling.transcriptionFailureMode ?? "codex-chat") === "codex-chat";
+      if (shouldAttemptTranscription && !handling.transcriber) {
+        if (codexChatFailureMode && next.kind === "voice") {
+          await this.replyToTelegramMessage(event, "Voice transcription is not enabled.");
+          return undefined;
+        }
+      } else if (shouldTranscribeAttachment(next, handling)) {
         try {
           const transcription = await handling.transcriber?.transcribe({ path: next.localPath as string, attachment: next, event });
           if (transcription?.text?.trim()) {
@@ -515,6 +533,7 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
             };
           }
         } catch (error) {
+          if (codexChatFailureMode && isCodexChatTranscriptionKind(next, handling)) return undefined;
           next = {
             ...next,
             metadata: compact({
@@ -533,6 +552,16 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
       text: appendTranscript ? appendTranscriptBlocks(event.text, transcriptBlocks) : event.text,
       attachments,
     };
+  }
+
+  private async replyToTelegramMessage(event: EntryPointInboundEvent, text: string): Promise<void> {
+    if (!this.options.apiClient || event.conversation?.id === undefined) return;
+    const telegramMessageId = typeof event.metadata?.telegramMessageId === "number" ? event.metadata.telegramMessageId : undefined;
+    await this.options.apiClient.call("sendMessage", compact({
+      chat_id: event.conversation.id,
+      text,
+      reply_to_message_id: telegramMessageId,
+    })).catch(() => undefined);
   }
 }
 
@@ -841,8 +870,16 @@ function attachmentsFrom(message: TelegramMessageLike) {
 
 function shouldTranscribeAttachment(attachment: BrainAttachment, handling: TelegramAttachmentHandlingOptions): boolean {
   if (!handling.transcriber || !attachment.localPath) return false;
+  return shouldTranscribeAttachmentKind(attachment, handling);
+}
+
+function shouldTranscribeAttachmentKind(attachment: BrainAttachment, handling: TelegramAttachmentHandlingOptions): boolean {
   const transcribeKinds = new Set((handling.transcribeKinds ?? ["voice", "audio"]).map(String));
   return transcribeKinds.has(String(attachment.kind));
+}
+
+function isCodexChatTranscriptionKind(attachment: BrainAttachment, handling: TelegramAttachmentHandlingOptions): boolean {
+  return shouldTranscribeAttachmentKind(attachment, handling) && ["voice", "audio"].includes(String(attachment.kind));
 }
 
 function appendTranscriptBlocks(existingText: string | undefined, blocks: Array<{ attachment: BrainAttachment; text: string }>): string {

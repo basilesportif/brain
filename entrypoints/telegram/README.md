@@ -35,12 +35,43 @@ Current implementation includes:
   runtime config (`transcription.provider: openai` with a private `apiKeyRef`,
   model, optional language, and optional prompt file) or an injectable command
   seam, storing downloaded files under private runtime paths and appending
-  transcript text to inbound events; and
+  transcript text to inbound events. Telegram voice/audio edge behavior follows
+  `codex-chat` parity in live Brain wiring: disabled voice transcription sends
+  `Voice transcription is not enabled.` and suppresses the provider event;
+  disabled audio transcription remains an attachment-only inbound event; and
+  configured transcription failures suppress the voice/audio provider event like
+  `codex-chat` handler failures;
 - outbound mapping for replies, edits, photo/document/voice/audio/video
   artifacts, status actions, reactions, and delete-after-send cleanup for staged
   local artifacts.
 
 It is suitable for runtime smoke tests and mapping checks. Live polling/webhook startup is still intentionally a skeleton: no process manager, reverse proxy, token file, or deployment side effects are installed by this package.
+
+## Voice/audio transcription parity with codex-chat
+
+Brain keeps provider prompts generic, but the Telegram adapter owns the
+user-visible Telegram boundary. For voice/audio, live Brain wiring sets
+`transcriptionFailureMode: "codex-chat"` so ingress matches the legacy service
+as closely as possible without leaking Telegram concepts into runtime-core:
+
+- Voice + transcription disabled or unavailable before a transcriber exists:
+  send a Telegram reply `Voice transcription is not enabled.` and do not yield
+  a generic inbound event.
+- Audio + transcription disabled: yield the generic inbound event with the audio
+  attachment and no transcript text.
+- Voice/audio + configured transcription error, including a missing OpenAI key
+  at transcribe time or an OpenAI API failure: do not yield a provider event.
+  `codex-chat` logs these as Telegram handler failures before enqueue; Brain
+  preserves the same no-provider-event result at the adapter edge.
+- Successful voice transcription appends `Voice transcript:` followed by the
+  transcript and `Audio path: ...` after any caption. Successful audio
+  transcription uses `Audio transcript:` and, like `codex-chat`, ignores the
+  Telegram audio caption in the provider text.
+
+The adapter still exposes `transcriptionFailureMode: "generic-metadata"` for
+experiments that need Brain events carrying transcription error metadata, but
+that is not the codex-chat parity mode used by `brainctl` Telegram runtime
+wiring.
 
 ## Bootstrap minimum
 
