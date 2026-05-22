@@ -474,7 +474,7 @@ async function runCommand(options: SupervisorRunCommandOptions): Promise<CliResu
 
   const paths = supervisorPaths(options.workspace, { ...options, workspacePath: workspace.workspacePath });
   await mkdir(path.dirname(paths.logPath), { recursive: true, mode: 0o700 });
-  const provider = createCliProvider(selection.runtime.providerKind, options);
+  const provider = createCliProvider(selection.runtime, options);
   let supervisor: BrainSupervisor | undefined;
   const store = new FileSubagentJobStore({ root: paths.stateRoot });
   const subagentExecutor = createCliSubagentExecutor(selection.runtime, provider);
@@ -1155,8 +1155,8 @@ function normalizeEntrypointKind(entrypoint: string): string {
   throw new Error(`unknown entrypoint: ${entrypoint}`);
 }
 
-function createCliProvider(providerKind: string, options: SupervisorRunCommandOptions): ProviderAdapter {
-  const provider = providerKind.toLowerCase();
+function createCliProvider(selection: ResolvedSupervisorRuntime, options: SupervisorRunCommandOptions): ProviderAdapter {
+  const provider = selection.providerKind.toLowerCase();
   if (provider === "fake") return new FakeProviderAdapter();
   if (provider === "echo") return new EchoProviderAdapter();
   if (provider === "codex") return createCodexProvider({
@@ -1164,9 +1164,10 @@ function createCliProvider(providerKind: string, options: SupervisorRunCommandOp
     binary: options.binary,
     cwd: options.cwd,
     appServerUrl: options.appServerUrl,
+    transcriptionApiKeyRef: selection.workspace.transcription?.apiKeyRef,
   });
   if (provider === "claude-code" || provider === "claude") return createClaudeCodeProvider({ transport: (options.transport as ClaudeCodeTransportKind | undefined) ?? "stub" });
-  throw new Error(`unknown provider: ${providerKind}`);
+  throw new Error(`unknown provider: ${selection.providerKind}`);
 }
 
 function createCliSubagentExecutor(selection: ResolvedSupervisorRuntime, provider: ProviderAdapter): SubagentExecutor {

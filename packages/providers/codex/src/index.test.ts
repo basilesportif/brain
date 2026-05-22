@@ -1,9 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { CodexAppServerTransport, CodexExecTransport, buildCodexExecArgs, createCodexProvider, createCodexTransport, type CodexAppServerWebSocket } from "./index.js";
+import { CodexAppServerTransport, CodexExecTransport, buildCodexExecArgs, codexProviderSecretEnvNames, createCodexProvider, createCodexTransport, sanitizeCodexProviderEnv, type CodexAppServerWebSocket } from "./index.js";
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
 
 test("Codex provider creates runtime-core compatible stub sessions", async () => {
   const provider = createCodexProvider({ transport: "stub" });
@@ -38,6 +43,25 @@ test("Codex provider exposes typed app-server transport seam", async () => {
     prompt: "hello",
   })) events.push(event);
   assert.equal(events[0]?.type, "error");
+});
+
+test("Codex provider env sanitizer strips OpenAI and configured transcription refs", () => {
+  const env = sanitizeCodexProviderEnv(
+    { transcriptionApiKeyRef: "env:BRAIN_TRANSCRIPTION_KEY", secretEnvNames: ["EXTRA_SECRET"] },
+    {
+      OPENAI_API_KEY: "present",
+      BRAIN_TRANSCRIPTION_KEY: "present",
+      EXTRA_SECRET: "present",
+      OTHER_VAR: "keep",
+    },
+  );
+
+  assert.equal(env.OPENAI_API_KEY, undefined);
+  assert.equal(env.BRAIN_TRANSCRIPTION_KEY, undefined);
+  assert.equal(env.EXTRA_SECRET, undefined);
+  assert.equal(env.OTHER_VAR, "keep");
+  assert.deepEqual(new Set(codexProviderSecretEnvNames({ transcriptionApiKeyRef: "BRAIN_TRANSCRIPTION_KEY" })), new Set(["OPENAI_API_KEY", "BRAIN_TRANSCRIPTION_KEY"]));
+  assert.deepEqual(codexProviderSecretEnvNames({ transcriptionApiKeyRef: "file:/tmp/transcription-key" }), ["OPENAI_API_KEY"]);
 });
 
 test("Codex app-server transport speaks JSON-RPC over the protocol seam", async () => {
@@ -126,6 +150,52 @@ test("Codex app-server transport speaks JSON-RPC over the protocol seam", async 
   await session.stop();
 });
 
+test("Codex app-server spawn does not inherit OpenAI or transcription env", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "brain-codex-app-env-"));
+  const fakeCodex = path.join(dir, "fake-codex-app.mjs");
+  const appEnvPath = path.join(dir, "app-server-env.json");
+  await writeFile(fakeCodex, `#!/usr/bin/env node
+import { writeFile } from "node:fs/promises";
+await writeFile(${JSON.stringify(appEnvPath)}, JSON.stringify({
+  openai: Boolean(process.env.OPENAI_API_KEY),
+  transcription: Boolean(process.env.BRAIN_TRANSCRIPTION_KEY),
+  other: process.env.OTHER_VAR || null
+}));
+setInterval(() => {}, 1000);
+`);
+  await chmod(fakeCodex, 0o755);
+  const original = {
+    openai: process.env.OPENAI_API_KEY,
+    transcription: process.env.BRAIN_TRANSCRIPTION_KEY,
+    other: process.env.OTHER_VAR,
+  };
+  try {
+    process.env.OPENAI_API_KEY = "sk-test-parent-openai";
+    process.env.BRAIN_TRANSCRIPTION_KEY = "sk-test-parent-transcription";
+    process.env.OTHER_VAR = "keep-me";
+    const session = await createCodexTransport({
+      transport: "app-server",
+      binary: fakeCodex,
+      cwd: dir,
+      appServerStartupTimeoutMs: 100,
+      appServerRequestTimeoutMs: 100,
+      transcriptionApiKeyRef: "BRAIN_TRANSCRIPTION_KEY",
+    }).createSession({ workspaceId: "personal" });
+
+    try {
+      await assert.rejects(session.start(), /Codex app-server/);
+    } finally {
+      await session.stop();
+    }
+
+    assert.deepEqual(JSON.parse(await readFile(appEnvPath, "utf8")), { openai: false, transcription: false, other: "keep-me" });
+  } finally {
+    restoreEnv("OPENAI_API_KEY", original.openai);
+    restoreEnv("BRAIN_TRANSCRIPTION_KEY", original.transcription);
+    restoreEnv("OTHER_VAR", original.other);
+  }
+});
+
 test("Codex exec transport shells out and maps JSONL events", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "brain-codex-exec-"));
   const fakeCodex = path.join(dir, "fake-codex.mjs");
@@ -174,6 +244,71 @@ process.stdin.on("end", () => {
   assert.equal(events.some((event) => event.type === "error"), false);
   assert.equal(events.filter((event) => event.type === "delta").map((event) => event.text).join(""), "Codex fake: hello");
   assert.deepEqual(events.find((event) => event.type === "final"), { type: "final", text: "Codex fake: hello" });
+});
+
+test("Codex exec health and turn spawns do not inherit OpenAI or transcription env", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "brain-codex-env-"));
+  const fakeCodex = path.join(dir, "fake-codex.mjs");
+  const healthEnvPath = path.join(dir, "health-env.json");
+  const turnEnvPath = path.join(dir, "turn-env.json");
+  await writeFile(fakeCodex, `#!/usr/bin/env node
+import { writeFile } from "node:fs/promises";
+const snapshot = () => JSON.stringify({
+  openai: Boolean(process.env.OPENAI_API_KEY),
+  transcription: Boolean(process.env.BRAIN_TRANSCRIPTION_KEY),
+  other: process.env.OTHER_VAR || null
+});
+if (process.argv.includes("--version")) {
+  await writeFile(${JSON.stringify(healthEnvPath)}, snapshot());
+  console.log("fake-codex 1.0.0");
+  process.exit(0);
+}
+await writeFile(${JSON.stringify(turnEnvPath)}, snapshot());
+console.log(JSON.stringify({ method: "item/agentMessage/delta", params: { delta: "ok" } }));
+console.log(JSON.stringify({ method: "turn/completed", params: { turn: { id: "turn_fake", status: "completed", items: [] } } }));
+`);
+  await chmod(fakeCodex, 0o755);
+
+  const original = {
+    openai: process.env.OPENAI_API_KEY,
+    transcription: process.env.BRAIN_TRANSCRIPTION_KEY,
+    other: process.env.OTHER_VAR,
+  };
+  try {
+    process.env.OPENAI_API_KEY = "sk-test-parent-openai";
+    process.env.BRAIN_TRANSCRIPTION_KEY = "sk-test-parent-transcription";
+    process.env.OTHER_VAR = "keep-me";
+
+    const session = await createCodexTransport({
+      transport: "exec",
+      binary: fakeCodex,
+      cwd: dir,
+      transcriptionApiKeyRef: "env:BRAIN_TRANSCRIPTION_KEY",
+    }).createSession({ workspaceId: "personal" });
+    assert.equal((await session.health()).ok, true);
+    const events = [];
+    for await (const event of session.sendTurn({
+      id: "turn_env",
+      sessionId: session.id,
+      inboundEvent: {
+        id: "evt_env",
+        kind: "message",
+        workspaceId: "personal",
+        entrypoint: { entrypointId: "cli", channelKind: "cli" },
+        text: "hello",
+        receivedAt: "2026-05-21T00:00:00.000Z",
+      },
+      prompt: "hello",
+    })) events.push(event);
+
+    assert.equal(events.some((event) => event.type === "error"), false);
+    assert.deepEqual(JSON.parse(await readFile(healthEnvPath, "utf8")), { openai: false, transcription: false, other: "keep-me" });
+    assert.deepEqual(JSON.parse(await readFile(turnEnvPath, "utf8")), { openai: false, transcription: false, other: "keep-me" });
+  } finally {
+    restoreEnv("OPENAI_API_KEY", original.openai);
+    restoreEnv("BRAIN_TRANSCRIPTION_KEY", original.transcription);
+    restoreEnv("OTHER_VAR", original.other);
+  }
 });
 
 test("Codex exec transport captures last-message artifacts and resume handles", async () => {

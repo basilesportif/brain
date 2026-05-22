@@ -41,6 +41,14 @@ export interface CodexProviderOptions {
   appServerClient?: CodexAppServerClient;
   /** Test seam for the Codex app-server JSON-RPC WebSocket transport. */
   appServerWebSocketFactory?: CodexAppServerWebSocketFactory;
+  /**
+   * Workspace-scoped transcription key reference to strip from Codex child
+   * process environments. The Telegram OpenAI transcriber resolves this ref in
+   * process, but non-transcription Codex subprocesses must not inherit it.
+   */
+  transcriptionApiKeyRef?: string;
+  /** Additional env names that must not be inherited by Codex subprocesses. */
+  secretEnvNames?: string[];
 }
 
 export type CodexSessionInput = Parameters<ProviderAdapter["createSession"]>[0];
@@ -79,6 +87,31 @@ export interface CodexAppServerWebSocket {
 }
 
 export type CodexAppServerWebSocketFactory = (url: string) => CodexAppServerWebSocket;
+
+export const CODEX_PROVIDER_ALWAYS_STRIPPED_ENV = ["OPENAI_API_KEY"] as const;
+
+export function codexProviderSecretEnvNames(options: Pick<CodexProviderOptions, "secretEnvNames" | "transcriptionApiKeyRef"> = {}): string[] {
+  const names = new Set<string>(CODEX_PROVIDER_ALWAYS_STRIPPED_ENV);
+  for (const name of options.secretEnvNames ?? []) {
+    const trimmed = name.trim();
+    if (trimmed) names.add(trimmed);
+  }
+  const transcriptionEnv = envNameFromSecretRef(options.transcriptionApiKeyRef);
+  if (transcriptionEnv) names.add(transcriptionEnv);
+  return [...names];
+}
+
+export function sanitizeCodexProviderEnv(
+  options: Pick<CodexProviderOptions, "secretEnvNames" | "transcriptionApiKeyRef"> = {},
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(baseEnv)) {
+    if (value !== undefined) env[key] = value;
+  }
+  for (const name of codexProviderSecretEnvNames(options)) delete env[name];
+  return env;
+}
 
 export class CodexProviderAdapter implements ProviderAdapter {
   readonly id = "codex";
@@ -367,7 +400,7 @@ export class CodexAppServerProtocolSession implements ProviderSession {
     const binary = this.options.binary ?? "codex";
     const args = ["app-server", "--listen", listenUrl];
     for (const item of this.options.extraConfig ?? []) args.push("-c", item);
-    const { OPENAI_API_KEY: _omit, ...safeEnv } = process.env;
+    const safeEnv = sanitizeCodexProviderEnv(this.options);
     const child = spawn(binary, args, { cwd: this.options.cwd, env: safeEnv, stdio: ["ignore", "pipe", "pipe"] });
     this.child = child;
     child.stdout?.on("data", () => undefined);
@@ -524,6 +557,7 @@ export class CodexExecSession implements ProviderSession {
     const binary = this.options.binary ?? "codex";
     const result = await collectProcess(binary, ["--version"], {
       cwd: this.options.cwd,
+      env: sanitizeCodexProviderEnv(this.options),
       timeoutMs: Math.min(this.options.timeoutMs ?? 5_000, 10_000),
       maxOutputBytes: 32_000,
     });
@@ -557,7 +591,7 @@ export class CodexExecSession implements ProviderSession {
 
     let child: ChildProcess;
     try {
-      child = spawn(binary, args, { cwd: this.options.cwd, stdio: ["pipe", "pipe", "pipe"] });
+      child = spawn(binary, args, { cwd: this.options.cwd, env: sanitizeCodexProviderEnv(this.options), stdio: ["pipe", "pipe", "pipe"] });
     } catch (error) {
       queue.push({ type: "error", message: `Failed to spawn Codex exec transport: ${errorMessage(error)}`, raw: { binary, args: redactPromptArgs(args, turn.prompt) } });
       queue.close();
@@ -721,6 +755,15 @@ function turnInputForAppServer(turn: ProviderTurn): unknown[] {
 
 function compactUnknown<T extends Record<string, unknown>>(record: T): T {
   return Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined && value !== "")) as T;
+}
+
+function envNameFromSecretRef(ref: string | undefined): string | undefined {
+  const trimmed = ref?.trim();
+  if (!trimmed) return undefined;
+  if (/^file:/i.test(trimmed)) return undefined;
+  const envRef = /^env:/i.test(trimmed) ? trimmed.slice(4) : trimmed;
+  const envName = envRef.trim();
+  return envName || undefined;
 }
 
 function webSocketMessageToString(data: unknown): string {
@@ -943,6 +986,7 @@ function errorMessage(error: unknown): string {
 
 interface CollectProcessOptions {
   cwd?: string;
+  env?: NodeJS.ProcessEnv;
   timeoutMs: number;
   maxOutputBytes: number;
 }
@@ -961,7 +1005,7 @@ function collectProcess(binary: string, args: string[], options: CollectProcessO
     let settled = false;
     let child: ChildProcess;
     try {
-      child = spawn(binary, args, { cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"] });
+      child = spawn(binary, args, { cwd: options.cwd, env: options.env, stdio: ["ignore", "pipe", "pipe"] });
     } catch (error) {
       resolve({ stdout, stderr, error: error instanceof Error ? error : new Error(String(error)) });
       return;
