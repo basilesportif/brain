@@ -46,6 +46,37 @@ workspaces:
     promptContext:
       includeActiveEntrypointMetadata: true
       exposeChannelSecrets: false
+    backup:
+      strategy: private-git # none | local-snapshot | private-git
+      privateGit:
+        repoPath: /srv/brain/workspaces/personal/backups/private-git
+        remote: git@github.com:example/private-brain-backup.git
+        branch: main
+        include: [config/**, state/**, artifacts/metadata/**]
+        exclude: [secrets/**, logs/**, tmp/**, cache/**, caches/**, "**/.cache/**", "**/node_modules/**", "**/*.log"]
+    webPublishing:
+      enabled: false
+      mode: disabled # disabled | domain | ip
+      domain: me.example.test
+      baseUrl: https://me.example.test/pages
+      publishRoot: /srv/brain/pages
+      reverseProxy:
+        kind: caddy
+        note: Operator configures Caddy/reverse proxy; brainctl does not change DNS.
+    integrations:
+      composio:
+        enabled: false
+        apiKeyRef: env:COMPOSIO_API_KEY
+        connectedAccountRef: file:/srv/brain/workspaces/personal/config/composio-connected-account.json
+        dataSources:
+          googleCalendar:
+            enabled: false
+            connectedAccountRef: file:/srv/brain/workspaces/personal/config/google-calendar-connected-account.json
+            requiredEnvRefs: [env:COMPOSIO_API_KEY]
+          chat:
+            enabled: false
+            connectedAccountRef: file:/srv/brain/workspaces/personal/config/chat-connected-account.json
+            requiredEnvRefs: [env:COMPOSIO_API_KEY]
 ```
 
 ## Example TOML
@@ -83,7 +114,44 @@ allowCrossEntrypointReplies = false
 [workspaces.personal.promptContext]
 includeActiveEntrypointMetadata = true
 exposeChannelSecrets = false
+
+[workspaces.personal.backup]
+strategy = "private-git"
+
+[workspaces.personal.backup.privateGit]
+repoPath = "/srv/brain/workspaces/personal/backups/private-git"
+remote = "git@github.com:example/private-brain-backup.git"
+branch = "main"
+include = ["config/**", "state/**", "artifacts/metadata/**"]
+exclude = ["secrets/**", "logs/**", "tmp/**", "cache/**", "caches/**", "**/.cache/**", "**/node_modules/**", "**/*.log"]
+
+[workspaces.personal.webPublishing]
+enabled = false
+mode = "disabled"
+domain = "me.example.test"
+baseUrl = "https://me.example.test/pages"
+publishRoot = "/srv/brain/pages"
+
+[workspaces.personal.integrations.composio]
+enabled = false
+apiKeyRef = "env:COMPOSIO_API_KEY"
+connectedAccountRef = "file:/srv/brain/workspaces/personal/config/composio-connected-account.json"
 ```
+
+## Optional setup surfaces
+
+These sections are optional and are reported by `brainctl setup inspect/status`
+as missing optional pieces when absent or disabled:
+
+- `backup`: `none`, `local-snapshot`, or `private-git`. `private-git` records a
+  private repo path/remote/branch plus include/exclude policy. Safe defaults
+  exclude secrets, logs, tmp, caches, `node_modules`, and `*.log`.
+- `webPublishing`: domain or direct-IP publishing metadata. `domain` mode needs
+  operator-managed DNS; `ip` mode does not. Brain records base URL, publish
+  root, manifest path, and Caddy/reverse-proxy notes but never changes DNS.
+- `integrations.composio`: optional Composio refs for Google Calendar and chat
+  data sources. Store real API keys and connected-account metadata in env/file
+  refs outside git; status commands print only metadata.
 
 ## Validation rules
 
@@ -99,6 +167,9 @@ Runtime config validation should reject configurations that violate any of these
 8. Prompt context may include `entrypointId`, `channelKind`, `displayName`, capability flags, workspace ID, and external conversation labels, but must not expose channel secrets, raw bot tokens, or credential file paths.
 9. Disabled entrypoints may appear as configured but unavailable metadata; they must not be used for sends, edits, uploads, or status updates.
 10. Telegram-specific identifiers may be stored inside the Telegram adapter config boundary, but generic runtime config should reference them only through `configRef` or adapter-owned metadata.
+11. `backup.strategy: private-git` requires `backup.privateGit.repoPath`.
+12. `backup.strategy: local-snapshot` requires `backup.localSnapshot.root`.
+13. Enabled `webPublishing` requires `baseUrl` or `publicBaseUrl`.
 
 ## Prompt context shape
 

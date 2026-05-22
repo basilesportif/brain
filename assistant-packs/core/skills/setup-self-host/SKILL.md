@@ -27,6 +27,10 @@ deployment handoff.
 - Do not require Composio or any optional integration for initial bootstrap.
 - Print only secret metadata: existence, owner, mode, byte size, and required-key
   presence. Never print token values or raw chat/user IDs.
+- Treat setup as re-runnable. Existing config, backup metadata, generated-page
+  roots, and secret refs are inspected and reported, not overwritten. Destructive
+  replacement requires an explicit `--force` or `--replace` on a command that
+  documents the target.
 - Run `pnpm run check` after setup/documentation edits and before declaring
   setup ready.
 
@@ -69,6 +73,15 @@ Then collect the path-specific fields below.
    - optional advanced one-time `/pair <code>` flow,
    - not ready; leave pairing pending.
 7. Optional generated pages/web preview? Default: disabled.
+8. Optional private workspace backup? Default: none. Offer `local-snapshot` or
+   `private-git` with private repo path, optional remote, branch, and safe
+   include/exclude defaults that exclude secrets/logs/tmp/caches.
+9. Optional generated web publishing? If yes, ask domain vs direct IP, public
+   base URL, publish root, Caddy/reverse-proxy note, and explain DNS is needed
+   for domains but not direct IP. Do not change DNS.
+10. Optional Google Calendar/chat through Composio? If yes, collect only env/file
+   refs for API key and connected-account metadata; do not request or print real
+   credentials.
 
 ## Local setup flow
 
@@ -100,9 +113,20 @@ Then collect the path-specific fields below.
    - expected directories exist,
    - secret files are not tracked,
    - runtime config has one primary enabled entrypoint,
-   - provider auth and Telegram bootstrap are either present or clearly pending.
+   - provider auth and Telegram bootstrap are either present or clearly pending,
+   - backup, web publishing, Composio, providers, entrypoints, and integrations
+     are listed as configured/missing optional/missing required.
 8. Run safe `brainctl` validations and summarize what remains before live
    deployment.
+
+Recommended safe commands:
+
+```bash
+pnpm run brainctl -- setup status --config <private-config> --workspace <workspace-name>
+pnpm run brainctl -- backup plan --config <private-config> --workspace <workspace-name>
+pnpm run brainctl -- web status --config <private-config> --workspace <workspace-name>
+pnpm run brainctl -- composio status --config <private-config> --workspace <workspace-name>
+```
 
 ## Remote SSH setup flow
 

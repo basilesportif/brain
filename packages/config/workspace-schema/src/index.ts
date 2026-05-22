@@ -24,6 +24,89 @@ export const promptContextSchema = z.object({
   exposeChannelSecrets: z.boolean().default(false),
 }).default({ includeActiveEntrypointMetadata: true, exposeChannelSecrets: false });
 
+export const backupStrategySchema = z.enum(["none", "local-snapshot", "private-git"]);
+export type BackupStrategy = z.infer<typeof backupStrategySchema>;
+
+export const defaultBackupInclude = ["config/**", "state/**", "artifacts/metadata/**"];
+export const defaultBackupExclude = [
+  "secrets/**",
+  "logs/**",
+  "tmp/**",
+  "cache/**",
+  "caches/**",
+  "**/.cache/**",
+  "**/node_modules/**",
+  "**/*.log",
+];
+
+export const backupPrivateGitSchema = z.object({
+  repoPath: z.string().min(1).optional(),
+  remote: z.string().min(1).optional(),
+  branch: z.string().min(1).default("main"),
+  include: z.array(z.string().min(1)).default(defaultBackupInclude),
+  exclude: z.array(z.string().min(1)).default(defaultBackupExclude),
+}).strict().default({ branch: "main", include: defaultBackupInclude, exclude: defaultBackupExclude });
+export type BackupPrivateGitConfig = z.infer<typeof backupPrivateGitSchema>;
+
+export const backupLocalSnapshotSchema = z.object({
+  root: z.string().min(1).optional(),
+  retention: z.string().min(1).optional(),
+  include: z.array(z.string().min(1)).default(defaultBackupInclude),
+  exclude: z.array(z.string().min(1)).default(defaultBackupExclude),
+}).strict().default({ include: defaultBackupInclude, exclude: defaultBackupExclude });
+export type BackupLocalSnapshotConfig = z.infer<typeof backupLocalSnapshotSchema>;
+
+export const backupConfigSchema = z.object({
+  strategy: backupStrategySchema.default("none"),
+  localSnapshot: backupLocalSnapshotSchema.optional(),
+  privateGit: backupPrivateGitSchema.optional(),
+}).strict().default({ strategy: "none" });
+export type BackupConfig = z.infer<typeof backupConfigSchema>;
+
+export const webPublishingConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  mode: z.enum(["disabled", "domain", "ip"]).default("disabled"),
+  domain: z.string().min(1).optional(),
+  baseUrl: z.string().min(1).optional(),
+  publishRoot: z.string().min(1).optional(),
+  publicBaseUrl: z.string().min(1).optional(),
+  manifestPath: z.string().min(1).optional(),
+  reverseProxy: z.object({
+    kind: z.string().min(1).default("caddy"),
+    note: z.string().min(1).optional(),
+  }).strict().optional(),
+  dns: z.object({
+    required: z.boolean().optional(),
+    record: z.string().min(1).optional(),
+  }).strict().optional(),
+}).strict().default({ enabled: false, mode: "disabled" });
+export type WebPublishingConfig = z.infer<typeof webPublishingConfigSchema>;
+
+export const composioDataSourceConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  connectedAccountRef: z.string().min(1).optional(),
+  metadataRef: z.string().min(1).optional(),
+  requiredEnvRefs: z.array(z.string().min(1)).default([]),
+}).strict().default({ enabled: false, requiredEnvRefs: [] });
+export type ComposioDataSourceConfig = z.infer<typeof composioDataSourceConfigSchema>;
+
+export const composioConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  apiKeyRef: z.string().min(1).optional(),
+  connectedAccountRef: z.string().min(1).optional(),
+  metadataRef: z.string().min(1).optional(),
+  dataSources: z.object({
+    googleCalendar: composioDataSourceConfigSchema.optional(),
+    chat: composioDataSourceConfigSchema.optional(),
+  }).strict().default({}),
+}).strict().default({ enabled: false, dataSources: {} });
+export type ComposioConfig = z.infer<typeof composioConfigSchema>;
+
+export const integrationsConfigSchema = z.object({
+  composio: composioConfigSchema.optional(),
+}).strict().default({});
+export type IntegrationsConfig = z.infer<typeof integrationsConfigSchema>;
+
 export const workspaceConfigSchema = z.object({
   workspacePath: z.string().min(1),
   provider: z.string().min(1).optional(),
@@ -32,6 +115,9 @@ export const workspaceConfigSchema = z.object({
   outboundDefaults: outboundDefaultsSchema.optional(),
   promptContext: promptContextSchema.optional(),
   activeEntrypointMode: activeEntrypointModeSchema.optional(),
+  backup: backupConfigSchema.optional(),
+  webPublishing: webPublishingConfigSchema.optional(),
+  integrations: integrationsConfigSchema.optional(),
 }).strict();
 export type WorkspaceConfig = z.infer<typeof workspaceConfigSchema>;
 
@@ -92,6 +178,18 @@ export function validateWorkspaceConfig(input: unknown): WorkspaceValidationResu
 
     if ((workspace.promptContext?.exposeChannelSecrets ?? false) === true) {
       issues.push({ path: `${prefix}.promptContext.exposeChannelSecrets`, message: "prompt context must not expose channel secrets" });
+    }
+
+    if ((workspace.backup?.strategy ?? "none") === "private-git" && !workspace.backup?.privateGit?.repoPath) {
+      issues.push({ path: `${prefix}.backup.privateGit.repoPath`, message: "private-git backup strategy requires privateGit.repoPath" });
+    }
+
+    if ((workspace.backup?.strategy ?? "none") === "local-snapshot" && !workspace.backup?.localSnapshot?.root) {
+      issues.push({ path: `${prefix}.backup.localSnapshot.root`, message: "local-snapshot backup strategy requires localSnapshot.root" });
+    }
+
+    if ((workspace.webPublishing?.enabled ?? false) && !(workspace.webPublishing?.baseUrl ?? workspace.webPublishing?.publicBaseUrl)) {
+      issues.push({ path: `${prefix}.webPublishing.baseUrl`, message: "enabled web publishing requires baseUrl or publicBaseUrl" });
     }
 
     const route = workspace.outboundDefaults?.route ?? "originating-entrypoint";

@@ -244,9 +244,149 @@ test("brainctl status, provider smoke, automation monitor, and web wrappers are 
   }
 });
 
-function spawnBrainctl(args: string[]) {
+test("brainctl setup inspect is idempotent and redacts secret values", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-setup-"));
+  try {
+    const workspace = path.join(root, "workspace");
+    const backupRepo = path.join(root, "backup-repo");
+    const config = path.join(root, "runtime.yaml");
+    await writeFile(config, testRuntimeConfig(workspace, backupRepo, { composioEnabled: true }));
+
+    const missing = spawnBrainctl(["setup", "inspect", "--config", config, "--workspace", "personal", "--path", workspace]);
+    assert.equal(missing.status, 1, missing.stderr);
+    const missingJson = JSON.parse(missing.stdout) as { ok: boolean; details: { plan: { missing_required: string[] } } };
+    assert.equal(missingJson.ok, false);
+    assert.ok(missingJson.details.plan.missing_required.some((item) => /workspace root missing/.test(item)));
+
+    const first = spawnBrainctl(["setup", "--config", config, "--workspace", "personal", "--path", workspace]);
+    assert.equal(first.status, 0, first.stderr);
+    const firstJson = JSON.parse(first.stdout) as { ok: boolean; details: { idempotency: { reRunnable: boolean; defaultOverwrite: boolean }; plan: { missing_required: string[] } } };
+    assert.equal(firstJson.ok, true);
+    assert.equal(firstJson.details.idempotency.reRunnable, true);
+    assert.equal(firstJson.details.idempotency.defaultOverwrite, false);
+    assert.deepEqual(firstJson.details.plan.missing_required, []);
+
+    const privateConfig = path.join(workspace, "config", "runtime.yaml");
+    await writeFile(privateConfig, "existing private config placeholder\n");
+    const second = spawnBrainctl(["setup", "status", "--config", config, "--workspace", "personal", "--path", workspace]);
+    assert.equal(second.status, 0, second.stderr);
+    const secondJson = JSON.parse(second.stdout) as { ok: boolean; details: { plan: { unsafe_to_overwrite: string[] }; secretValuesPrinted: boolean } };
+    assert.equal(secondJson.ok, true);
+    assert.equal(secondJson.details.secretValuesPrinted, false);
+    assert.ok(secondJson.details.plan.unsafe_to_overwrite.some((item) => /runtime\.yaml/.test(item)));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brainctl backup, web setup, and Composio status are safe and metadata-only", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-optional-"));
+  try {
+    const workspace = path.join(root, "workspace");
+    const backupRepo = path.join(root, "backup-repo");
+    const config = path.join(root, "runtime.yaml");
+    await writeFile(config, testRuntimeConfig(workspace, backupRepo, { composioEnabled: true, webEnabled: true }));
+    await mkdir(workspace, { recursive: true });
+
+    const plan = spawnBrainctl(["backup", "plan", "--config", config, "--workspace", "personal"]);
+    assert.equal(plan.status, 0, plan.stderr);
+    const planJson = JSON.parse(plan.stdout) as { ok: boolean; details: { plan: { config: { strategy: string; privateGit: { exclude: string[] } }; dryRunDefault: boolean } } };
+    assert.equal(planJson.ok, true);
+    assert.equal(planJson.details.plan.config.strategy, "private-git");
+    assert.equal(planJson.details.plan.dryRunDefault, true);
+    assert.ok(planJson.details.plan.config.privateGit.exclude.includes("secrets/**"));
+
+    const init = spawnBrainctl(["backup", "init", "--config", config, "--workspace", "personal", "--apply"]);
+    assert.equal(init.status, 0, init.stderr);
+    const initJson = JSON.parse(init.stdout) as { ok: boolean; details: { init: { wroteGitignore: boolean; initializedRepo: boolean } } };
+    assert.equal(initJson.ok, true);
+    assert.equal(initJson.details.init.wroteGitignore, true);
+    assert.equal(initJson.details.init.initializedRepo, true);
+
+    const status = spawnBrainctl(["backup", "status", "--config", config, "--workspace", "personal"]);
+    assert.equal(status.status, 0, status.stderr);
+    const statusJson = JSON.parse(status.stdout) as { ok: boolean; details: { status: { git: { present: boolean; status: { filenamesPrinted: boolean } } } } };
+    assert.equal(statusJson.ok, true);
+    assert.equal(statusJson.details.status.git.present, true);
+    assert.equal(statusJson.details.status.git.status.filenamesPrinted, false);
+
+    const web = spawnBrainctl(["web", "status", "--config", config, "--workspace", "personal", "--base-url", "http://127.0.0.1/pages", "--publish-root", path.join(root, "pages")]);
+    assert.equal(web.status, 0, web.stderr);
+    const webJson = JSON.parse(web.stdout) as { ok: boolean; details: { dns: { needed: string; changed: boolean }; dnsChanged: boolean } };
+    assert.equal(webJson.ok, true);
+    assert.equal(webJson.details.dns.needed, "not-needed-for-direct-IP");
+    assert.equal(webJson.details.dnsChanged, false);
+    assert.equal(webJson.details.dns.changed, false);
+
+    const secretValue = "composio-secret-value-must-not-print";
+    const composio = spawnBrainctl(["composio", "status", "--config", config, "--workspace", "personal"], { COMPOSIO_API_KEY: secretValue });
+    assert.equal(composio.status, 0, composio.stderr);
+    assert.doesNotMatch(composio.stdout, new RegExp(secretValue));
+    const composioJson = JSON.parse(composio.stdout) as { ok: boolean; details: { enabled: boolean; refs: Array<{ kind: string; present: boolean; value: string }>; credentialsUsed: boolean; secretValuesPrinted: boolean } };
+    assert.equal(composioJson.ok, true);
+    assert.equal(composioJson.details.enabled, true);
+    assert.equal(composioJson.details.credentialsUsed, false);
+    assert.equal(composioJson.details.secretValuesPrinted, false);
+    assert.ok(composioJson.details.refs.some((ref) => ref.kind === "env" && ref.present && ref.value === "redacted"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function testRuntimeConfig(workspace: string, backupRepo: string, options: { composioEnabled?: boolean; webEnabled?: boolean } = {}): string {
+  return [
+    "runtime:",
+    "  activeEntrypointMode: single-primary",
+    "workspaces:",
+    "  personal:",
+    `    workspacePath: ${JSON.stringify(workspace)}`,
+    "    provider: codex",
+    "    primaryEntrypointId: telegram-main",
+    "    enabledEntrypoints:",
+    "      telegram-main:",
+    "        kind: telegram",
+    "        enabled: true",
+    "        configRef: env:TELEGRAM_MAIN_CONFIG",
+    "    outboundDefaults:",
+    "      route: originating-entrypoint",
+    "      allowCrossEntrypointReplies: false",
+    "    promptContext:",
+    "      includeActiveEntrypointMetadata: true",
+    "      exposeChannelSecrets: false",
+    "    backup:",
+    "      strategy: private-git",
+    "      privateGit:",
+    `        repoPath: ${JSON.stringify(backupRepo)}`,
+    "        branch: main",
+    "    webPublishing:",
+    `      enabled: ${options.webEnabled ? "true" : "false"}`,
+    `      mode: ${options.webEnabled ? "domain" : "disabled"}`,
+    "      baseUrl: https://example.test/pages",
+    `      publishRoot: ${JSON.stringify(path.join(workspace, "pages"))}`,
+    "    integrations:",
+    "      composio:",
+    `        enabled: ${options.composioEnabled ? "true" : "false"}`,
+    "        apiKeyRef: env:COMPOSIO_API_KEY",
+    `        connectedAccountRef: file:${path.join(workspace, "config", "composio-account.json")}`,
+    "        dataSources:",
+    "          googleCalendar:",
+    `            enabled: ${options.composioEnabled ? "true" : "false"}`,
+    `            connectedAccountRef: file:${path.join(workspace, "config", "google-calendar-account.json")}`,
+    "            requiredEnvRefs:",
+    "              - env:COMPOSIO_API_KEY",
+    "          chat:",
+    `            enabled: ${options.composioEnabled ? "true" : "false"}`,
+    `            connectedAccountRef: file:${path.join(workspace, "config", "chat-account.json")}`,
+    "            requiredEnvRefs:",
+    "              - env:COMPOSIO_API_KEY",
+    "",
+  ].join("\n");
+}
+
+function spawnBrainctl(args: string[], env: Record<string, string> = {}) {
   return spawnSync(process.execPath, [brainctl.pathname, ...args], {
     cwd: repoRoot,
     encoding: "utf8",
+    env: { ...process.env, ...env },
   });
 }

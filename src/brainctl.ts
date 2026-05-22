@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { access, appendFile, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { access, appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,7 +10,7 @@ import { parse as parseToml } from "smol-toml";
 import YAML from "yaml";
 import { validateAssistantPack } from "@brain/assistant-pack-schema";
 import { FakeEntrypointAdapter } from "@brain/entrypoint-protocol";
-import { validateWorkspaceConfig, type BrainConfig, type EntrypointConfig, type WorkspaceConfig } from "@brain/workspace-schema";
+import { defaultBackupExclude, defaultBackupInclude, validateWorkspaceConfig, type BrainConfig, type EntrypointConfig, type WorkspaceConfig } from "@brain/workspace-schema";
 import { AutomationRuntime, BrainRuntime, BrainSupervisor, EchoProviderAdapter, EmployeeLifecycle, FakeProviderAdapter, FileAutomationLockStore, FileAutomationSpool, FileEmployeeStore, FileSubagentJobStore, ProviderEmployeeRuntime, ProviderSubagentExecutor, RuntimeCommandInterceptor, RuntimeEntrypointBridge, StaticSubagentExecutor, SubagentLifecycle, createGuardedLiveValidationPlan, createOperationsPlan, parseBrainDirectives, renderSystemdService, type BrainSupervisorLogRecord, type OperationsPlan, type ProviderAdapter, type ProviderTurnEvent, type RuntimeLogEntry, type SubagentExecutor } from "@brain/runtime-core";
 import { FileTelegramPairingStore, FileTelegramPollingStateStore, TelegramBotApiClient, TelegramEntrypointAdapter, loadTelegramToken, type TelegramAttachmentTranscriber } from "@brain/entrypoint-telegram";
 import { createCodexProvider, type CodexTransportKind } from "@brain/provider-codex";
@@ -31,10 +31,21 @@ program
 
 program.command("setup")
   .description("Create a private workspace directory scaffold without writing secrets.")
+  .argument("[mode]", "optional mode: inspect or status")
   .option("--workspace <name>", "workspace id", "personal")
-  .option("--path <path>", "private workspace path", path.join(process.env.HOME ?? ".", ".brain", "workspaces", "personal"))
+  .option("--path <path>", "private workspace path; setup defaults to ~/.brain/workspaces/<workspace>, inspect defaults to config workspacePath")
+  .option("--config <path>", "runtime YAML/TOML/JSON config to inspect before planning")
+  .option("--repo <path>", "source checkout path to inspect", process.cwd())
+  .option("--force", "allow explicitly requested non-destructive rewrites in future setup flows")
+  .option("--replace", "allow explicitly requested destructive replacement in future setup flows")
   .option("--dry-run", "show actions without creating directories")
-  .action(async (options) => exitWith(await setupCommand(options)));
+  .action(async (mode: string | undefined, options) => {
+    if (mode === "inspect" || mode === "status") {
+      return exitWith(await setupInspectCommand({ ...options, config: options.config ?? "examples/config/runtime.yaml" }));
+    }
+    if (mode) return exitWith({ ok: false, summary: `unknown setup mode: ${mode}`, details: { supported: ["inspect", "status"] } });
+    return exitWith(await setupCommand(options));
+  });
 
 program.command("doctor")
   .description("Run skeleton health checks for config, pack, private boundaries, and toolchain.")
@@ -163,6 +174,22 @@ operations.command("validate")
   .action(async (options) => exitWith(await operationsValidateCommand(options)));
 
 const web = program.command("web").description("Generated static web page validation and publisher commands");
+web.command("setup")
+  .description("Render a safe web publishing setup plan for domain or direct-IP publishing without DNS/proxy changes.")
+  .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--domain <domain>", "public domain to publish under")
+  .option("--base-url <url>", "public base URL for generated pages")
+  .option("--publish-root <path>", "server/runtime publish root")
+  .action(async (options) => exitWith(await webSetupStatusCommand(options, "setup")));
+web.command("status")
+  .description("Inspect configured web publishing fields and DNS/proxy readiness without changing DNS.")
+  .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--domain <domain>", "public domain to publish under")
+  .option("--base-url <url>", "public base URL for generated pages")
+  .option("--publish-root <path>", "server/runtime publish root")
+  .action(async (options) => exitWith(await webSetupStatusCommand(options, "status")));
 web.command("validate")
   .description("Validate a generated static page package without publishing it.")
   .requiredOption("--dir <path>", "page package directory containing index.html")
@@ -191,6 +218,50 @@ web.command("manifest")
   .description("Inspect a generated-pages manifest.")
   .option("--manifest-path <path>", "manifest path", ".brain/web-pages/manifest.json")
   .action(async (options) => exitWith(await webManifestCommand(options)));
+
+const backup = program.command("backup").description("Private workspace backup planning and safe initialization commands");
+backup.command("plan")
+  .description("Render backup strategy, include/exclude policy, and commands without touching private data.")
+  .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--path <path>", "private workspace path override")
+  .action(async (options) => exitWith(await backupCommand("plan", options)));
+backup.command("init")
+  .description("Initialize backup metadata safely; dry-run unless --apply is supplied.")
+  .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--path <path>", "private workspace path override")
+  .option("--apply", "create missing backup directories/repo and .gitignore")
+  .option("--replace", "replace an existing generated .gitignore template")
+  .action(async (options) => exitWith(await backupCommand("init", options)));
+backup.command("check")
+  .description("Check backup repository/snapshot metadata without printing private file contents.")
+  .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--path <path>", "private workspace path override")
+  .action(async (options) => exitWith(await backupCommand("check", options)));
+backup.command("status")
+  .description("Inspect backup status without mutating repositories.")
+  .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--path <path>", "private workspace path override")
+  .action(async (options) => exitWith(await backupCommand("status", options)));
+
+const composio = program.command("composio").description("Optional Composio setup/status checks for Google Calendar and chat data sources");
+composio.command("setup")
+  .description("Render generic Composio setup prompts and missing metadata refs without using real credentials.")
+  .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--api-key-ref <ref>", "Composio API key secret ref, e.g. env:COMPOSIO_API_KEY")
+  .option("--connected-account-ref <ref>", "Composio connected-account metadata ref")
+  .action(async (options) => exitWith(await composioSetupStatusCommand(options, "setup")));
+composio.command("status")
+  .description("Inspect optional Composio refs and data-source readiness without printing values.")
+  .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
+  .option("--workspace <id>", "workspace id", "personal")
+  .option("--api-key-ref <ref>", "Composio API key secret ref, e.g. env:COMPOSIO_API_KEY")
+  .option("--connected-account-ref <ref>", "Composio connected-account metadata ref")
+  .action(async (options) => exitWith(await composioSetupStatusCommand(options, "status")));
 
 const validate = program.command("validate").description("Guarded validation harnesses");
 validate.command("live")
@@ -708,6 +779,265 @@ async function webManifestCommand(options: { manifestPath: string }): Promise<Cl
   }
 }
 
+async function webSetupStatusCommand(options: { config: string; workspace: string; domain?: string; baseUrl?: string; publishRoot?: string }, mode: "setup" | "status"): Promise<CliResult> {
+  const config = await loadValidConfig(options.config);
+  const workspace = config.config?.workspaces[options.workspace];
+  const configured = setupWebPublishingStatus(workspace);
+  const baseUrl = options.baseUrl ?? configured.baseUrl ?? configured.publicBaseUrl;
+  const domain = options.domain ?? configured.domain ?? hostnameFromUrl(baseUrl);
+  const publishRoot = options.publishRoot ?? configured.publishRoot;
+  const publishRootMeta = publishRoot ? await fileMetadata(publishRoot) : undefined;
+  const dns = dnsStatusForWeb(domain, baseUrl, configured.mode);
+  const missing = [];
+  if (!baseUrl) missing.push("base URL");
+  if (!publishRoot) missing.push("publish root");
+  if (!domain) missing.push("domain or IP host");
+  return {
+    ok: true,
+    summary: mode === "setup" ? "web publishing setup plan rendered without DNS or proxy changes" : "web publishing status inspected without DNS or proxy changes",
+    details: {
+      workspace: options.workspace,
+      config: config.ok ? { path: path.resolve(options.config), valid: true } : config,
+      enabled: configured.enabled,
+      mode: configured.mode,
+      domain,
+      baseUrl,
+      publishRoot,
+      publishRootMetadata: publishRootMeta,
+      dns,
+      reverseProxy: {
+        suggested: configured.reverseProxy?.kind ?? "caddy",
+        note: configured.reverseProxy?.note ?? "Configure Caddy or another reverse proxy to serve the publish root/base URL after the operator confirms host changes.",
+      },
+      prompts: [
+        "Should generated pages be published under a domain or directly to an IP address?",
+        "What public base URL should page links use?",
+        "What local/server publish root should the publisher copy files into?",
+        "Will Caddy or another reverse proxy terminate HTTPS and serve the publish root?",
+      ],
+      missing,
+      sideEffects: "none",
+      dnsChanged: false,
+    },
+  };
+}
+
+async function backupCommand(action: "plan" | "init" | "check" | "status", options: { config: string; workspace: string; path?: string; apply?: boolean; replace?: boolean }): Promise<CliResult> {
+  const config = await loadValidConfig(options.config);
+  if (!config.ok || !config.config) return config;
+  const workspace = config.config.workspaces[options.workspace];
+  if (!workspace) return { ok: false, summary: `workspace not found: ${options.workspace}`, details: { available: Object.keys(config.config.workspaces) } };
+  const workspaceRoot = path.resolve(options.path ?? workspace.workspacePath);
+  const plan = backupPlanFor(workspace, workspaceRoot);
+
+  if (action === "init") {
+    const dryRun = !options.apply;
+    const initResult: Record<string, unknown> = dryRun ? { actions: plan.commands.init, wroteGitignore: false, initializedRepo: false } : await applyBackupInit(plan, { replace: options.replace });
+    return {
+      ok: initResult.ok !== false,
+      summary: dryRun ? "backup init plan ready (dry run; pass --apply to create metadata)" : "backup metadata initialized safely",
+      details: { workspace: options.workspace, workspaceRoot, plan, init: initResult, sideEffects: dryRun ? "none" : "created backup metadata only; no private files committed" },
+    };
+  }
+
+  const status = await backupStatusFor(plan);
+  return {
+    ok: action === "plan" ? true : status.ok,
+    summary: action === "plan" ? "backup plan rendered without touching private data" : "backup status checked without printing private data",
+    details: {
+      workspace: options.workspace,
+      workspaceRoot,
+      plan,
+      status: action === "plan" ? undefined : status,
+      sideEffects: "none",
+    },
+  };
+}
+
+async function composioSetupStatusCommand(options: { config: string; workspace: string; apiKeyRef?: string; connectedAccountRef?: string }, mode: "setup" | "status"): Promise<CliResult> {
+  const config = await loadValidConfig(options.config);
+  const workspace = config.config?.workspaces[options.workspace];
+  const status = await setupComposioStatus(workspace, {
+    apiKeyRef: options.apiKeyRef,
+    connectedAccountRef: options.connectedAccountRef,
+  });
+  return {
+    ok: true,
+    summary: mode === "setup" ? "Composio setup prompts rendered without using credentials" : "Composio status inspected without printing credentials",
+    details: {
+      workspace: options.workspace,
+      config: config.ok ? { path: path.resolve(options.config), valid: true } : config,
+      ...status,
+      prompts: [
+        "Do you want optional Google Calendar access through Composio?",
+        "Do you want optional chat data-source access through Composio?",
+        "Where should the Composio API key be referenced (env:NAME or file:/path) without storing the value in git?",
+        "Where should connected account metadata refs live in the private workspace?",
+      ],
+      sideEffects: "none",
+      credentialsUsed: false,
+      secretValuesPrinted: false,
+    },
+  };
+}
+
+function setupBackupStatus(workspace: WorkspaceConfig | undefined, workspaceRoot: string) {
+  return backupPlanFor(workspace, workspaceRoot).config;
+}
+
+function backupPlanFor(workspace: WorkspaceConfig | undefined, workspaceRoot: string) {
+  const backup = workspace?.backup;
+  const strategy = backup?.strategy ?? "none";
+  const privateGit = {
+    repoPath: path.resolve(backup?.privateGit?.repoPath ?? path.join(workspaceRoot, "backups", "private-git")),
+    remote: backup?.privateGit?.remote,
+    branch: backup?.privateGit?.branch ?? "main",
+    include: backup?.privateGit?.include ?? defaultBackupInclude,
+    exclude: backup?.privateGit?.exclude ?? defaultBackupExclude,
+  };
+  const localSnapshot = {
+    root: path.resolve(backup?.localSnapshot?.root ?? path.join(workspaceRoot, "backups", "snapshots")),
+    retention: backup?.localSnapshot?.retention ?? "operator-defined",
+    include: backup?.localSnapshot?.include ?? defaultBackupInclude,
+    exclude: backup?.localSnapshot?.exclude ?? defaultBackupExclude,
+  };
+  const initCommands = strategy === "private-git"
+    ? [
+      `mkdir -p ${shellQuote(privateGit.repoPath)}`,
+      `git -C ${shellQuote(privateGit.repoPath)} init -b ${shellQuote(privateGit.branch)}`,
+      `install -m 0600 <private-workspace.gitignore> ${shellQuote(path.join(privateGit.repoPath, ".gitignore"))}`,
+      ...(privateGit.remote ? [`git -C ${shellQuote(privateGit.repoPath)} remote add origin ${shellQuote(privateGit.remote)}`] : []),
+    ]
+    : strategy === "local-snapshot"
+      ? [`mkdir -p ${shellQuote(localSnapshot.root)}`]
+      : [];
+  return {
+    config: {
+      strategy,
+      privateGit,
+      localSnapshot,
+      safeDefaultExcludes: defaultBackupExclude,
+      secretsIncludedByDefault: false,
+    },
+    commands: {
+      init: initCommands,
+      check: strategy === "private-git" ? [`git -C ${shellQuote(privateGit.repoPath)} status --short --branch`] : [],
+      commitExample: strategy === "private-git" ? [`git -C ${shellQuote(privateGit.repoPath)} add --all`, `git -C ${shellQuote(privateGit.repoPath)} commit -m ${shellQuote("Backup private workspace metadata")}`] : [],
+    },
+    dryRunDefault: true,
+  };
+}
+
+async function applyBackupInit(plan: ReturnType<typeof backupPlanFor>, options: { replace?: boolean }): Promise<Record<string, unknown>> {
+  const strategy = plan.config.strategy;
+  if (strategy === "none") return { ok: true, actions: [], note: "backup strategy is none; nothing initialized" };
+  if (strategy === "local-snapshot") {
+    await mkdir(plan.config.localSnapshot.root, { recursive: true, mode: 0o700 });
+    return { ok: true, actions: [`created ${plan.config.localSnapshot.root}`], initializedRepo: false, wroteGitignore: false };
+  }
+
+  const repoPath = plan.config.privateGit.repoPath;
+  await mkdir(repoPath, { recursive: true, mode: 0o700 });
+  const gitDir = path.join(repoPath, ".git");
+  const gitDirMeta = await fileMetadata(gitDir);
+  let initializedRepo = false;
+  if (!gitDirMeta.present) {
+    const init = spawnSync("git", ["-C", repoPath, "init", "-b", plan.config.privateGit.branch], { encoding: "utf8" });
+    if ((init.status ?? 0) !== 0) return { ok: false, error: init.stderr || init.stdout || `git init exited ${init.status}` };
+    initializedRepo = true;
+  }
+  let remoteConfigured = false;
+  let remoteSkipped: string | undefined;
+  if (plan.config.privateGit.remote) {
+    const currentOrigin = spawnSync("git", ["-C", repoPath, "remote", "get-url", "origin"], { encoding: "utf8" });
+    if ((currentOrigin.status ?? 0) === 0) {
+      remoteSkipped = "origin remote already exists; not overwritten";
+    } else {
+      const remote = spawnSync("git", ["-C", repoPath, "remote", "add", "origin", plan.config.privateGit.remote], { encoding: "utf8" });
+      if ((remote.status ?? 0) !== 0) return { ok: false, error: remote.stderr || remote.stdout || `git remote add exited ${remote.status}` };
+      remoteConfigured = true;
+    }
+  }
+
+  const gitignorePath = path.join(repoPath, ".gitignore");
+  const existingGitignore = await fileMetadata(gitignorePath);
+  if (existingGitignore.present && !options.replace) {
+    return {
+      ok: true,
+      initializedRepo,
+      remoteConfigured,
+      remoteSkipped,
+      wroteGitignore: false,
+      unsafe_to_overwrite: [".gitignore exists; pass --replace to replace it with the Brain private workspace template"],
+    };
+  }
+  await writeFile(gitignorePath, PRIVATE_WORKSPACE_GITIGNORE, { mode: 0o600 });
+  return { ok: true, initializedRepo, remoteConfigured, remoteSkipped, wroteGitignore: true, gitignorePath };
+}
+
+async function backupStatusFor(plan: ReturnType<typeof backupPlanFor>): Promise<{ ok: boolean; metadata: unknown; git?: unknown; note?: string }> {
+  if (plan.config.strategy === "none") return { ok: true, metadata: { strategy: "none" }, note: "backup is disabled" };
+  if (plan.config.strategy === "local-snapshot") {
+    const metadata = await fileMetadata(plan.config.localSnapshot.root);
+    return { ok: metadata.present, metadata };
+  }
+  const metadata = await fileMetadata(plan.config.privateGit.repoPath);
+  const git = await gitMetadata(plan.config.privateGit.repoPath);
+  return { ok: metadata.present && Boolean(git.present), metadata, git };
+}
+
+function setupWebPublishingStatus(workspace: WorkspaceConfig | undefined) {
+  const config = workspace?.webPublishing;
+  return {
+    enabled: config?.enabled ?? false,
+    mode: config?.mode ?? "disabled",
+    domain: config?.domain,
+    baseUrl: config?.baseUrl,
+    publicBaseUrl: config?.publicBaseUrl,
+    publishRoot: config?.publishRoot,
+    manifestPath: config?.manifestPath,
+    reverseProxy: config?.reverseProxy,
+    dns: dnsStatusForWeb(config?.domain, config?.baseUrl ?? config?.publicBaseUrl, config?.mode),
+  };
+}
+
+async function setupComposioStatus(workspace: WorkspaceConfig | undefined, overrides: { apiKeyRef?: string; connectedAccountRef?: string } = {}) {
+  const config = workspace?.integrations?.composio;
+  const apiKeyRef = overrides.apiKeyRef ?? config?.apiKeyRef;
+  const connectedAccountRef = overrides.connectedAccountRef ?? config?.connectedAccountRef;
+  const googleCalendar = config?.dataSources?.googleCalendar;
+  const chat = config?.dataSources?.chat;
+  const refs: ConfigRef[] = [
+    ...maybeRef(apiKeyRef, "integrations.composio.apiKeyRef", workspace ? "workspace" : "cli"),
+    ...maybeRef(connectedAccountRef, "integrations.composio.connectedAccountRef", workspace ? "workspace" : "cli"),
+    ...maybeRef(config?.metadataRef, "integrations.composio.metadataRef"),
+    ...maybeRef(googleCalendar?.connectedAccountRef, "integrations.composio.dataSources.googleCalendar.connectedAccountRef"),
+    ...maybeRef(googleCalendar?.metadataRef, "integrations.composio.dataSources.googleCalendar.metadataRef"),
+    ...(googleCalendar?.requiredEnvRefs ?? []).map((ref) => ({ workspaceId: "workspace", ref: asSecretRef(ref), source: "integrations.composio.dataSources.googleCalendar.requiredEnvRefs" })),
+    ...maybeRef(chat?.connectedAccountRef, "integrations.composio.dataSources.chat.connectedAccountRef"),
+    ...maybeRef(chat?.metadataRef, "integrations.composio.dataSources.chat.metadataRef"),
+    ...(chat?.requiredEnvRefs ?? []).map((ref) => ({ workspaceId: "workspace", ref: asSecretRef(ref), source: "integrations.composio.dataSources.chat.requiredEnvRefs" })),
+  ];
+  const refMetadata = await secretRefMetadata(refs);
+  const missing = [];
+  const enabled = config?.enabled ?? Boolean(overrides.apiKeyRef || overrides.connectedAccountRef);
+  if (enabled && !apiKeyRef) missing.push("Composio API key ref");
+  if (enabled && !connectedAccountRef) missing.push("Composio connected account metadata ref");
+  if (googleCalendar?.enabled && !(googleCalendar.connectedAccountRef ?? connectedAccountRef)) missing.push("Google Calendar connected account ref");
+  if (chat?.enabled && !(chat.connectedAccountRef ?? connectedAccountRef)) missing.push("chat connected account ref");
+  return {
+    enabled,
+    apiKeyRefPresent: Boolean(apiKeyRef),
+    connectedAccountRefPresent: Boolean(connectedAccountRef),
+    dataSources: {
+      googleCalendar: { enabled: googleCalendar?.enabled ?? false, connectedAccountRefPresent: Boolean(googleCalendar?.connectedAccountRef ?? connectedAccountRef), metadataRefPresent: Boolean(googleCalendar?.metadataRef) },
+      chat: { enabled: chat?.enabled ?? false, connectedAccountRefPresent: Boolean(chat?.connectedAccountRef ?? connectedAccountRef), metadataRefPresent: Boolean(chat?.metadataRef) },
+    },
+    refs: refMetadata,
+    missing,
+  };
+}
+
 async function liveValidateCommand(options: {
   config: string;
   workspace: string;
@@ -957,18 +1287,212 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function setupCommand(options: { workspace: string; path: string; dryRun?: boolean }): Promise<CliResult> {
-  const workspaceRoot = path.resolve(options.path);
-  const dirs = ["config", "secrets", "logs", "artifacts", "state", "backups", "tmp"].map((dir) => path.join(workspaceRoot, dir));
+const WORKSPACE_DIRS = ["config", "secrets", "logs", "artifacts", "state", "backups", "tmp"] as const;
+const PRIVATE_WORKSPACE_GITIGNORE = [
+  "# Brain private workspace backup safety defaults",
+  "# Keep secret-bearing, noisy, and local-cache paths out of private Git backups.",
+  "secrets/**",
+  "logs/**",
+  "tmp/**",
+  "cache/**",
+  "caches/**",
+  "**/.cache/**",
+  "**/node_modules/**",
+  "**/*.log",
+  "",
+  "# Keep generated runtime scratch data local unless deliberately included.",
+  "artifacts/tmp/**",
+  "artifacts/generated/**",
+  "",
+].join("\n");
+
+interface SetupInspectOptions {
+  workspace: string;
+  path?: string;
+  config?: string;
+  repo?: string;
+}
+
+interface ConfigRef {
+  workspaceId: string;
+  ref: string;
+  source: string;
+  entrypointId?: string;
+  optional?: boolean;
+}
+
+async function setupCommand(options: SetupInspectOptions & { dryRun?: boolean; force?: boolean; replace?: boolean }): Promise<CliResult> {
+  const preflight = await setupInspectDetails(options);
+  const workspaceRoot = preflight.workspaceRoot;
+  const dirs = WORKSPACE_DIRS.map((dir) => path.join(workspaceRoot, dir));
   if (!options.dryRun) {
     await mkdir(workspaceRoot, { recursive: true, mode: 0o700 });
     for (const dir of dirs) await mkdir(dir, { recursive: true, mode: dir.endsWith("secrets") ? 0o700 : 0o755 });
   }
+  const after = options.dryRun ? preflight : await setupInspectDetails(options);
   return {
     ok: true,
-    summary: options.dryRun ? "setup plan ready (dry run)" : "private workspace scaffold created",
-    details: { workspace: options.workspace, workspaceRoot, directories: dirs.map((dir) => path.relative(workspaceRoot, dir)), secrets: "not written" },
+    summary: options.dryRun ? "setup plan ready (dry run; no overwrite by default)" : "private workspace scaffold reconciled without writing secrets",
+    details: {
+      workspace: options.workspace,
+      workspaceRoot,
+      directories: dirs.map((dir) => path.relative(workspaceRoot, dir)),
+      secrets: "not written",
+      idempotency: {
+        reRunnable: true,
+        defaultOverwrite: false,
+        destructiveChangesRequire: "--force or --replace plus a command that explicitly supports replacement",
+        forceRequested: Boolean(options.force),
+        replaceRequested: Boolean(options.replace),
+      },
+      plan: after.plan,
+      inspection: after,
+      sideEffects: options.dryRun ? "none" : "created missing directories only",
+    },
   };
+}
+
+async function setupInspectCommand(options: SetupInspectOptions): Promise<CliResult> {
+  const details = await setupInspectDetails(options);
+  const ok = details.plan.missing_required.length === 0;
+  return {
+    ok,
+    summary: ok ? "setup status inspected; workspace is configured enough to proceed" : "setup status inspected; required pieces are missing",
+    details: { ...details, sideEffects: "none", secretValuesPrinted: false },
+  };
+}
+
+async function setupInspectDetails(options: SetupInspectOptions) {
+  const config = options.config ? await tryLoadValidConfig(options.config) : undefined;
+  const workspace = config?.config?.workspaces[options.workspace];
+  const workspaceRoot = path.resolve(options.path ?? workspace?.workspacePath ?? path.join(process.env.HOME ?? ".", ".brain", "workspaces", options.workspace));
+  const workspaceMeta = await fileMetadata(workspaceRoot);
+  const directories = Object.fromEntries(await Promise.all(WORKSPACE_DIRS.map(async (dir) => [dir, await fileMetadata(path.join(workspaceRoot, dir))] as const)));
+  const privateConfigCandidates = await Promise.all(["runtime.yaml", "runtime.yml", "runtime.toml", "runtime.json"].map(async (file) => {
+    const fullPath = path.join(workspaceRoot, "config", file);
+    return { file, metadata: await fileMetadata(fullPath) };
+  }));
+  const secretRefs = config?.config ? await secretRefMetadata(collectConfigRefs(config.config)) : [];
+  const repo = await gitMetadata(path.resolve(options.repo ?? process.cwd()));
+  const backup = setupBackupStatus(workspace, workspaceRoot);
+  const webPublishing = setupWebPublishingStatus(workspace);
+  const composio = await setupComposioStatus(workspace);
+  const plan = buildSetupPlan({
+    config,
+    workspace,
+    workspaceMeta,
+    directories,
+    privateConfigCandidates,
+    backup,
+    webPublishing,
+    composio,
+  });
+
+  return {
+    workspace: options.workspace,
+    workspaceRoot,
+    config: config ? {
+      path: config.path,
+      present: config.present,
+      valid: config.ok,
+      summary: config.summary,
+      issues: config.issues,
+    } : {
+      path: undefined,
+      present: false,
+      valid: false,
+      summary: "no config path supplied",
+      issues: [],
+    },
+    workspacePathSource: options.path ? "cli" : workspace?.workspacePath ? "config" : "default",
+    workspaceDirectory: workspaceMeta,
+    directories,
+    privateConfigCandidates,
+    provider: workspace?.provider ?? "missing",
+    primaryEntrypointId: workspace?.primaryEntrypointId ?? "missing",
+    entrypoints: workspace ? Object.entries(workspace.enabledEntrypoints).map(([entrypointId, entrypoint]) => ({
+      entrypointId,
+      kind: entrypoint.kind,
+      enabled: entrypoint.enabled,
+      configRefPresent: Boolean(entrypoint.configRef),
+    })) : [],
+    secretRefs,
+    git: repo,
+    backup,
+    webPublishing,
+    composio,
+    plan,
+  };
+}
+
+function buildSetupPlan(input: {
+  config?: Awaited<ReturnType<typeof tryLoadValidConfig>>;
+  workspace?: WorkspaceConfig;
+  workspaceMeta: Awaited<ReturnType<typeof fileMetadata>>;
+  directories: Record<string, Awaited<ReturnType<typeof fileMetadata>>>;
+  privateConfigCandidates: Array<{ file: string; metadata: Awaited<ReturnType<typeof fileMetadata>> }>;
+  backup: ReturnType<typeof setupBackupStatus>;
+  webPublishing: ReturnType<typeof setupWebPublishingStatus>;
+  composio: Awaited<ReturnType<typeof setupComposioStatus>>;
+}) {
+  const configured: string[] = [];
+  const missing_required: string[] = [];
+  const missing_optional: string[] = [];
+  const unsafe_to_overwrite: string[] = [];
+
+  if (input.config?.ok) configured.push("runtime config valid");
+  else missing_required.push(input.config?.present ? "runtime config is invalid" : "runtime config missing");
+
+  if (input.workspace) configured.push("workspace config present");
+  else missing_required.push("workspace id missing from runtime config");
+
+  if (input.workspaceMeta.present) configured.push("workspace root exists");
+  else missing_required.push("workspace root missing");
+
+  for (const [dir, metadata] of Object.entries(input.directories)) {
+    if (metadata.present) configured.push(`workspace ${dir}/ exists`);
+    else missing_required.push(`workspace ${dir}/ missing`);
+  }
+
+  if (input.workspace?.provider) configured.push(`provider selected: ${input.workspace.provider}`);
+  else missing_required.push("provider choice missing");
+
+  if (input.workspace?.primaryEntrypointId) configured.push(`primary entrypoint selected: ${input.workspace.primaryEntrypointId}`);
+  else missing_required.push("primary entrypoint missing");
+
+  for (const candidate of input.privateConfigCandidates) {
+    if (candidate.metadata.present) unsafe_to_overwrite.push(`private config already exists: config/${candidate.file}`);
+  }
+
+  if (input.backup.strategy === "none") missing_optional.push("private Git/local snapshot backup not configured");
+  else configured.push(`backup strategy configured: ${input.backup.strategy}`);
+
+  if (!input.webPublishing.enabled) missing_optional.push("web publishing not configured/enabled");
+  else configured.push("web publishing config present");
+
+  if (!input.composio.enabled) missing_optional.push("Composio Google Calendar/chat not configured/enabled");
+  else configured.push("Composio integration config present");
+
+  return { configured, missing_required, missing_optional, unsafe_to_overwrite };
+}
+
+async function tryLoadValidConfig(file: string): Promise<{ path: string; present: boolean; ok: boolean; summary: string; issues: unknown[]; config?: BrainConfig }> {
+  const configPath = path.resolve(file);
+  try {
+    const raw = await readFile(configPath, "utf8");
+    const parsed = parseConfigText(configPath, raw);
+    const validation = validateWorkspaceConfig(parsed);
+    return {
+      path: configPath,
+      present: true,
+      ok: validation.ok,
+      summary: validation.ok ? "runtime config valid" : "runtime config invalid",
+      issues: validation.issues,
+      config: validation.config,
+    };
+  } catch (error) {
+    return { path: configPath, present: false, ok: false, summary: "runtime config could not be read", issues: [{ path: configPath, message: errorMessage(error) }] };
+  }
 }
 
 async function doctorCommand(options: { config: string; pack: string }): Promise<CliResult> {
@@ -1366,18 +1890,57 @@ function configSummary(config: BrainConfig | undefined) {
       provider: workspace.provider ?? "not configured",
       primaryEntrypointId: workspace.primaryEntrypointId,
       enabledEntrypoints: Object.entries(workspace.enabledEntrypoints).filter(([, entry]) => entry.enabled).map(([entrypointId, entry]) => ({ entrypointId, kind: entry.kind })),
+      backup: { strategy: workspace.backup?.strategy ?? "none" },
+      webPublishing: { enabled: workspace.webPublishing?.enabled ?? false, mode: workspace.webPublishing?.mode ?? "disabled" },
+      composio: { enabled: workspace.integrations?.composio?.enabled ?? false },
     }])),
   };
 }
 
-function collectConfigRefs(config: BrainConfig): Array<{ workspaceId: string; entrypointId: string; ref: string }> {
-  const refs = [];
+function collectConfigRefs(config: BrainConfig): ConfigRef[] {
+  const refs: ConfigRef[] = [];
   for (const [workspaceId, workspace] of Object.entries(config.workspaces)) {
     for (const [entrypointId, entrypoint] of Object.entries(workspace.enabledEntrypoints)) {
-      if (entrypoint.configRef) refs.push({ workspaceId, entrypointId, ref: entrypoint.configRef });
+      if (entrypoint.configRef) refs.push({ workspaceId, entrypointId, ref: entrypoint.configRef, source: "entrypoint.configRef" });
     }
+    const composio = workspace.integrations?.composio;
+    if (composio?.apiKeyRef) refs.push({ workspaceId, ref: composio.apiKeyRef, source: "integrations.composio.apiKeyRef" });
+    if (composio?.connectedAccountRef) refs.push({ workspaceId, ref: composio.connectedAccountRef, source: "integrations.composio.connectedAccountRef" });
+    if (composio?.metadataRef) refs.push({ workspaceId, ref: composio.metadataRef, source: "integrations.composio.metadataRef", optional: true });
+    const calendar = composio?.dataSources?.googleCalendar;
+    if (calendar?.connectedAccountRef) refs.push({ workspaceId, ref: calendar.connectedAccountRef, source: "integrations.composio.dataSources.googleCalendar.connectedAccountRef" });
+    if (calendar?.metadataRef) refs.push({ workspaceId, ref: calendar.metadataRef, source: "integrations.composio.dataSources.googleCalendar.metadataRef", optional: true });
+    for (const ref of calendar?.requiredEnvRefs ?? []) refs.push({ workspaceId, ref: asSecretRef(ref), source: "integrations.composio.dataSources.googleCalendar.requiredEnvRefs" });
+    const chat = composio?.dataSources?.chat;
+    if (chat?.connectedAccountRef) refs.push({ workspaceId, ref: chat.connectedAccountRef, source: "integrations.composio.dataSources.chat.connectedAccountRef" });
+    if (chat?.metadataRef) refs.push({ workspaceId, ref: chat.metadataRef, source: "integrations.composio.dataSources.chat.metadataRef", optional: true });
+    for (const ref of chat?.requiredEnvRefs ?? []) refs.push({ workspaceId, ref: asSecretRef(ref), source: "integrations.composio.dataSources.chat.requiredEnvRefs" });
   }
   return refs;
+}
+
+async function secretRefMetadata(refs: ConfigRef[]): Promise<Array<ConfigRef & Record<string, unknown>>> {
+  const details = [];
+  for (const ref of refs) {
+    if (ref.ref.startsWith("env:")) {
+      const key = ref.ref.slice("env:".length);
+      details.push({ ...ref, kind: "env", present: Boolean(process.env[key]), value: "redacted" });
+    } else if (ref.ref.startsWith("file:")) {
+      const filePath = ref.ref.slice("file:".length);
+      details.push({ ...ref, kind: "file", ...(await fileMetadata(filePath)) });
+    } else {
+      details.push({ ...ref, kind: "opaque", present: false, note: "non-env/file refs are accepted but not inspectable by the skeleton checker", value: "redacted" });
+    }
+  }
+  return details;
+}
+
+function maybeRef(ref: string | undefined, source: string, workspaceId = "workspace"): ConfigRef[] {
+  return ref ? [{ workspaceId, ref: asSecretRef(ref), source }] : [];
+}
+
+function asSecretRef(ref: string): string {
+  return /^(env|file):/.test(ref) ? ref : `env:${ref}`;
 }
 
 async function fileMetadata(filePath: string) {
@@ -1387,6 +1950,90 @@ async function fileMetadata(filePath: string) {
   } catch {
     return { present: false, path: filePath, value: "redacted" };
   }
+}
+
+async function gitMetadata(repoPath: string): Promise<Record<string, unknown>> {
+  const metadata = await fileMetadata(repoPath);
+  if (!metadata.present) return { present: false, path: repoPath };
+  const inside = spawnSync("git", ["-C", repoPath, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8" });
+  if ((inside.status ?? 0) !== 0 || inside.stdout.trim() !== "true") {
+    return { present: false, path: repoPath, directoryPresent: true, note: "not a git worktree" };
+  }
+  const branch = spawnSync("git", ["-C", repoPath, "rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" });
+  const remotesRaw = spawnSync("git", ["-C", repoPath, "remote", "-v"], { encoding: "utf8" });
+  const statusRaw = spawnSync("git", ["-C", repoPath, "status", "--porcelain=v1", "--branch"], { encoding: "utf8" });
+  return {
+    present: true,
+    path: repoPath,
+    branch: (branch.stdout || "").trim() || "unknown",
+    remotes: parseGitRemotes(remotesRaw.stdout || ""),
+    status: summarizeGitStatus(statusRaw.stdout || ""),
+  };
+}
+
+function parseGitRemotes(raw: string): Array<{ name: string; url: string; purpose: string }> {
+  const seen = new Set<string>();
+  const remotes = [];
+  for (const line of raw.split(/\r?\n/).filter(Boolean)) {
+    const match = line.match(/^(\S+)\s+(\S+)\s+\((fetch|push)\)$/);
+    if (!match) continue;
+    const key = `${match[1]}:${match[2]}:${match[3]}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    remotes.push({ name: match[1] ?? "", url: redactRemoteUrl(match[2] ?? ""), purpose: match[3] ?? "" });
+  }
+  return remotes;
+}
+
+function redactRemoteUrl(url: string): string {
+  return url.replace(/(https?:\/\/)([^/@]+)@/i, "$1[redacted]@");
+}
+
+function summarizeGitStatus(raw: string): Record<string, unknown> {
+  const lines = raw.split(/\r?\n/).filter(Boolean);
+  const branch = lines.find((line) => line.startsWith("##")) ?? "";
+  const changes = lines.filter((line) => !line.startsWith("##"));
+  const counts = changes.reduce<Record<string, number>>((acc, line) => {
+    const code = line.slice(0, 2).trim() || "unknown";
+    acc[code] = (acc[code] ?? 0) + 1;
+    return acc;
+  }, {});
+  return {
+    branch,
+    clean: changes.length === 0,
+    changedPaths: changes.length,
+    counts,
+    filenamesPrinted: false,
+  };
+}
+
+function hostnameFromUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return undefined;
+  }
+}
+
+function dnsStatusForWeb(domain: string | undefined, baseUrl: string | undefined, mode: string | undefined) {
+  const host = domain ?? hostnameFromUrl(baseUrl);
+  const directIp = host ? isIpHost(host) : false;
+  return {
+    host,
+    required: Boolean(host && !directIp && mode !== "ip"),
+    needed: host ? (directIp || mode === "ip" ? "not-needed-for-direct-IP" : "needed-for-domain") : "unknown-until-domain-or-ip-is-chosen",
+    records: host && !directIp ? [`A/AAAA (or CNAME) for ${host} to the Brain web host`] : [],
+    changed: false,
+  };
+}
+
+function isIpHost(host: string): boolean {
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) || host.includes(":");
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\"'\"'")}'`;
 }
 
 async function privateBoundaryCheck(): Promise<CliResult> {

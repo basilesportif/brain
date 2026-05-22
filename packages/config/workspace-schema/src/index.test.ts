@@ -39,3 +39,57 @@ test("rejects prompt secret exposure", () => {
   assert.equal(result.ok, false);
   assert.match(result.issues.map((issue) => issue.path).join("\n"), /exposeChannelSecrets/);
 });
+
+test("accepts private workspace backup, web publishing, and optional Composio surfaces", () => {
+  const input = structuredClone(base);
+  Object.assign(input.workspaces.personal, {
+    backup: {
+      strategy: "private-git",
+      privateGit: {
+        repoPath: "/srv/brain/workspaces/personal/backups/git",
+        remote: "git@github.com:example/private-brain-backup.git",
+        branch: "main",
+      },
+    },
+    webPublishing: {
+      enabled: true,
+      mode: "domain",
+      domain: "me.example.test",
+      baseUrl: "https://me.example.test/pages",
+      publishRoot: "/srv/brain/pages",
+      reverseProxy: { kind: "caddy" },
+    },
+    integrations: {
+      composio: {
+        enabled: true,
+        apiKeyRef: "env:COMPOSIO_API_KEY",
+        connectedAccountRef: "file:/srv/brain/workspaces/personal/config/composio-account.json",
+        dataSources: {
+          googleCalendar: {
+            enabled: true,
+            connectedAccountRef: "file:/srv/brain/workspaces/personal/config/google-calendar-account.json",
+            requiredEnvRefs: ["env:COMPOSIO_API_KEY"],
+          },
+          chat: { enabled: false },
+        },
+      },
+    },
+  });
+  const result = validateWorkspaceConfig(input);
+  assert.equal(result.ok, true, JSON.stringify(result.issues));
+  assert.equal(result.config?.workspaces.personal.backup?.privateGit?.branch, "main");
+  assert.ok(result.config?.workspaces.personal.backup?.privateGit?.exclude.includes("secrets/**"));
+});
+
+test("requires backup destinations and web base URL when optional surfaces are enabled", () => {
+  const input = structuredClone(base);
+  Object.assign(input.workspaces.personal, {
+    backup: { strategy: "private-git", privateGit: { branch: "main" } },
+    webPublishing: { enabled: true, mode: "domain", domain: "me.example.test" },
+  });
+  const result = validateWorkspaceConfig(input);
+  assert.equal(result.ok, false);
+  const messages = result.issues.map((issue) => `${issue.path}: ${issue.message}`).join("\n");
+  assert.match(messages, /backup\.privateGit\.repoPath/);
+  assert.match(messages, /webPublishing\.baseUrl/);
+});

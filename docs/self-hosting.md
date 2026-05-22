@@ -34,6 +34,10 @@ The setup docs and skills should be readable by Codex or Claude Code itself so a
   continue future integration setup through Telegram after pairing.
 - Composio and other third-party integrations are optional follow-ups, never
   required for first bootstrap.
+- Running setup again should always offer missing optional components without
+  overwriting existing private config: private Git/local-snapshot backup, web
+  publishing, Google Calendar/chat via Composio, provider/entrypoint refs, and
+  other integrations.
 
 Self-host config should start from `examples/config/runtime.yaml` or `examples/config/runtime.toml`. Operators may predefine disabled future entrypoints, but enabling multiple entrypoints must wait for deliberate `multi-explicit` routing and conflict configuration.
 
@@ -42,6 +46,13 @@ Self-host config should start from `examples/config/runtime.yaml` or `examples/c
 Agents should use root-level `AGENTS.md`, `CLAUDE.md` when running under Claude Code, `docs/setup-plan.md`, and `assistant-packs/core/skills/setup-self-host/SKILL.md` as the current source of truth for the safe setup contract. The canonical user command is `setup` from the repository root:
 
 - `brainctl setup` for local private workspace scaffolding.
+- `brainctl setup inspect/status` for idempotent configured/missing/unsafe
+  setup plans.
+- `brainctl backup plan/init/check/status` for private workspace backup setup.
+- `brainctl web setup/status` for domain vs direct-IP generated-page publishing
+  checks; DNS and Caddy changes stay manual/operator-confirmed.
+- `brainctl composio setup/status` for optional Google Calendar/chat metadata
+  refs via Composio without real credentials.
 - `brainctl doctor` for environment and credential-readiness checks.
 - `brainctl config validate` for runtime config validation.
 - `brainctl secrets check` for metadata-only secret presence checks.

@@ -6,9 +6,16 @@
 
 ```bash
 pnpm run brainctl -- setup --workspace personal --path ~/.brain/workspaces/personal
+pnpm run brainctl -- setup inspect --config ~/.brain/workspaces/personal/config/runtime.yaml --workspace personal
+pnpm run brainctl -- setup status --config ~/.brain/workspaces/personal/config/runtime.yaml --workspace personal
 pnpm run brainctl -- doctor --config examples/config/runtime.yaml --pack assistant-packs/core
 pnpm run brainctl -- config validate examples/config/runtime.yaml
 pnpm run brainctl -- secrets check --config examples/config/runtime.yaml
+pnpm run brainctl -- backup plan --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl -- backup init --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl -- backup init --config examples/config/runtime.yaml --workspace personal --apply
+pnpm run brainctl -- backup check --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl -- backup status --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl -- pack validate assistant-packs/core
 pnpm run brainctl -- provider check codex --transport stub
 pnpm run brainctl -- provider smoke codex --transport stub --prompt ping
@@ -34,10 +41,57 @@ pnpm run brainctl -- automation validate examples/config/automation.yaml
 pnpm run brainctl -- automation run daily-summary --file examples/config/automation.yaml
 pnpm run brainctl -- automation due --file examples/config/automation.yaml --now 2026-05-21T09:00:00.000Z
 pnpm run brainctl -- automation monitor inbox-placeholder --file examples/config/automation.yaml
+pnpm run brainctl -- composio setup --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl -- composio status --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl -- web setup --config examples/config/runtime.yaml --workspace personal --base-url http://203.0.113.10/pages --publish-root /srv/brain/pages
+pnpm run brainctl -- web status --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl -- web validate --dir /path/to/static-page
 pnpm run brainctl -- web publish --dir /path/to/static-page --id demo-page --dry-run
 pnpm run brainctl -- web prune --dry-run
 ```
+
+## Setup, inspect, and re-runnable plans
+
+`setup` is idempotent by default. It creates only missing workspace directories
+and never overwrites an existing config, secret, backup repo, or generated-page
+root. Run it any time to reconcile the directory scaffold, or run `setup inspect`
+/ `setup status` to get a metadata-only plan:
+
+```bash
+pnpm run brainctl -- setup --workspace personal --path ~/.brain/workspaces/personal
+pnpm run brainctl -- setup inspect --config ~/.brain/workspaces/personal/config/runtime.yaml --workspace personal
+```
+
+The setup status response groups findings into:
+
+- `configured`
+- `missing_required`
+- `missing_optional`
+- `unsafe_to_overwrite`
+
+Destructive replacement is never implicit; commands that support replacement
+require explicit `--force` or `--replace` and still print the planned target.
+Secret refs are checked only by env/file existence, mode, and byte size.
+
+## Backup and private Git model
+
+`backup plan/init/check/status` manages private-workspace backup metadata. The
+default behavior is dry-run/safe: `backup init` prints actions unless `--apply`
+is supplied. `private-git` uses a private repo path/remote/branch and safe
+include/exclude rules; the template excludes `secrets/**`, `logs/**`, `tmp/**`,
+caches, `node_modules`, and `*.log` by default. `backup status` summarizes Git
+presence, remotes, branch, and status counts without printing private filenames.
+
+## Optional web publishing and Composio setup
+
+`web setup/status` checks the optional generated-page publishing config without
+changing DNS, Caddy, or reverse-proxy state. If the base URL is a direct IP,
+DNS is reported as not needed; if it is a domain, DNS records are listed as
+operator work only.
+
+`composio setup/status` is optional and generic. It checks refs for Composio API
+key metadata, connected-account metadata, Google Calendar, and chat data-source
+config without using real credentials or printing values.
 
 ## Supervisor commands added for parity smoke
 
@@ -93,6 +147,12 @@ pnpm run brainctl -- validate live --config examples/config/runtime.yaml --works
 ## Safety model
 
 - `setup` creates only private directory scaffolding (`config/`, `secrets/`, `logs/`, `artifacts/`, `state/`, `backups/`, `tmp/`).
+- `setup inspect/status` reports configured, missing required, missing optional,
+  and unsafe-to-overwrite items for workspace dirs, config, provider/entrypoint,
+  secret refs, source/backup Git state, backup policy, web publishing, and
+  optional Composio data sources.
+- `backup plan/init/check/status` is dry-run/safe by default, writes only backup
+  metadata with `--apply`, and uses a private-workspace `.gitignore` template.
 - `config validate` enforces the initial single-primary entrypoint policy and secret-free prompt context.
 - `secrets check` reports only metadata such as env/file ref presence, mode, and byte size; values are redacted.
 - `pack validate` checks assistant-pack manifests, skill frontmatter, and portable public-safety hygiene.
@@ -111,6 +171,8 @@ pnpm run brainctl -- validate live --config examples/config/runtime.yaml --works
 - `automation validate` validates loop/monitor definitions, cron expression shape, and no-host-scheduler status.
 - `automation run`, `automation due`, and `automation monitor` evaluate loops/monitor events without installing crontabs/watchers. They dry-run by default; `--dispatch` uses a local static subagent lifecycle plus file spool/locks for fake execution smoke.
 - `web` commands validate/publish/prune generated static page packages through the publisher boundary; publish/prune support `--dry-run`.
+- `web setup/status` checks domain vs direct-IP publishing fields and Caddy/reverse-proxy notes without changing DNS.
+- `composio setup/status` checks optional Google Calendar/chat refs through Composio without real credentials.
 - `doctor` combines the checks above with toolchain and private-boundary placeholder checks.
 
 The CLI is the place setup, health, runtime, migration, and publisher commands should attach instead of making entrypoint or provider packages own operator workflows.

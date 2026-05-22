@@ -31,3 +31,39 @@ allowCrossEntrypointReplies = false
 [workspaces.personal.promptContext]
 includeActiveEntrypointMetadata = true
 exposeChannelSecrets = false
+
+[workspaces.personal.backup]
+strategy = "private-git"
+
+[workspaces.personal.backup.privateGit]
+repoPath = "/srv/brain/workspaces/personal/backups/private-git"
+remote = "git@github.com:example/private-brain-backup.git"
+branch = "main"
+include = ["config/**", "state/**", "artifacts/metadata/**"]
+exclude = ["secrets/**", "logs/**", "tmp/**", "cache/**", "caches/**", "**/.cache/**", "**/node_modules/**", "**/*.log"]
+
+[workspaces.personal.webPublishing]
+enabled = false
+mode = "disabled"
+domain = "me.example.test"
+baseUrl = "https://me.example.test/pages"
+publishRoot = "/srv/brain/pages"
+
+[workspaces.personal.webPublishing.reverseProxy]
+kind = "caddy"
+note = "Configure Caddy/reverse proxy after operator confirmation; brainctl never changes DNS."
+
+[workspaces.personal.integrations.composio]
+enabled = false
+apiKeyRef = "env:COMPOSIO_API_KEY"
+connectedAccountRef = "file:/srv/brain/workspaces/personal/config/composio-connected-account.json"
+
+[workspaces.personal.integrations.composio.dataSources.googleCalendar]
+enabled = false
+connectedAccountRef = "file:/srv/brain/workspaces/personal/config/google-calendar-connected-account.json"
+requiredEnvRefs = ["env:COMPOSIO_API_KEY"]
+
+[workspaces.personal.integrations.composio.dataSources.chat]
+enabled = false
+connectedAccountRef = "file:/srv/brain/workspaces/personal/config/chat-connected-account.json"
+requiredEnvRefs = ["env:COMPOSIO_API_KEY"]

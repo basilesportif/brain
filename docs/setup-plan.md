@@ -10,6 +10,16 @@ adapters, Telegram entrypoint seams, and non-mutating operations planning exist.
 Setup should prepare and validate a local or remote workspace, then stop before
 live deployment unless the user explicitly confirms.
 
+Setup is intentionally re-runnable. At any time, `brainctl setup inspect` or
+`brainctl setup status` should show configured, missing required, missing
+optional, and unsafe-to-overwrite items without printing secrets. A later setup
+pass should offer missing optional components: private Git/local-snapshot
+backup, generated web publishing, Google Calendar/chat via Composio,
+entrypoints, providers, and integrations.
+Existing config or backup metadata is never overwritten by default; destructive
+replacement requires an explicit `--force` or `--replace` flag on a command that
+documents what it will replace.
+
 ## Agent entrypoints
 
 When started from the repository root, Codex and Claude Code agents should treat
@@ -65,7 +75,19 @@ Ask these questions explicitly. Defaults are suggestions, not assumptions.
    persisted as the paired/admin identity in private state. Use a user-supplied
    explicit allowlist or optional `/pair` code only if requested.
 7. Is generated web/page publishing needed now? Default: no; keep web preview
-   disabled unless the user explicitly enables it.
+   disabled unless the user explicitly enables it. If yes, choose domain vs
+   direct IP, public base URL, publish root, and Caddy/reverse-proxy plan. DNS
+   is needed for a domain and not needed for direct-IP publishing; setup never
+   changes DNS.
+8. Should private workspace backup be configured now?
+   - `none` — default/no backup.
+   - `local-snapshot` — local snapshot root and retention notes.
+   - `private-git` — private repo path, optional remote, branch, include/exclude
+     policy. Safe defaults exclude secrets, logs, tmp, and caches.
+9. Should optional Google Calendar or chat data-source access be configured via
+   Composio? Default: no. If yes, collect only env/file refs for the Composio
+   API key and connected-account metadata; never collect or print credential
+   values.
 
 ### Local-only questions
 
@@ -158,7 +180,8 @@ on private workspace knowledge.
   this repo.
 - Expected secret/config refs include provider auth, Telegram bot token,
   Telegram admin pairing data, optional webhook secret, optional web preview
-  config, and host-specific service env.
+  config, optional Composio API key and connected-account metadata refs, and
+  host-specific service env.
 - Setup summaries print only metadata: file existence, ownership, permissions,
   size, and key counts; never secret values.
 
@@ -184,7 +207,10 @@ on private workspace knowledge.
 - Webhook mode needs a public HTTPS endpoint and firewall/reverse-proxy config;
   it is optional for first bootstrap.
 - Generated pages/web preview are optional and disabled by default. If enabled,
-  document hostnames, ports, TLS, and retention in private deployment notes.
+  document domain or direct-IP publishing, public base URL, publish root, Caddy
+  or reverse-proxy notes, ports, TLS, and retention in private deployment notes.
+  Setup reports DNS as needed for domains and not needed for direct IP; it does
+  not perform DNS changes.
 
 ### Operations
 
@@ -194,7 +220,9 @@ on private workspace knowledge.
   `brainctl config validate <path>`, and `brainctl operations validate` are the
   current safe checks.
 - Backup: config metadata, private workspace state, and secrets backup path are
-  documented without checking data into git.
+  documented without checking data into git. `private-git` backups use a private
+  repo path/remote/branch and the `examples/private-workspace.gitignore`
+  template; `backup init` is dry-run unless `--apply` is explicit.
 - Update: pull/fetch target ref, reinstall dependencies, run checks, restart,
   and rollback command are documented.
 
@@ -208,6 +236,7 @@ on private workspace knowledge.
 
    ```bash
    pnpm run brainctl -- setup --workspace <workspace-name> --path <private-workspace-path>
+   pnpm run brainctl -- setup inspect --config <private-config> --workspace <workspace-name>
    ```
 
 4. Copy `examples/config/runtime.yaml` or TOML into the private workspace config
@@ -225,8 +254,12 @@ on private workspace knowledge.
 7. Run current safe checks:
 
    ```bash
+   pnpm run brainctl -- setup status --config <private-config> --workspace <workspace-name>
    pnpm run brainctl -- config validate <private-config>
    pnpm run brainctl -- secrets check --config <private-config>
+   pnpm run brainctl -- backup plan --config <private-config> --workspace <workspace-name>
+   pnpm run brainctl -- web status --config <private-config> --workspace <workspace-name>
+   pnpm run brainctl -- composio status --config <private-config> --workspace <workspace-name>
    pnpm run brainctl -- entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN \
      --polling-state <workspace>/state/telegram-offset.json \
      --pairing-state <workspace>/state/telegram-pairing

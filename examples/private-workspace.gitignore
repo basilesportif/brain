@@ -1,0 +1,14 @@
+# Brain private workspace backup safety defaults
+# Keep secret-bearing, noisy, and local-cache paths out of private Git backups.
+secrets/**
+logs/**
+tmp/**
+cache/**
+caches/**
+**/.cache/**
+**/node_modules/**
+**/*.log
+
+# Keep generated runtime scratch data local unless deliberately included.
+artifacts/tmp/**
+artifacts/generated/**
