@@ -211,6 +211,8 @@ test("brainctl wires runtime OpenAI transcription config into Telegram without e
       source: "config",
       apiKeyRefPresent: true,
       model: "gpt-4o-mini-transcribe",
+      language: "",
+      promptPathPresent: false,
       attachmentKinds: ["voice", "audio"],
       scopedToEntrypoint: true,
     });

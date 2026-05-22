@@ -234,12 +234,13 @@ test("Telegram API dispatch and file download boundaries are injectable", async 
 
 test("Telegram adapter can download attachments and append injected audio transcripts", async () => {
   const api: TelegramBotApi = {
+    downloadMaxBytes: 20,
     async call(method, payload) {
-      if (method === "getFile") return { ok: true, result: { file_id: payload?.file_id, file_path: "voice/audio.ogg", file_size: 12 } };
+      if (method === "getFile") return { ok: true, result: { file_id: payload?.file_id, file_unique_id: "unique_voice", file_path: "voice/audio.ogg", file_size: 12 } };
       throw new Error(`unexpected method ${method}`);
     },
     async downloadFile(filePath) {
-      return { localPath: `/tmp/${path.basename(filePath)}`, filePath };
+      return { localPath: `/tmp/${path.basename(filePath)}`, filePath, bytes: new TextEncoder().encode("ogg-opus") };
     },
   };
   const adapter = new TelegramEntrypointAdapter({
@@ -255,16 +256,78 @@ test("Telegram adapter can download attachments and append injected audio transc
       },
     },
     updates: [
-      { update_id: 800, message: { message_id: 1, chat: { id: 123 }, from: { id: 7 }, voice: { file_id: "voice_file", mime_type: "audio/ogg" } } },
+      { update_id: 800, message: { message_id: 1, caption: "please transcribe", chat: { id: 123 }, from: { id: 7 }, voice: { file_id: "voice_file", file_unique_id: "voice_unique", mime_type: "audio/ogg" } } },
     ],
   });
   await adapter.start();
   const events = [];
   for await (const event of adapter.inboundEvents()) events.push(event);
   assert.equal(events.length, 1);
-  assert.match(events[0]?.text ?? "", /transcribed voice note/);
+  assert.equal(events[0]?.text, "please transcribe\nVoice transcript:\ntranscribed voice note\nAudio path: /tmp/audio.ogg");
   assert.equal(events[0]?.attachments?.[0]?.localPath, "/tmp/audio.ogg");
+  assert.equal(events[0]?.attachments?.[0]?.metadata?.telegramFileUniqueId, "unique_voice");
   assert.equal(events[0]?.attachments?.[0]?.metadata?.transcript, "transcribed voice note");
+});
+
+test("Telegram adapter labels audio transcripts like codex-chat and does not transcribe video unless scoped", async () => {
+  const api: TelegramBotApi = {
+    async call(method, payload) {
+      if (method === "getFile") {
+        const id = String(payload?.file_id);
+        return { ok: true, result: { file_id: id, file_path: id === "audio_file" ? "audio/song.mp3" : "video/clip.mp4", file_size: 4 } };
+      }
+      throw new Error(`unexpected method ${method}`);
+    },
+    async downloadFile(filePath) {
+      return { localPath: `/tmp/${path.basename(filePath)}`, filePath, bytes: new TextEncoder().encode("data") };
+    },
+  };
+  const transcribed: string[] = [];
+  const adapter = new TelegramEntrypointAdapter({
+    workspaceId: "personal",
+    apiClient: api,
+    attachmentHandling: {
+      download: true,
+      transcriber: {
+        async transcribe(input) {
+          transcribed.push(String(input.attachment.kind));
+          return { text: `transcribed ${input.attachment.kind}` };
+        },
+      },
+    },
+    updates: [
+      { update_id: 801, message: { message_id: 1, caption: "ignored by audio parity", chat: { id: 123 }, from: { id: 7 }, audio: { file_id: "audio_file", file_unique_id: "audio_unique", file_name: "song.mp3", mime_type: "audio/mpeg" } } },
+      { update_id: 802, message: { message_id: 2, chat: { id: 123 }, from: { id: 7 }, video: { file_id: "video_file", file_unique_id: "video_unique", file_name: "clip.mp4", mime_type: "video/mp4" } } },
+    ],
+  });
+  await adapter.start();
+  const events = [];
+  for await (const event of adapter.inboundEvents()) events.push(event);
+  assert.equal(events[0]?.text, "Audio transcript:\ntranscribed audio\nAudio path: /tmp/song.mp3");
+  assert.equal(events[1]?.text, "");
+  assert.deepEqual(transcribed, ["audio"]);
+});
+
+test("Telegram attachment downloads enforce codex-chat size limits before and after fetch", async () => {
+  const beforeLimitApi: TelegramBotApi = {
+    downloadMaxBytes: 5,
+    async call() { return { ok: true, result: { file_id: "voice_file", file_path: "voice/audio.ogg", file_size: 6 } }; },
+    async downloadFile() { throw new Error("should not download oversized Telegram file"); },
+  };
+  await assert.rejects(
+    () => resolveTelegramAttachmentDownload({ kind: "voice", uri: "voice_file", metadata: { telegramFileId: "voice_file" } }, beforeLimitApi),
+    /downloadMaxBytes: 6/,
+  );
+
+  const afterLimitApi: TelegramBotApi = {
+    downloadMaxBytes: 5,
+    async call() { return { ok: true, result: { file_id: "voice_file", file_path: "voice/audio.ogg", file_size: 4 } }; },
+    async downloadFile(filePath) { return { localPath: "/tmp/audio.ogg", filePath, bytes: new Uint8Array(6) }; },
+  };
+  await assert.rejects(
+    () => resolveTelegramAttachmentDownload({ kind: "voice", uri: "voice_file", metadata: { telegramFileId: "voice_file" } }, afterLimitApi),
+    /downloadMaxBytes: 6/,
+  );
 });
 
 test("Telegram webhook skeleton validates secret token", () => {

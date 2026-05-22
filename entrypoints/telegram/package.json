@@ -13,6 +13,7 @@
     "test": "node --test dist/**/*.test.js"
   },
   "dependencies": {
-    "@brain/entrypoint-protocol": "workspace:*"
+    "@brain/entrypoint-protocol": "workspace:*",
+    "openai": "^6.39.0"
   }
 }

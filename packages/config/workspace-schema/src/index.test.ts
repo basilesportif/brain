@@ -103,12 +103,16 @@ test("accepts OpenAI transcription config and defaults attachment scope", () => 
       provider: "openai",
       apiKeyRef: "env:OPENAI_API_KEY",
       model: "gpt-4o-mini-transcribe",
+      language: "en",
+      promptPath: "prompts/voice-transcription.md",
       scope: { entrypointIds: ["telegram-main"], attachmentKinds: ["voice", "audio"] },
     },
   });
   const result = validateWorkspaceConfig(input);
   assert.equal(result.ok, true, JSON.stringify(result.issues));
   assert.equal(result.config?.workspaces.personal.transcription?.provider, "openai");
+  assert.equal(result.config?.workspaces.personal.transcription?.language, "en");
+  assert.equal(result.config?.workspaces.personal.transcription?.promptPath, "prompts/voice-transcription.md");
   assert.deepEqual(result.config?.workspaces.personal.transcription?.scope.attachmentKinds, ["voice", "audio"]);
 });
 

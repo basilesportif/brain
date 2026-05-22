@@ -12,7 +12,7 @@ import { validateAssistantPack } from "@brain/assistant-pack-schema";
 import { FakeEntrypointAdapter } from "@brain/entrypoint-protocol";
 import { defaultBackupExclude, defaultBackupInclude, validateWorkspaceConfig, type BrainConfig, type EntrypointConfig, type TranscriptionConfig, type WorkspaceConfig } from "@brain/workspace-schema";
 import { AutomationRuntime, BrainRuntime, BrainSupervisor, EchoProviderAdapter, EmployeeLifecycle, FakeProviderAdapter, FileAutomationLockStore, FileAutomationSpool, FileEmployeeStore, FileSubagentJobStore, ProviderEmployeeRuntime, ProviderSubagentExecutor, RuntimeCommandInterceptor, RuntimeEntrypointBridge, StaticSubagentExecutor, SubagentLifecycle, createGuardedLiveValidationPlan, createOperationsPlan, parseBrainDirectives, renderSystemdService, type BrainSupervisorLogRecord, type OperationsPlan, type ProviderAdapter, type ProviderTurnEvent, type RuntimeLogEntry, type SubagentExecutor } from "@brain/runtime-core";
-import { FileTelegramPairingStore, FileTelegramPollingStateStore, TelegramBotApiClient, TelegramEntrypointAdapter, loadTelegramToken, type TelegramAttachmentTranscriber } from "@brain/entrypoint-telegram";
+import { FileTelegramPairingStore, FileTelegramPollingStateStore, OpenAITelegramAttachmentTranscriber, TelegramBotApiClient, TelegramEntrypointAdapter, loadTelegramToken, type TelegramAttachmentTranscriber } from "@brain/entrypoint-telegram";
 import { createCodexProvider, type CodexTransportKind } from "@brain/provider-codex";
 import { createClaudeCodeProvider, type ClaudeCodeTransportKind } from "@brain/provider-claude-code";
 import { pruneExpiredPages, publishPage, readManifest, validatePageDirectory } from "@brain/web";
@@ -24,6 +24,7 @@ interface CliResult {
 }
 
 const program = new Command();
+const TELEGRAM_DOWNLOAD_MAX_BYTES = 52_428_800;
 program
   .name("brainctl")
   .description("Operator CLI for validating and preparing Brain runtime workspaces.")
@@ -1201,13 +1202,19 @@ async function createCliEntrypoint(selection: ResolvedSupervisorRuntime, options
   const transcription = telegramTranscriptionRuntime(selection, options);
   const needsTelegramDownloads = Boolean(options.telegramDownloads || options.telegramDownloadDir || transcription.enabled);
   const apiClient = options.telegramPolling
-    ? await TelegramBotApiClient.fromTokenRef({ tokenEnv: options.telegramTokenEnv, tokenFile: options.telegramTokenFile, required: true, downloadDir: needsTelegramDownloads ? downloadDir : undefined })
+    ? await TelegramBotApiClient.fromTokenRef({ tokenEnv: options.telegramTokenEnv, tokenFile: options.telegramTokenFile, required: true, downloadDir: needsTelegramDownloads ? downloadDir : undefined, downloadMaxBytes: TELEGRAM_DOWNLOAD_MAX_BYTES })
     : undefined;
   const pairingState = options.telegramPairingState ? path.resolve(options.telegramPairingState) : path.join(paths.stateRoot, "telegram-pairing");
   const transcriber = options.telegramTranscriptionCommand
     ? commandTranscriber(options.telegramTranscriptionCommand)
     : transcription.provider === "openai" && transcription.apiKeyRef
-      ? openAiTranscriber({ apiKeyRef: transcription.apiKeyRef, model: transcription.model ?? "gpt-4o-mini-transcribe" })
+      ? new OpenAITelegramAttachmentTranscriber({
+          apiKeyRef: transcription.apiKeyRef,
+          model: transcription.model ?? "gpt-4o-mini-transcribe",
+          language: transcription.language,
+          promptPath: transcription.promptPath,
+          rootDir: selection.workspace.workspacePath,
+        })
       : undefined;
   return new TelegramEntrypointAdapter({
     workspaceId: selection.workspaceId,
@@ -1250,6 +1257,9 @@ type TelegramTranscriptionRuntime = {
   apiKeyRefPresent: boolean;
   apiKeyRef?: string;
   model?: string;
+  language?: string;
+  promptPath?: string;
+  promptPathPresent: boolean;
   attachmentKinds: Array<"voice" | "audio" | "video">;
   scopedToEntrypoint: boolean;
 };
@@ -1263,7 +1273,10 @@ function telegramTranscriptionRuntime(selection: ResolvedSupervisorRuntime, opti
       provider: "command",
       source: "cli",
       apiKeyRefPresent: false,
-      attachmentKinds: [...(config?.scope?.attachmentKinds ?? ["voice", "audio", "video"])],
+      attachmentKinds: [...(config?.scope?.attachmentKinds ?? ["voice", "audio"])],
+      language: config?.language,
+      promptPath: config?.promptPath,
+      promptPathPresent: Boolean(config?.promptPath),
       scopedToEntrypoint: true,
     };
   }
@@ -1273,6 +1286,9 @@ function telegramTranscriptionRuntime(selection: ResolvedSupervisorRuntime, opti
       source: "disabled",
       apiKeyRefPresent: Boolean(config?.apiKeyRef),
       model: config?.model,
+      language: config?.language,
+      promptPath: config?.promptPath,
+      promptPathPresent: Boolean(config?.promptPath),
       attachmentKinds: configured.attachmentKinds,
       scopedToEntrypoint: configured.scopedToEntrypoint,
     };
@@ -1284,13 +1300,16 @@ function telegramTranscriptionRuntime(selection: ResolvedSupervisorRuntime, opti
     apiKeyRefPresent: true,
     apiKeyRef: config.apiKeyRef,
     model: config.model,
+    language: config.language,
+    promptPath: config.promptPath,
+    promptPathPresent: Boolean(config.promptPath),
     attachmentKinds: configured.attachmentKinds,
     scopedToEntrypoint: configured.scopedToEntrypoint,
   };
 }
 
-function publicTelegramTranscriptionRuntime(runtime: TelegramTranscriptionRuntime): Omit<TelegramTranscriptionRuntime, "apiKeyRef"> {
-  const { apiKeyRef: _apiKeyRef, ...safe } = runtime;
+function publicTelegramTranscriptionRuntime(runtime: TelegramTranscriptionRuntime): Omit<TelegramTranscriptionRuntime, "apiKeyRef" | "promptPath"> {
+  const { apiKeyRef: _apiKeyRef, promptPath: _promptPath, ...safe } = runtime;
   return safe;
 }
 
@@ -1313,42 +1332,14 @@ function setupTranscriptionStatus(workspace: WorkspaceConfig | undefined) {
     provider: config?.provider ?? "openai",
     apiKeyRefPresent: Boolean(config?.apiKeyRef),
     model: config?.model ?? "gpt-4o-mini-transcribe",
+    language: config?.language ?? "",
+    promptPathPresent: Boolean(config?.promptPath),
     scope: {
       entrypointIds: entrypointIds.length > 0 ? entrypointIds : "all-enabled-entrypoints",
       attachmentKinds,
     },
     secretValuesPrinted: false,
   };
-}
-
-function openAiTranscriber(options: { apiKeyRef: string; model: string; endpoint?: string; fetchImpl?: typeof fetch }): TelegramAttachmentTranscriber {
-  return {
-    async transcribe(input) {
-      const apiKey = await readSecretRefValue(options.apiKeyRef);
-      if (!apiKey) throw new Error(`OpenAI transcription API key is missing for ${options.apiKeyRef}`);
-      const bytes = await readFile(input.path);
-      const body = new FormData();
-      body.set("model", options.model);
-      body.set("file", new Blob([new Uint8Array(bytes)], { type: input.attachment.mimeType ?? "application/octet-stream" }), input.attachment.originalName ?? path.basename(input.path));
-      const response = await (options.fetchImpl ?? fetch)(options.endpoint ?? "https://api.openai.com/v1/audio/transcriptions", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}` },
-        body,
-      });
-      const payload = await response.text();
-      if (!response.ok) throw new Error(`OpenAI transcription failed with HTTP ${response.status}: ${redactString(payload).slice(0, 500)}`);
-      const parsed = JSON.parse(payload) as { text?: unknown };
-      if (typeof parsed.text !== "string") throw new Error("OpenAI transcription response did not include text");
-      return { text: parsed.text.trim() };
-    },
-  };
-}
-
-async function readSecretRefValue(ref: string): Promise<string | undefined> {
-  const normalized = asSecretRef(ref);
-  if (normalized.startsWith("env:")) return process.env[normalized.slice("env:".length)];
-  if (normalized.startsWith("file:")) return (await readFile(normalized.slice("file:".length), "utf8")).trim();
-  return undefined;
 }
 
 async function appendSupervisorLog(filePath: string, record: BrainSupervisorLogRecord): Promise<void> {

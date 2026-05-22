@@ -14,10 +14,10 @@ export interface TelegramMessageLike {
   message_thread_id?: number;
   reply_to_message?: { message_id: number; text?: string; caption?: string };
   photo?: Array<{ file_id?: string; file_unique_id?: string; file_size?: number; width?: number; height?: number }>;
-  document?: { file_id?: string; file_name?: string; mime_type?: string; file_size?: number };
-  voice?: { file_id?: string; mime_type?: string; file_size?: number };
-  audio?: { file_id?: string; file_name?: string; mime_type?: string; file_size?: number };
-  video?: { file_id?: string; file_name?: string; mime_type?: string; file_size?: number };
+  document?: { file_id?: string; file_unique_id?: string; file_name?: string; mime_type?: string; file_size?: number };
+  voice?: { file_id?: string; file_unique_id?: string; mime_type?: string; file_size?: number };
+  audio?: { file_id?: string; file_unique_id?: string; file_name?: string; mime_type?: string; file_size?: number };
+  video?: { file_id?: string; file_unique_id?: string; file_name?: string; mime_type?: string; file_size?: number };
 }
 
 export interface TelegramUpdateLike {
@@ -145,6 +145,7 @@ export interface TelegramAttachmentHandlingOptions {
 export interface TelegramBotApi {
   call(method: string, payload?: Record<string, unknown>): Promise<unknown>;
   downloadFile?(filePath: string): Promise<TelegramDownloadedFile>;
+  downloadMaxBytes?: number;
 }
 
 export interface TelegramTokenOptions {
@@ -482,7 +483,7 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
     if (!handling || !event.attachments?.length) return event;
 
     const attachments: BrainAttachment[] = [];
-    const transcripts: string[] = [];
+    const transcriptBlocks: Array<{ attachment: BrainAttachment; text: string }> = [];
     for (const attachment of event.attachments) {
       let next = attachment;
       if (handling.download) {
@@ -503,8 +504,8 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
         try {
           const transcription = await handling.transcriber?.transcribe({ path: next.localPath as string, attachment: next, event });
           if (transcription?.text?.trim()) {
-            const text = transcription.text.trim();
-            transcripts.push(text);
+            const text = transcription.text;
+            transcriptBlocks.push({ attachment: next, text });
             next = {
               ...next,
               metadata: compact({
@@ -526,12 +527,10 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
       attachments.push(next);
     }
 
-    const appendTranscript = handling.appendTranscriptToText !== false && transcripts.length > 0;
+    const appendTranscript = handling.appendTranscriptToText !== false && transcriptBlocks.length > 0;
     return {
       ...event,
-      text: appendTranscript
-        ? [event.text?.trim(), transcripts.map((text, index) => `[Transcript ${index + 1}]\n${text}`).join("\n\n")].filter(Boolean).join("\n\n")
-        : event.text,
+      text: appendTranscript ? appendTranscriptBlocks(event.text, transcriptBlocks) : event.text,
       attachments,
     };
   }
@@ -726,7 +725,13 @@ export async function resolveTelegramAttachmentDownload(attachment: BrainAttachm
   const fileId = typeof attachment.metadata?.telegramFileId === "string" ? attachment.metadata.telegramFileId : attachment.uri;
   if (!fileId) return attachment;
   const fileInfo = telegramApiResult<TelegramFileInfo>(await api.call("getFile", { file_id: fileId }));
+  if (fileInfo.file_size !== undefined && api.downloadMaxBytes !== undefined && fileInfo.file_size > api.downloadMaxBytes) {
+    throw new Error(`Telegram file exceeds downloadMaxBytes: ${fileInfo.file_size}`);
+  }
   const downloaded = fileInfo.file_path && api.downloadFile ? await api.downloadFile(fileInfo.file_path) : undefined;
+  if (downloaded?.bytes && api.downloadMaxBytes !== undefined && downloaded.bytes.byteLength > api.downloadMaxBytes) {
+    throw new Error(`Telegram file exceeds downloadMaxBytes: ${downloaded.bytes.byteLength}`);
+  }
   return {
     ...attachment,
     uri: downloaded?.uri ?? attachment.uri,
@@ -744,11 +749,15 @@ export async function resolveTelegramAttachmentDownload(attachment: BrainAttachm
 }
 
 export class TelegramBotApiClient implements TelegramBotApi {
-  constructor(private readonly options: { token?: string; tokenRef?: TelegramTokenOptions; baseUrl?: string; downloadDir?: string; fetchImpl?: typeof fetch }) {}
+  readonly downloadMaxBytes?: number;
 
-  static async fromTokenRef(options: TelegramTokenOptions & { baseUrl?: string; downloadDir?: string; fetchImpl?: typeof fetch }): Promise<TelegramBotApiClient> {
+  constructor(private readonly options: { token?: string; tokenRef?: TelegramTokenOptions; baseUrl?: string; downloadDir?: string; downloadMaxBytes?: number; fetchImpl?: typeof fetch }) {
+    this.downloadMaxBytes = options.downloadMaxBytes;
+  }
+
+  static async fromTokenRef(options: TelegramTokenOptions & { baseUrl?: string; downloadDir?: string; downloadMaxBytes?: number; fetchImpl?: typeof fetch }): Promise<TelegramBotApiClient> {
     const loaded = await loadTelegramToken({ ...options, required: options.required ?? true });
-    return new TelegramBotApiClient({ token: loaded.token, baseUrl: options.baseUrl, downloadDir: options.downloadDir, fetchImpl: options.fetchImpl });
+    return new TelegramBotApiClient({ token: loaded.token, baseUrl: options.baseUrl, downloadDir: options.downloadDir, downloadMaxBytes: options.downloadMaxBytes, fetchImpl: options.fetchImpl });
   }
 
   async call(method: string, payload: Record<string, unknown> = {}): Promise<unknown> {
@@ -819,21 +828,51 @@ function summarizeActor(from: TelegramMessageLike["from"] | undefined) {
 
 function attachmentsFrom(message: TelegramMessageLike) {
   const attachments: BrainAttachment[] = [];
-  if (message.document) attachments.push({ kind: "document", uri: message.document.file_id, originalName: message.document.file_name, mimeType: message.document.mime_type, sizeBytes: message.document.file_size, metadata: compact({ telegramFileId: message.document.file_id }) as JsonRecord });
-  if (message.voice) attachments.push({ kind: "voice", uri: message.voice.file_id, mimeType: message.voice.mime_type, sizeBytes: message.voice.file_size, metadata: compact({ telegramFileId: message.voice.file_id }) as JsonRecord });
-  if (message.audio) attachments.push({ kind: "audio", uri: message.audio.file_id, originalName: message.audio.file_name, mimeType: message.audio.mime_type, sizeBytes: message.audio.file_size, metadata: compact({ telegramFileId: message.audio.file_id }) as JsonRecord });
-  if (message.video) attachments.push({ kind: "video", uri: message.video.file_id, originalName: message.video.file_name, mimeType: message.video.mime_type, sizeBytes: message.video.file_size, metadata: compact({ telegramFileId: message.video.file_id }) as JsonRecord });
+  if (message.document) attachments.push({ kind: "document", uri: message.document.file_id, originalName: message.document.file_name, mimeType: message.document.mime_type, sizeBytes: message.document.file_size, metadata: compact({ telegramFileId: message.document.file_id, telegramFileUniqueId: message.document.file_unique_id }) as JsonRecord });
+  if (message.voice) attachments.push({ kind: "voice", uri: message.voice.file_id, mimeType: message.voice.mime_type, sizeBytes: message.voice.file_size, metadata: compact({ telegramFileId: message.voice.file_id, telegramFileUniqueId: message.voice.file_unique_id }) as JsonRecord });
+  if (message.audio) attachments.push({ kind: "audio", uri: message.audio.file_id, originalName: message.audio.file_name, mimeType: message.audio.mime_type, sizeBytes: message.audio.file_size, metadata: compact({ telegramFileId: message.audio.file_id, telegramFileUniqueId: message.audio.file_unique_id }) as JsonRecord });
+  if (message.video) attachments.push({ kind: "video", uri: message.video.file_id, originalName: message.video.file_name, mimeType: message.video.mime_type, sizeBytes: message.video.file_size, metadata: compact({ telegramFileId: message.video.file_id, telegramFileUniqueId: message.video.file_unique_id }) as JsonRecord });
   if (message.photo?.length) {
     const largest = [...message.photo].sort((a, b) => (b.file_size ?? 0) - (a.file_size ?? 0))[0];
-    attachments.push({ kind: "image", uri: largest?.file_id, sizeBytes: largest?.file_size, metadata: compact({ variants: message.photo.length, telegramFileId: largest?.file_id, width: largest?.width, height: largest?.height }) as JsonRecord });
+    attachments.push({ kind: "image", uri: largest?.file_id, sizeBytes: largest?.file_size, metadata: compact({ variants: message.photo.length, telegramFileId: largest?.file_id, telegramFileUniqueId: largest?.file_unique_id, width: largest?.width, height: largest?.height }) as JsonRecord });
   }
   return attachments;
 }
 
 function shouldTranscribeAttachment(attachment: BrainAttachment, handling: TelegramAttachmentHandlingOptions): boolean {
   if (!handling.transcriber || !attachment.localPath) return false;
-  const transcribeKinds = new Set((handling.transcribeKinds ?? ["voice", "audio", "video"]).map(String));
+  const transcribeKinds = new Set((handling.transcribeKinds ?? ["voice", "audio"]).map(String));
   return transcribeKinds.has(String(attachment.kind));
+}
+
+function appendTranscriptBlocks(existingText: string | undefined, blocks: Array<{ attachment: BrainAttachment; text: string }>): string {
+  let output = existingText ?? "";
+  for (const [index, block] of blocks.entries()) {
+    const audioPath = block.attachment.localPath ? `Audio path: ${block.attachment.localPath}` : undefined;
+    if (block.attachment.kind === "voice") {
+      output = [
+        output.trim(),
+        "Voice transcript:",
+        block.text,
+        "",
+        audioPath,
+      ].filter((value) => value !== undefined && value !== "").join("\n");
+    } else if (block.attachment.kind === "audio") {
+      output = [
+        "Audio transcript:",
+        block.text,
+        "",
+        audioPath,
+      ].filter((value) => value !== undefined && value !== "").join("\n");
+    } else {
+      output = [
+        output.trim(),
+        `[Transcript ${index + 1}]`,
+        block.text,
+      ].filter(Boolean).join("\n\n");
+    }
+  }
+  return output;
 }
 
 function telegramApiDispatchResult(action: BrainOutboundAction, response: unknown): OutboundDispatchResult {
@@ -1011,3 +1050,6 @@ function telegramParseMode(format: "text" | "markdown" | "markdownv2" | undefine
   if (format === "markdownv2") return "MarkdownV2";
   return undefined;
 }
+
+export { OpenAITelegramAttachmentTranscriber, asSecretRef, readSecretRefValue } from "./transcription.js";
+export type { OpenAIAudioTranscriptionClient, OpenAITelegramTranscriberOptions } from "./transcription.js";

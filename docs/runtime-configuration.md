@@ -172,8 +172,9 @@ as missing optional pieces when absent or disabled:
   refs outside git; status commands print only metadata.
 - `transcription`: optional voice/audio attachment transcription. The initial
   provider is `openai` with an `apiKeyRef` such as `env:OPENAI_API_KEY`, a model
-  such as `gpt-4o-mini-transcribe`, and an explicit scope for entrypoint IDs and
-  attachment kinds. Store the key in the private workspace/host env, never in
+  such as `gpt-4o-mini-transcribe`, optional language, optional prompt file
+  path, and an explicit scope for entrypoint IDs and attachment kinds. Store the
+  key and any private prompt file in the private workspace/host env, never in
   git; `brainctl secrets check` reports only presence metadata.
 
 ## Validation rules

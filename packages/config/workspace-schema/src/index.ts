@@ -111,11 +111,13 @@ export const transcriptionConfigSchema = z.object({
   provider: z.enum(["openai"]).default("openai"),
   apiKeyRef: z.string().min(1).optional(),
   model: z.string().min(1).default("gpt-4o-mini-transcribe"),
+  language: z.string().default(""),
+  promptPath: z.string().default(""),
   scope: z.object({
     entrypointIds: z.array(z.string().min(1)).default([]),
     attachmentKinds: z.array(transcriptionAttachmentKindSchema).min(1).default(["voice", "audio"]),
   }).strict().default({ entrypointIds: [], attachmentKinds: ["voice", "audio"] }),
-}).strict().default({ enabled: false, provider: "openai", model: "gpt-4o-mini-transcribe", scope: { entrypointIds: [], attachmentKinds: ["voice", "audio"] } });
+}).strict().default({ enabled: false, provider: "openai", model: "gpt-4o-mini-transcribe", language: "", promptPath: "", scope: { entrypointIds: [], attachmentKinds: ["voice", "audio"] } });
 export type TranscriptionConfig = z.infer<typeof transcriptionConfigSchema>;
 
 export const integrationsConfigSchema = z.object({
