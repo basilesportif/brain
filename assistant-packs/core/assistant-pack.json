@@ -8,7 +8,8 @@
     "skills/setup-self-host/SKILL.md",
     "skills/setup-server/SKILL.md",
     "skills/repo-registry/SKILL.md",
-    "skills/generated-web-page/SKILL.md"
+    "skills/generated-web-page/SKILL.md",
+    "skills/file-save/SKILL.md"
   ],
   "prompts": [
     "prompts/runtime-boundary.md"
