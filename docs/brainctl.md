@@ -5,9 +5,10 @@
 ## Commands
 
 ```bash
-pnpm run brainctl setup --workspace personal --path ~/.brain/workspaces/personal
-pnpm run brainctl setup inspect --config ~/.brain/workspaces/personal/config/runtime.yaml --workspace personal
-pnpm run brainctl setup status --config ~/.brain/workspaces/personal/config/runtime.yaml --workspace personal
+pnpm run brainctl setup defaults --target remote --workspace personal
+pnpm run brainctl setup --workspace personal --path ~/.brain/workspace
+pnpm run brainctl setup inspect --config ~/.brain/workspace/config/runtime.yaml --workspace personal
+pnpm run brainctl setup status --config ~/.brain/workspace/config/runtime.yaml --workspace personal
 pnpm run brainctl doctor --config examples/config/runtime.yaml --pack assistant-packs/core
 pnpm run brainctl config validate examples/config/runtime.yaml
 pnpm run brainctl secrets check --config examples/config/runtime.yaml
@@ -22,19 +23,19 @@ pnpm run brainctl provider smoke codex --transport stub --prompt ping
 pnpm run brainctl provider check codex --transport app-server --app-server-url ws://127.0.0.1:9000 --timeout-ms 3000
 pnpm run brainctl provider check claude-code --transport stub
 pnpm run brainctl entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN \
-  --polling-state ~/.brain/workspaces/personal/state/telegram-offset.json \
-  --pairing-state ~/.brain/workspaces/personal/state/telegram-pairing
+  --polling-state ~/.brain/workspace/state/telegram-offset.json \
+  --pairing-state ~/.brain/workspace/state/telegram-pairing
 pnpm run brainctl start --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl run --config examples/config/runtime.yaml --workspace personal --fake --once --fake-text help
 pnpm run brainctl health --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl status --config examples/config/runtime.yaml --workspace personal
-pnpm run brainctl logs --file ~/.brain/workspaces/personal/logs/runtime.jsonl --lines 100
+pnpm run brainctl logs --file ~/.brain/workspace/logs/runtime.jsonl --lines 100
 pnpm run brainctl operations plan --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl operations systemd --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl operations validate --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl validate live --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl validate live --config examples/config/runtime.yaml --workspace personal --run-safe
-pnpm run brainctl runtime status --state ~/.brain/workspaces/personal/state
+pnpm run brainctl runtime status --state ~/.brain/workspace/state
 pnpm run brainctl runtime smoke --config examples/config/runtime.yaml --workspace personal --text ping
 pnpm run brainctl directives check docs/brainctl.md
 pnpm run brainctl automation validate examples/config/automation.yaml
@@ -43,7 +44,7 @@ pnpm run brainctl automation due --file examples/config/automation.yaml --now 20
 pnpm run brainctl automation monitor inbox-placeholder --file examples/config/automation.yaml
 pnpm run brainctl composio setup --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl composio status --config examples/config/runtime.yaml --workspace personal
-pnpm run brainctl web setup --config examples/config/runtime.yaml --workspace personal --base-url http://203.0.113.10/pages --publish-root /srv/brain/pages
+pnpm run brainctl web setup --config examples/config/runtime.yaml --workspace personal --base-url http://203.0.113.10/pages --publish-root ~/.brain/pages
 pnpm run brainctl web status --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl web validate --dir /path/to/static-page
 pnpm run brainctl web publish --dir /path/to/static-page --id demo-page --dry-run
@@ -58,9 +59,15 @@ root. Run it any time to reconcile the directory scaffold, or run `setup inspect
 / `setup status` to get a metadata-only plan:
 
 ```bash
-pnpm run brainctl setup --workspace personal --path ~/.brain/workspaces/personal
-pnpm run brainctl setup inspect --config ~/.brain/workspaces/personal/config/runtime.yaml --workspace personal
+pnpm run brainctl setup defaults --target remote --workspace personal
+pnpm run brainctl setup --workspace personal --path ~/.brain/workspace
+pnpm run brainctl setup inspect --config ~/.brain/workspace/config/runtime.yaml --workspace personal
 ```
+
+`setup defaults` is intentionally concise: by default it shows only the setup
+mode, source checkout, private workspace, and initial workspace name. Pass
+`--verbose` only when you need derived config/secrets/log paths, service-user
+details, or copyable commands.
 
 The setup status response groups findings into:
 
@@ -111,7 +118,7 @@ pnpm run brainctl run --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl health --config examples/config/runtime.yaml --workspace personal
 
 # Tail supervisor JSONL logs with conservative token/key redaction.
-pnpm run brainctl logs --file ~/.brain/workspaces/personal/logs/runtime.jsonl --lines 100
+pnpm run brainctl logs --file ~/.brain/workspace/logs/runtime.jsonl --lines 100
 ```
 
 `start` defaults to a dry-run plan. Use `start --foreground` or `run` to enter the foreground supervisor. Provider and entrypoint default to the selected workspace's runtime config; pass `--fake` or explicit `--provider fake --entrypoint fake` for CI/fresh-checkout smoke. Explicit live Telegram polling requires `--entrypoint telegram --telegram-polling` plus `--telegram-token-env` or `--telegram-token-file`; polling offsets remain Telegram-native state only. Telegram bootstrap uses first-user pairing by default and stores paired identity state under the private state root; pass `--telegram-pairing` only for the optional advanced `/pair` code flow. Attachment download is opt-in with `--telegram-downloads`/`--telegram-download-dir`; voice/audio transcription can come from workspace `transcription.provider: openai` with an `apiKeyRef` such as `env:OPENAI_API_KEY`, or from the private `--telegram-transcription-command` seam. Brainctl wires the Telegram adapter in codex-chat parity mode: disabled/unavailable voice transcription replies `Voice transcription is not enabled.` and is not sent to the provider, disabled audio stays an attachment event, and configured voice/audio transcription errors are dropped before provider dispatch. No transcription provider keys belong in the repo.

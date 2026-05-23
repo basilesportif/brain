@@ -51,6 +51,12 @@ Then collect the path-specific fields below.
 
 ## Common guided questions
 
+For the first default confirmation, optimize for confidence over completeness:
+show only the setup mode, source checkout path, private workspace path, and
+initial workspace name. Hide service user, systemd service name, derived
+config/secrets/log paths, and command lists unless the user asks for details or
+`brainctl setup defaults --verbose` is used.
+
 1. Workspace name? Default: `personal`.
 2. Provider? Choose exactly one:
    - `codex` for the Codex provider; app-server mechanics stay inside the
@@ -102,7 +108,7 @@ Then collect the path-specific fields below.
 ## Local setup flow
 
 1. Confirm a private workspace path outside the checkout, for example
-   `~/.brain/workspaces/<workspace-name>`.
+   `~/.brain/workspace`.
 2. Run `pnpm run check` from the repo root.
 3. Create workspace directories:
    - `config/`
@@ -152,11 +158,13 @@ Use this flow only after the user chooses remote mode and confirms the host.
    - local SSH config host label,
    - server address/IP,
    - initial bootstrap user, often `root`,
-   - desired dedicated Brain service user,
-   - repo clone path, default `~/pkg/brain`,
-   - remote workspace path, default `/srv/brain/workspaces/<workspace-name>`,
-   - systemd service name, default `brain-<workspace-name>`,
+   - repo clone path, default `/home/brain/brain` for the `brain` service user,
+   - remote workspace path, default `/home/brain/.brain/workspace`,
    - provider and Telegram readiness.
+   To display the concise grouped defaults without extra caveats, run:
+   `pnpm run brainctl setup defaults --target remote --workspace <workspace-name>`.
+   Use `--verbose` only when the user asks for derived paths, service-user, or
+   service-name details.
 2. Add or reuse a local `~/.ssh/config` entry so `ssh <host-label>` works. If
    root is needed only for bootstrap, switch the alias to the service user after
    user creation.

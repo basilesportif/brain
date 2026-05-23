@@ -25,6 +25,11 @@ interface CliResult {
 
 const program = new Command();
 const TELEGRAM_DOWNLOAD_MAX_BYTES = 52_428_800;
+const DEFAULT_WORKSPACE_ID = "personal";
+const DEFAULT_SERVICE_USER = "brain";
+
+type SetupDefaultsTarget = "local" | "remote";
+
 program
   .name("brainctl")
   .description("Operator CLI for validating and preparing Brain runtime workspaces.")
@@ -32,19 +37,25 @@ program
 
 program.command("setup")
   .description("Create a private workspace directory scaffold without writing secrets.")
-  .argument("[mode]", "optional mode: inspect or status")
-  .option("--workspace <name>", "workspace id", "personal")
-  .option("--path <path>", "private workspace path; setup defaults to ~/.brain/workspaces/<workspace>, inspect defaults to config workspacePath")
+  .argument("[mode]", "optional mode: defaults, inspect, or status")
+  .option("--workspace <name>", "workspace id", DEFAULT_WORKSPACE_ID)
+  .option("--target <target>", "defaults target: local or remote", "local")
+  .option("--service-user <user>", "remote non-root service user for defaults", DEFAULT_SERVICE_USER)
+  .option("--path <path>", "private workspace path; setup defaults to ~/.brain/workspace for the default workspace, inspect defaults to config workspacePath")
   .option("--config <path>", "runtime YAML/TOML/JSON config to inspect before planning")
   .option("--repo <path>", "source checkout path to inspect", process.cwd())
+  .option("--verbose", "include derived config, secrets, state, log, and command details in setup defaults")
   .option("--force", "allow explicitly requested non-destructive rewrites in future setup flows")
   .option("--replace", "allow explicitly requested destructive replacement in future setup flows")
   .option("--dry-run", "show actions without creating directories")
   .action(async (mode: string | undefined, options) => {
+    if (mode === "defaults") {
+      return exitWith(setupDefaultsCommand(options));
+    }
     if (mode === "inspect" || mode === "status") {
       return exitWith(await setupInspectCommand({ ...options, config: options.config ?? "examples/config/runtime.yaml" }));
     }
-    if (mode) return exitWith({ ok: false, summary: `unknown setup mode: ${mode}`, details: { supported: ["inspect", "status"] } });
+    if (mode) return exitWith({ ok: false, summary: `unknown setup mode: ${mode}`, details: { supported: ["defaults", "inspect", "status"] } });
     return exitWith(await setupCommand(options));
   });
 
@@ -334,8 +345,8 @@ entrypoint.command("check")
 const runtime = program.command("runtime").description("Runtime state inspection commands");
 runtime.command("status")
   .description("Inspect runtime job state without starting providers or entrypoints.")
-  .option("--workspace <id>", "workspace id", "personal")
-  .option("--state <path>", "runtime state root", path.join(process.env.HOME ?? ".", ".brain", "workspaces", "personal", "state"))
+  .option("--workspace <id>", "workspace id", DEFAULT_WORKSPACE_ID)
+  .option("--state <path>", "runtime state root", path.join(defaultWorkspaceRoot(DEFAULT_WORKSPACE_ID), "state"))
   .action(async (options) => exitWith(await runtimeStatusCommand(options)));
 runtime.command("smoke")
   .description("Run a no-network runtime smoke: fake entrypoint -> fake provider -> outbound dispatch.")
@@ -1096,7 +1107,7 @@ async function runSafeValidationChecks(
 }
 
 function supervisorPaths(workspace: string, options: { state?: string; artifacts?: string; log?: string; workspacePath?: string }): { stateRoot: string; artifactRoot: string; logPath: string } {
-  const base = path.resolve(options.workspacePath ?? path.join(process.env.HOME ?? ".", ".brain", "workspaces", workspace));
+  const base = path.resolve(options.workspacePath ?? defaultWorkspaceRoot(workspace));
   const stateRoot = path.resolve(options.state ?? path.join(base, "state"));
   return {
     stateRoot,
@@ -1431,12 +1442,86 @@ interface SetupInspectOptions {
   repo?: string;
 }
 
+interface SetupDefaultsOptions {
+  workspace: string;
+  target?: string;
+  serviceUser?: string;
+  path?: string;
+  verbose?: boolean;
+}
+
 interface ConfigRef {
   workspaceId: string;
   ref: string;
   source: string;
   entrypointId?: string;
   optional?: boolean;
+}
+
+function setupDefaultsCommand(options: SetupDefaultsOptions): CliResult {
+  const target = normalizeSetupDefaultsTarget(options.target);
+  if (!target) return { ok: false, summary: "setup defaults target must be local or remote", details: { supported: ["local", "remote"] } };
+  const serviceUser = options.serviceUser || DEFAULT_SERVICE_USER;
+  const serviceHome = target === "remote" ? serviceUserHome(serviceUser) : "~";
+  const workspaceRoot = options.path ?? defaultWorkspaceRootDisplay(options.workspace, serviceHome);
+  const repoCheckout = target === "remote" ? `${serviceHome}/brain` : "<this checkout>";
+  const serviceName = `brain-${options.workspace}`;
+  const decisions = [
+    { decision: "Setup mode", default: target === "remote" ? "Remote Ubuntu server over SSH" : "Local private workspace" },
+    { decision: "Source checkout", default: repoCheckout },
+    { decision: "Private workspace", default: workspaceRoot },
+    { decision: "Initial workspace", default: options.workspace },
+  ];
+  const details: Record<string, unknown> = {
+    decisions,
+    safety: [
+      "private workspace stays outside the source checkout",
+      "secrets and runtime state stay outside git",
+      "setup does not write secret values",
+    ],
+  };
+  if (options.verbose) {
+    details.advanced = {
+      target,
+      serviceUser: target === "remote" ? serviceUser : undefined,
+      serviceName: target === "remote" ? serviceName : undefined,
+      paths: {
+        repoCheckout,
+        privateWorkspace: workspaceRoot,
+        runtimeConfig: `${workspaceRoot}/config/runtime.yaml`,
+        secretsEnv: `${workspaceRoot}/secrets/secrets.env`,
+        state: `${workspaceRoot}/state`,
+        logs: `${workspaceRoot}/logs`,
+      },
+      nextCommands: [
+        `pnpm run brainctl setup --workspace ${options.workspace} --path ${workspaceRoot}`,
+        `pnpm run brainctl setup status --config ${workspaceRoot}/config/runtime.yaml --workspace ${options.workspace}`,
+      ],
+    };
+  }
+
+  return {
+    ok: true,
+    summary: `${target} setup defaults ready; confirm these choices or pass --verbose for details`,
+    details,
+  };
+}
+
+function normalizeSetupDefaultsTarget(target: string | undefined): SetupDefaultsTarget | undefined {
+  if (target === undefined || target === "local" || target === "remote") return target ?? "local";
+  return undefined;
+}
+
+function serviceUserHome(serviceUser: string): string {
+  return serviceUser === "root" ? "/root" : `/home/${serviceUser}`;
+}
+
+function defaultWorkspaceRoot(workspace: string): string {
+  return path.join(process.env.HOME ?? ".", ".brain", workspace === DEFAULT_WORKSPACE_ID ? "workspace" : path.join("workspaces", workspace));
+}
+
+function defaultWorkspaceRootDisplay(workspace: string, home: string): string {
+  return `${home}/.brain/${workspace === DEFAULT_WORKSPACE_ID ? "workspace" : `workspaces/${workspace}`}`;
 }
 
 async function setupCommand(options: SetupInspectOptions & { dryRun?: boolean; force?: boolean; replace?: boolean }): Promise<CliResult> {
@@ -1483,7 +1568,7 @@ async function setupInspectCommand(options: SetupInspectOptions): Promise<CliRes
 async function setupInspectDetails(options: SetupInspectOptions) {
   const config = options.config ? await tryLoadValidConfig(options.config) : undefined;
   const workspace = config?.config?.workspaces[options.workspace];
-  const workspaceRoot = path.resolve(options.path ?? workspace?.workspacePath ?? path.join(process.env.HOME ?? ".", ".brain", "workspaces", options.workspace));
+  const workspaceRoot = path.resolve(options.path ?? workspace?.workspacePath ?? defaultWorkspaceRoot(options.workspace));
   const workspaceMeta = await fileMetadata(workspaceRoot);
   const directories = Object.fromEntries(await Promise.all(WORKSPACE_DIRS.map(async (dir) => [dir, await fileMetadata(path.join(workspaceRoot, dir))] as const)));
   const privateConfigCandidates = await Promise.all(["runtime.yaml", "runtime.yml", "runtime.toml", "runtime.json"].map(async (file) => {

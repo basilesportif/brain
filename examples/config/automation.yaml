@@ -14,4 +14,4 @@ monitors:
     description: Example disabled filesystem monitor; no watcher is installed by validation.
     source: filesystem
     config:
-      path: /srv/brain/workspaces/personal/inbox
+      path: /home/brain/.brain/workspace/inbox

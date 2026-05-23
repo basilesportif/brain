@@ -53,6 +53,11 @@ confirm before making changes.
 ## Guided questions
 
 Ask these questions explicitly. Defaults are suggestions, not assumptions.
+For the first setup confirmation, keep the summary short: show only setup mode,
+source checkout path, private workspace path, and initial workspace name. Hide
+implementation plumbing such as service user, systemd service name, derived
+config/secrets/log paths, and command lists unless the user asks for details or
+`brainctl setup defaults --verbose` is used.
 
 ### Common questions
 
@@ -102,30 +107,24 @@ Ask these questions explicitly. Defaults are suggestions, not assumptions.
 ### Local-only questions
 
 1. Which private workspace directory should be used? Suggested default:
-   `~/.brain/workspaces/<workspace-name>`.
+   `~/.brain/workspace`.
 2. Should setup create local config, secrets, logs, artifacts, backups, and
    state directories there with restrictive permissions?
-3. Which package manager command should be used from the repo root? Current
-   repo checks use `pnpm run check` across the pnpm workspace.
 
 ### Remote-only questions
 
 1. What SSH host label should be added or reused in local `~/.ssh/config`?
 2. What server address should that host label point to?
 3. Which bootstrap SSH user has initial access? Usually `root` on a fresh VPS.
-4. What non-root server user should own Brain? This user should be distinct
-   from root and have passwordless sudo after bootstrap.
-5. What remote repo clone path should be used? Suggested default:
-   `~/pkg/brain` for the service user.
-6. What remote private workspace path should be used? Suggested default:
-   `/srv/brain/workspaces/<workspace-name>`.
-7. What systemd service name should be reserved? Suggested default:
-   `brain-<workspace-name>`.
-8. Which Git remote should the server clone? Default: this repository's origin.
-9. Does the service user already have an SSH key on the server for Git/provider
+4. What remote repo clone path should be used? Suggested default:
+   `/home/brain/brain` for the default `brain` service user.
+5. What remote private workspace path should be used? Suggested default:
+   `/home/brain/.brain/workspace`.
+6. Which Git remote should the server clone? Default: this repository's origin.
+7. Does the service user already have an SSH key on the server for Git/provider
    access? If not, stop and ask the user to install one; do not require setup to
    create a new server key for first bootstrap.
-10. Are provider auth and Telegram token ready now, or should setup install
+8. Are provider auth and Telegram token ready now, or should setup install
     placeholders and leave the service stopped/pending auth?
 
 ## Fresh remote server checklist
@@ -302,7 +301,16 @@ on private workspace knowledge.
 Remote setup should be user-confirmed and should not deploy live services unless
 explicitly requested.
 
-1. Confirm remote mode and collect the remote-only questions above.
+1. Confirm remote mode and show concise defaults, either from the remote-only
+   questions above or with:
+
+   ```bash
+   pnpm run brainctl setup defaults --target remote --workspace personal
+   ```
+
+   The defaults keep `/home/brain/brain` as the source checkout and
+   `/home/brain/.brain/workspace` as the private workspace for the non-root
+   service user.
 2. Add or reuse a local SSH config entry:
 
    ```sshconfig

@@ -30,7 +30,7 @@ pnpm --filter @brain/web run build
 pnpm --filter @brain/web run publish:page -- --dir /path/to/static-page --id demo-page --dry-run
 pnpm --filter @brain/web run prune:pages -- --dry-run
 pnpm run brainctl web setup --config examples/config/runtime.yaml --workspace personal \
-  --base-url http://203.0.113.10/pages --publish-root /srv/brain/pages
+  --base-url http://203.0.113.10/pages --publish-root ~/.brain/pages
 pnpm run brainctl web status --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl web validate --dir /path/to/static-page
 pnpm run brainctl web publish --dir /path/to/static-page --id demo-page --dry-run

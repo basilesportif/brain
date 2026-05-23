@@ -22,7 +22,7 @@ runtime:
 
 workspaces:
   personal:
-    workspacePath: /srv/brain/workspaces/personal
+    workspacePath: /home/brain/.brain/workspace
     primaryEntrypointId: telegram-main
     enabledEntrypoints:
       telegram-main:
@@ -49,7 +49,7 @@ workspaces:
     backup:
       strategy: private-git # none | local-snapshot | private-git
       privateGit:
-        repoPath: /srv/brain/workspaces/personal/backups/private-git
+        repoPath: /home/brain/.brain/workspace/backups/private-git
         remote: git@github.com:example/private-brain-backup.git
         branch: main
         include: [config/**, state/**, artifacts/metadata/**]
@@ -59,7 +59,7 @@ workspaces:
       mode: disabled # disabled | domain | ip
       domain: me.example.test
       baseUrl: https://me.example.test/pages
-      publishRoot: /srv/brain/pages
+      publishRoot: /home/brain/.brain/pages
       reverseProxy:
         kind: caddy
         note: Operator configures Caddy/reverse proxy; brainctl does not change DNS.
@@ -75,15 +75,15 @@ workspaces:
       composio:
         enabled: false
         apiKeyRef: env:COMPOSIO_API_KEY
-        connectedAccountRef: file:/srv/brain/workspaces/personal/config/composio-connected-account.json
+        connectedAccountRef: file:/home/brain/.brain/workspace/config/composio-connected-account.json
         dataSources:
           googleCalendar:
             enabled: false
-            connectedAccountRef: file:/srv/brain/workspaces/personal/config/google-calendar-connected-account.json
+            connectedAccountRef: file:/home/brain/.brain/workspace/config/google-calendar-connected-account.json
             requiredEnvRefs: [env:COMPOSIO_API_KEY]
           chat:
             enabled: false
-            connectedAccountRef: file:/srv/brain/workspaces/personal/config/chat-connected-account.json
+            connectedAccountRef: file:/home/brain/.brain/workspace/config/chat-connected-account.json
             requiredEnvRefs: [env:COMPOSIO_API_KEY]
 ```
 
@@ -94,7 +94,7 @@ workspaces:
 activeEntrypointMode = "single-primary"
 
 [workspaces.personal]
-workspacePath = "/srv/brain/workspaces/personal"
+workspacePath = "/home/brain/.brain/workspace"
 primaryEntrypointId = "telegram-main"
 
 [workspaces.personal.enabledEntrypoints.telegram-main]
@@ -127,7 +127,7 @@ exposeChannelSecrets = false
 strategy = "private-git"
 
 [workspaces.personal.backup.privateGit]
-repoPath = "/srv/brain/workspaces/personal/backups/private-git"
+repoPath = "/home/brain/.brain/workspace/backups/private-git"
 remote = "git@github.com:example/private-brain-backup.git"
 branch = "main"
 include = ["config/**", "state/**", "artifacts/metadata/**"]
@@ -138,7 +138,7 @@ enabled = false
 mode = "disabled"
 domain = "me.example.test"
 baseUrl = "https://me.example.test/pages"
-publishRoot = "/srv/brain/pages"
+publishRoot = "/home/brain/.brain/pages"
 
 [workspaces.personal.transcription]
 enabled = false
@@ -153,7 +153,7 @@ attachmentKinds = ["voice", "audio"]
 [workspaces.personal.integrations.composio]
 enabled = false
 apiKeyRef = "env:COMPOSIO_API_KEY"
-connectedAccountRef = "file:/srv/brain/workspaces/personal/config/composio-connected-account.json"
+connectedAccountRef = "file:/home/brain/.brain/workspace/config/composio-connected-account.json"
 ```
 
 ## Optional setup surfaces

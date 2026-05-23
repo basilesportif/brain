@@ -387,6 +387,34 @@ test("brainctl setup inspect is idempotent and redacts secret values", async () 
   }
 });
 
+test("brainctl setup defaults renders concise remote choices and hides plumbing", () => {
+  const result = spawnBrainctl(["setup", "defaults", "--target", "remote", "--workspace", "personal"]);
+  assert.equal(result.status, 0, result.stderr);
+  const parsed = JSON.parse(result.stdout) as {
+    ok: boolean;
+    details: {
+      decisions: Array<{ decision: string; default: string }>;
+      safety: string[];
+      advanced?: unknown;
+    };
+  };
+  assert.equal(parsed.ok, true);
+  assert.deepEqual(parsed.details.decisions.map((item) => item.decision), ["Setup mode", "Source checkout", "Private workspace", "Initial workspace"]);
+  assert.equal(parsed.details.decisions.find((item) => item.decision === "Source checkout")?.default, "/home/brain/brain");
+  assert.equal(parsed.details.decisions.find((item) => item.decision === "Private workspace")?.default, "/home/brain/.brain/workspace");
+  assert.ok(parsed.details.safety.some((item) => /outside git/.test(item)));
+  assert.equal(parsed.details.advanced, undefined);
+  assert.doesNotMatch(result.stdout, /serviceUser|serviceName|secretsEnv|runtimeConfig|pnpm caveat|package manager|srv\/brain/);
+
+  const verbose = spawnBrainctl(["setup", "defaults", "--target", "remote", "--workspace", "personal", "--verbose"]);
+  assert.equal(verbose.status, 0, verbose.stderr);
+  const verboseJson = JSON.parse(verbose.stdout) as { details: { advanced: { serviceUser: string; serviceName: string; paths: { runtimeConfig: string; secretsEnv: string } } } };
+  assert.equal(verboseJson.details.advanced.serviceUser, "brain");
+  assert.equal(verboseJson.details.advanced.serviceName, "brain-personal");
+  assert.equal(verboseJson.details.advanced.paths.runtimeConfig, "/home/brain/.brain/workspace/config/runtime.yaml");
+  assert.equal(verboseJson.details.advanced.paths.secretsEnv, "/home/brain/.brain/workspace/secrets/secrets.env");
+});
+
 test("brainctl backup, web setup, and Composio status are safe and metadata-only", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brainctl-optional-"));
   try {

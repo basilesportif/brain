@@ -17,7 +17,9 @@ Use this skill when a user asks to prepare a fresh Ubuntu host for Brain.
 
 ## Baseline checklist
 
-1. Confirm host label/address, bootstrap user, desired service user, repo path, workspace path, and provider choice.
+1. Confirm host label/address, repo path, workspace path, and provider choice.
+   Ask for service-user/service details only when needed for bootstrap or when
+   the user asks for advanced details.
 2. Install base packages: Git, curl, build tools, certificates, Node, pnpm, and any provider CLI prerequisites the user selected.
 3. Clone or update the user-confirmed Brain repository.
 4. Run `pnpm install` and `pnpm run check`.
