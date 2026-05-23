@@ -34,9 +34,16 @@ name/path, Codex auth status metadata, reviewed service install/start status,
 Telegram token configured metadata, and the next recommended step. It must never
 store raw tokens, provider credentials, session material, Telegram user/chat IDs,
 or logs. `setup inspect/status` may use the file to resume after a closed Codex
-session, but must reconcile it with current config, file metadata, secret-ref
-checks, provider health, and service health rather than trusting stale progress
-blindly.
+session, but progress state is only a resume aid, not authority. Agents must
+reconcile it with current config, file metadata, secret-ref checks, actual
+remote/server state, provider health, and service health rather than trusting
+stale progress blindly.
+
+If saved setup progress does not match the real workspace/remote/server state,
+or if setup cannot determine what is safe to do next, reset the progress state
+before guessing, forcing commands, or applying destructive flags. After reset,
+rerun `setup inspect`, `setup status`, and any guarded live/status checks needed
+to rebuild the picture from current state.
 
 If the wizard needs a clean resume state, run:
 
@@ -48,7 +55,8 @@ pnpm run brainctl setup reset --workspace <workspace-name> --path <private-works
 Reset is intentionally narrow: it reports only the target path, previous
 presence/mode/size, and action taken or skipped, and it can remove only
 `<private-workspace>/state/setup-progress.json`. It must not touch private
-secrets, config, backups, logs, documents, provider sessions, or Telegram state.
+secrets, config, backups, logs, documents, provider sessions, Telegram state, or
+other private data.
 
 ## Agent entrypoints
 
@@ -350,9 +358,12 @@ on private workspace knowledge.
    - finally optional follow-ups such as first-user pairing, OpenAI
      transcription, web publishing, or backup tuning.
 10. On rerun, read `<workspace>/state/setup-progress.json`, inspect the current
-    workspace/config/secret metadata again, report completed steps, identify the
-    next incomplete step, and continue there instead of restarting from defaults
-    or dumping every setup option.
+    workspace/config/secret metadata and actual remote/server/service state
+    again, report completed steps, identify the next incomplete step, and
+    continue there only when they agree. If progress and reality disagree, or if
+    the safe next step is unclear, run `brainctl setup reset` first and then
+    rerun `setup inspect/status` and guarded live/status checks instead of
+    guessing or forcing inconsistent state.
 
 ## Remote SSH setup flow
 

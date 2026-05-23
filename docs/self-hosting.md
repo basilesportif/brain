@@ -45,6 +45,13 @@ The setup docs and skills should be readable by Codex or Claude Code itself so a
   overwriting existing private config: private Git/local-snapshot backup, web
   publishing, Google Calendar/chat via Composio, provider/entrypoint refs, and
   other integrations.
+- Setup progress state is only a resume aid. If saved progress does not match
+  actual workspace/remote/server state, or setup cannot identify a safe next
+  step, agents should run `brainctl setup reset` to clear only
+  `state/setup-progress.json`, then rerun setup inspect/status and guarded
+  live/status checks. Reset before guessing or forcing inconsistent state, and
+  do not delete secrets, config, backups, logs, documents, provider sessions,
+  Telegram state, or other private data.
 
 Self-host config should start from `examples/config/runtime.yaml` or `examples/config/runtime.toml`. Operators may predefine disabled future entrypoints, but enabling multiple entrypoints must wait for deliberate `multi-explicit` routing and conflict configuration.
 
@@ -55,6 +62,8 @@ Agents should use root-level `AGENTS.md`, `CLAUDE.md` when running under Claude 
 - `brainctl setup` for local private workspace scaffolding.
 - `brainctl setup inspect/status` for idempotent configured/missing/unsafe
   setup plans.
+- `brainctl setup reset` for clearing stale or confusing setup progress metadata
+  only, followed by fresh inspect/status/live checks.
 - `brainctl backup plan/init/check/status` for private workspace backup setup.
 - `brainctl web setup/status` for domain vs direct-IP generated-page publishing
   checks; DNS and Caddy changes stay manual/operator-confirmed.

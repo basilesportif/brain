@@ -19,7 +19,12 @@ Use this skill when a user asks to prepare a fresh Ubuntu host for Brain.
   metadata such as completed setup steps, Codex auth status metadata, service
   install/start status, Telegram token configured metadata, and next recommended
   step. Use restrictive permissions and reconcile it with current checks instead
-  of trusting it blindly.
+  of trusting it blindly. If saved progress conflicts with actual server state,
+  or the safe next step is unclear, use `brainctl setup reset` to clear only
+  `state/setup-progress.json`, then rerun setup inspect/status and guarded
+  live/status checks before continuing. Reset before guessing or forcing
+  inconsistent state, and never use it to delete secrets, config, backups, logs,
+  documents, provider sessions, Telegram state, or other private data.
 
 ## Baseline checklist
 

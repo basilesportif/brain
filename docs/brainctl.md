@@ -108,17 +108,22 @@ completed step ids, Codex auth status metadata, service install/start status,
 Telegram token configured metadata, and the next recommended step. It never
 stores raw tokens, API keys, session material, Telegram IDs, or logs. The file
 is excluded from the private workspace Git template and source checkout ignores
-workspace state. `setup inspect/status` reads this progress file as a resume aid
-but does not trust it blindly: current config, directory, secret-ref metadata,
-and explicit live/provider/health checks still decide whether setup can safely
-continue.
+workspace state. `setup inspect/status` reads this progress file as a resume aid,
+not authority: current config, directory, secret-ref metadata, actual
+remote/server state, and explicit live/provider/health checks still decide
+whether setup can safely continue.
 
 To restart only the wizard resume metadata, use `setup reset` with an explicit
-workspace path. It targets exactly `<private-workspace>/state/setup-progress.json`;
-it does not remove secrets, config, backups, logs, documents, or other state.
-`--dry-run` reports the target path, previous presence/mode/size, and planned
-action. Without `--yes`, reset skips removal. With `--yes`, it removes only that
-progress file and prints metadata only.
+workspace path. Use it when saved progress disagrees with real workspace,
+remote, service, or provider state, or when setup cannot determine the safe next
+step. Reset before guessing, using force/replace flags, or continuing from
+inconsistent state; then rerun `setup inspect/status` and guarded live/status
+checks. It targets exactly `<private-workspace>/state/setup-progress.json`; it
+does not remove secrets, config, backups, logs, documents, provider sessions,
+Telegram state, or other private data. `--dry-run` reports the target path,
+previous presence/mode/size, and planned action. Without `--yes`, reset skips
+removal. With `--yes`, it removes only that progress file and prints metadata
+only.
 
 ## Backup and private Git model
 

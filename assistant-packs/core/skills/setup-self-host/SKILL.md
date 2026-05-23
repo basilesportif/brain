@@ -38,8 +38,16 @@ deployment handoff.
   name/path, Codex auth status metadata, service install/start status, Telegram
   token configured metadata, and next recommended step. Never store raw
   secrets, tokens, provider session material, Telegram user/chat IDs, or logs.
-  Reconcile it with current config, file metadata, secret-ref checks, provider
-  health, and service health; do not trust stale progress blindly.
+  Reconcile it with current config, file metadata, secret-ref checks, actual
+  remote/server state, provider health, and service health; do not trust stale
+  progress blindly.
+- If saved setup progress conflicts with real workspace/remote/server state, or
+  if setup cannot determine the safe next step, run `brainctl setup reset` to
+  clear only `state/setup-progress.json`, then rerun setup inspect/status and
+  guarded live/status checks. Reset before guessing, using force/replace, or
+  continuing from inconsistent state. It must not delete secrets, config,
+  backups, logs, documents, provider sessions, Telegram state, or other private
+  data.
 - Run `pnpm run check` after setup/documentation edits and before declaring
   setup ready.
 
@@ -181,9 +189,11 @@ BotFather token creation guidance:
    - finally optional follow-ups such as first-user pairing, OpenAI
      transcription, web publishing, or backup tuning.
 9. If the user reruns setup after closing a Codex/Claude session, inspect
-   `<workspace>/state/setup-progress.json` plus current live metadata, report
-   completed steps, identify the next incomplete step, and continue from there
-   rather than restarting from defaults or dumping all setup choices.
+   `<workspace>/state/setup-progress.json` plus current config, secret metadata,
+   remote/server state, and guarded live/status metadata. Continue from the next
+   incomplete step only when those sources agree. If they conflict, or if the
+   safe next step is unclear, run `brainctl setup reset` before rerunning
+   inspect/status checks; do not guess or force inconsistent state.
 
 Recommended safe commands:
 

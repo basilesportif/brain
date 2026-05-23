@@ -50,14 +50,24 @@ docs and skills remain referenced files.
 5. Treat the root-level `setup` request plus `brainctl setup` as the current
    safe setup flow. Keep it provider-agnostic where possible: Codex first, with
    Claude Code recorded only as a provider placeholder until real wiring exists.
-6. Bootstrap Telegram as the first primary entrypoint when the user wants live
+6. Treat setup progress state as a resume aid, not authority. If
+   `<workspace>/state/setup-progress.json` disagrees with actual config,
+   remote/server state, secret metadata, provider health, or service health — or
+   if setup cannot confidently determine the safe next step — run
+   `pnpm run brainctl setup reset --workspace <name> --path <workspace> --dry-run`,
+   then reset with `--yes` when appropriate, and rerun `setup inspect/status` plus
+   guarded live/status checks. Reset before guessing, forcing inconsistent state,
+   or using destructive flags; it must remove only setup progress metadata and
+   must not delete secrets, config, backups, logs, documents, provider sessions,
+   Telegram state, or other private data.
+7. Bootstrap Telegram as the first primary entrypoint when the user wants live
    setup. Default admin bootstrap is first-user pairing: the first Telegram
    user/chat to message the newly configured bot becomes the paired/admin
    identity in private state. Explicit admin allowlists and optional `/pair`
    code bootstrap remain advanced paths. Do not require Composio or other
    optional integrations.
-7. Ask before using any real remote host, credential, Telegram token/admin ID,
+8. Ask before using any real remote host, credential, Telegram token/admin ID,
    provider auth, systemd unit, or secret store.
-8. Keep real workspace config, env files, tokens, Telegram IDs, logs, generated
+9. Keep real workspace config, env files, tokens, Telegram IDs, logs, generated
    artifacts, hostnames, and repo-registry state outside git.
-9. Run `pnpm run check` after setup, documentation, or runtime changes.
+10. Run `pnpm run check` after setup, documentation, or runtime changes.

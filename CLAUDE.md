@@ -21,6 +21,13 @@ Claude Code should follow the same repository instructions as Codex:
 - Keep private workspace data, env files, credentials, generated artifacts,
   logs, chat transcripts, Telegram IDs, hostnames, and repo-registry state out
   of source control.
+- Treat setup progress state as a resume aid, not authority. If saved setup
+  progress conflicts with real workspace/remote/server state, or setup cannot
+  identify the safe next step, use `brainctl setup reset` to clear only
+  `state/setup-progress.json`, then rerun setup inspect/status and guarded
+  live/status checks. Reset before guessing or forcing inconsistent state; it
+  must not delete secrets, config, backups, logs, documents, provider sessions,
+  Telegram state, or other private data.
 
 This file intentionally stays small so `AGENTS.md` remains the shared source of
 truth for both Codex and Claude Code agents.
