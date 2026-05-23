@@ -194,7 +194,7 @@ test("brainctl setup rerun surfaces remote resume context before first-run quest
     assert.equal(statusJson.details.resumeProbe.target, "remote");
     assert.equal(statusJson.details.resumeProbe.firstAction, "inspect-remote-progress");
     assert.equal(statusJson.details.resumeProbe.progressPath, "/home/brain/.brain/workspace/state/setup-progress.json");
-    assert.match(statusJson.details.resumeProbe.command, /ssh brain-prod/);
+    assert.match(statusJson.details.resumeProbe.command, /ssh brain@brain-prod/);
     assert.match(statusJson.details.resumeProbe.command, /setup status/);
     assert.match(statusJson.details.resumeProbe.note, /before restarting the setup wizard/);
 
@@ -578,41 +578,117 @@ test("brainctl setup reset only removes setup progress metadata", async () => {
   }
 });
 
-test("brainctl setup defaults renders concise remote choices and hides plumbing", () => {
-  const result = spawnBrainctl(["setup", "defaults", "--target", "remote", "--workspace", "personal"]);
-  assert.equal(result.status, 0, result.stderr);
-  const parsed = JSON.parse(result.stdout) as {
-    ok: boolean;
-    details: {
-      decisions: Array<{ decision: string; default: string }>;
-      safety: string[];
-      setupFlow: { coreSteps: Array<{ step: string; prompt: string }>; orderingNotes: string[] };
-      advanced?: unknown;
-    };
-  };
-  assert.equal(parsed.ok, true);
-  assert.deepEqual(parsed.details.decisions.map((item) => item.decision), ["Setup mode", "Remote SSH host", "Remote SSH user", "Source checkout", "Private workspace", "Initial workspace"]);
-  assert.equal(parsed.details.decisions.find((item) => item.decision === "Remote SSH host")?.default, "ask: server IP or DNS name");
-  assert.equal(parsed.details.decisions.find((item) => item.decision === "Remote SSH user")?.default, "root");
-  assert.equal(parsed.details.decisions.find((item) => item.decision === "Source checkout")?.default, "/home/brain/brain");
-  assert.equal(parsed.details.decisions.find((item) => item.decision === "Private workspace")?.default, "/home/brain/.brain/workspace");
-  assert.deepEqual(parsed.details.setupFlow.coreSteps.map((item) => item.step), ["essential-runtime-choices", "configure-verify-codex-auth", "telegram-connection", "private-data-repo", "composio-accounts"]);
-  assert.ok(parsed.details.setupFlow.orderingNotes.some((item) => /provider is Codex/.test(item)));
-  assert.ok(parsed.details.setupFlow.orderingNotes.some((item) => /Codex auth before starting the service/.test(item)));
-  assert.ok(parsed.details.safety.some((item) => /outside git/.test(item)));
-  assert.equal(parsed.details.advanced, undefined);
-  assert.doesNotMatch(result.stdout, /serviceUser|serviceName|secretsEnv|runtimeConfig|pnpm caveat|package manager|srv\/brain/);
+test("brainctl setup defaults renders concise remote choices and persists ignored remote context", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-setup-defaults-"));
+  try {
+    await initRepoWithPrivateIgnore(root);
 
-  const verbose = spawnBrainctl(["setup", "defaults", "--target", "remote", "--workspace", "personal", "--ssh-host", "203.0.113.10", "--ssh-user", "ubuntu", "--verbose"]);
-  assert.equal(verbose.status, 0, verbose.stderr);
-  const verboseJson = JSON.parse(verbose.stdout) as { details: { decisions: Array<{ decision: string; default: string }>; advanced: { ssh: { host: string; user: string }; serviceUser: string; serviceName: string; paths: { runtimeConfig: string; secretsEnv: string } } } };
-  assert.equal(verboseJson.details.decisions.find((item) => item.decision === "Remote SSH host")?.default, "203.0.113.10");
-  assert.equal(verboseJson.details.decisions.find((item) => item.decision === "Remote SSH user")?.default, "ubuntu");
-  assert.deepEqual(verboseJson.details.advanced.ssh, { host: "203.0.113.10", user: "ubuntu" });
-  assert.equal(verboseJson.details.advanced.serviceUser, "brain");
-  assert.equal(verboseJson.details.advanced.serviceName, "brain-personal");
-  assert.equal(verboseJson.details.advanced.paths.runtimeConfig, "/home/brain/.brain/workspace/config/runtime.yaml");
-  assert.equal(verboseJson.details.advanced.paths.secretsEnv, "/home/brain/.brain/workspace/secrets/secrets.env");
+    const result = spawnBrainctl(["setup", "defaults", "--target", "remote", "--workspace", "personal", "--repo", root]);
+    assert.equal(result.status, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout) as {
+      ok: boolean;
+      details: {
+        decisions: Array<{ decision: string; default: string }>;
+        safety: string[];
+        setupFlow: { coreSteps: Array<{ step: string; prompt: string }>; orderingNotes: string[] };
+        localSetupContext: { wrote: boolean; path: string; mode: string; git: { ignored: boolean; tracked: boolean } };
+        advanced?: unknown;
+      };
+    };
+    assert.equal(parsed.ok, true);
+    assert.deepEqual(parsed.details.decisions.map((item) => item.decision), ["Setup mode", "Remote SSH host", "Remote SSH user", "Source checkout", "Private workspace", "Initial workspace"]);
+    assert.equal(parsed.details.decisions.find((item) => item.decision === "Remote SSH host")?.default, "ask: server IP or DNS name");
+    assert.equal(parsed.details.decisions.find((item) => item.decision === "Remote SSH user")?.default, "root");
+    assert.equal(parsed.details.decisions.find((item) => item.decision === "Source checkout")?.default, "/home/brain/brain");
+    assert.equal(parsed.details.decisions.find((item) => item.decision === "Private workspace")?.default, "/home/brain/.brain/workspace");
+    assert.deepEqual(parsed.details.setupFlow.coreSteps.map((item) => item.step), ["essential-runtime-choices", "configure-verify-codex-auth", "telegram-connection", "private-data-repo", "composio-accounts"]);
+    assert.ok(parsed.details.setupFlow.orderingNotes.some((item) => /provider is Codex/.test(item)));
+    assert.ok(parsed.details.setupFlow.orderingNotes.some((item) => /Codex auth before starting the service/.test(item)));
+    assert.ok(parsed.details.safety.some((item) => /outside git/.test(item)));
+    assert.equal(parsed.details.localSetupContext.wrote, true);
+    assert.equal(parsed.details.localSetupContext.mode, "0600");
+    assert.equal(parsed.details.localSetupContext.git.ignored, true);
+    assert.equal(parsed.details.localSetupContext.git.tracked, false);
+    assert.equal(parsed.details.advanced, undefined);
+    assert.doesNotMatch(result.stdout, /serviceUser|serviceName|secretsEnv|runtimeConfig|pnpm caveat|package manager|srv\/brain/);
+
+    const contextPath = path.join(root, "private", "setup-context.json");
+    const context = JSON.parse(await readFile(contextPath, "utf8")) as { target: string; workspaceRoot: string; repoPath: string; sshHost?: string; sshUser: string; secretValuesStored: boolean };
+    assert.equal(context.target, "remote");
+    assert.equal(context.workspaceRoot, "/home/brain/.brain/workspace");
+    assert.equal(context.repoPath, "/home/brain/brain");
+    assert.equal(context.sshHost, undefined);
+    assert.equal(context.sshUser, "root");
+    assert.equal(context.secretValuesStored, false);
+    assert.equal((await stat(contextPath)).mode & 0o777, 0o600);
+
+    const verbose = spawnBrainctl(["setup", "defaults", "--target", "remote", "--workspace", "personal", "--repo", root, "--ssh-host", "203.0.113.10", "--ssh-user", "ubuntu", "--verbose"]);
+    assert.equal(verbose.status, 0, verbose.stderr);
+    const verboseJson = JSON.parse(verbose.stdout) as { details: { decisions: Array<{ decision: string; default: string }>; advanced: { ssh: { host: string; user: string }; serviceUser: string; serviceName: string; paths: { runtimeConfig: string; secretsEnv: string } } } };
+    assert.equal(verboseJson.details.decisions.find((item) => item.decision === "Remote SSH host")?.default, "203.0.113.10");
+    assert.equal(verboseJson.details.decisions.find((item) => item.decision === "Remote SSH user")?.default, "ubuntu");
+    assert.deepEqual(verboseJson.details.advanced.ssh, { host: "203.0.113.10", user: "ubuntu" });
+    assert.equal(verboseJson.details.advanced.serviceUser, "brain");
+    assert.equal(verboseJson.details.advanced.serviceName, "brain-personal");
+    assert.equal(verboseJson.details.advanced.paths.runtimeConfig, "/home/brain/.brain/workspace/config/runtime.yaml");
+    assert.equal(verboseJson.details.advanced.paths.secretsEnv, "/home/brain/.brain/workspace/secrets/secrets.env");
+
+    const updatedContext = JSON.parse(await readFile(contextPath, "utf8")) as { sshHost: string; sshUser: string };
+    assert.equal(updatedContext.sshHost, "203.0.113.10");
+    assert.equal(updatedContext.sshUser, "ubuntu");
+
+    const status = spawnBrainctl(["setup", "status", "--repo", root, "--workspace", "personal"]);
+    assert.equal(status.status, 0, status.stderr);
+    const statusJson = JSON.parse(status.stdout) as { summary: string; details: { localSetupContext: { present: boolean }; resumeProbe: { command: string } } };
+    assert.match(statusJson.summary, /prior remote setup context found/);
+    assert.equal(statusJson.details.localSetupContext.present, true);
+    assert.match(statusJson.details.resumeProbe.command, /ssh ubuntu@203\.0\.113\.10/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brainctl setup refuses remote context writes when private path is not git-ignored", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-setup-unsafe-context-"));
+  try {
+    const init = spawnSync("git", ["init", "-q"], { cwd: root, encoding: "utf8" });
+    assert.equal(init.status, 0, init.stderr);
+
+    const result = spawnBrainctl(["setup", "defaults", "--target", "remote", "--workspace", "personal", "--repo", root, "--ssh-host", "brain-prod"]);
+    assert.equal(result.status, 1);
+    const parsed = JSON.parse(result.stdout) as { ok: boolean; summary: string; details: { localSetupContext: { wrote: boolean; skipped: string; git: { ignored: boolean; tracked: boolean } } } };
+    assert.equal(parsed.ok, false);
+    assert.match(parsed.summary, /not persisted safely/);
+    assert.equal(parsed.details.localSetupContext.wrote, false);
+    assert.match(parsed.details.localSetupContext.skipped, /not ignored by git/);
+    assert.equal(parsed.details.localSetupContext.git.ignored, false);
+    assert.equal(parsed.details.localSetupContext.git.tracked, false);
+    await assert.rejects(stat(path.join(root, "private", "setup-context.json")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brainctl setup --target remote writes only local resume context and not remote workspace dirs", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-setup-remote-target-"));
+  try {
+    await initRepoWithPrivateIgnore(root);
+    const remoteWorkspace = path.join(root, "remote-workspace");
+    const result = spawnBrainctl(["setup", "--target", "remote", "--workspace", "personal", "--repo", root, "--ssh-host", "brain-prod", "--ssh-user", "ubuntu", "--path", remoteWorkspace]);
+    assert.equal(result.status, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout) as { ok: boolean; summary: string; details: { localSetupContext: { wrote: boolean; context: { target: string; workspaceRoot: string; sshHost: string; sshUser: string } }; sideEffects: string } };
+    assert.equal(parsed.ok, true);
+    assert.match(parsed.summary, /remote setup context persisted/);
+    assert.equal(parsed.details.localSetupContext.wrote, true);
+    assert.equal(parsed.details.localSetupContext.context.target, "remote");
+    assert.equal(parsed.details.localSetupContext.context.workspaceRoot, remoteWorkspace);
+    assert.equal(parsed.details.localSetupContext.context.sshHost, "brain-prod");
+    assert.equal(parsed.details.localSetupContext.context.sshUser, "ubuntu");
+    assert.match(parsed.details.sideEffects, /setup-context\.json/);
+    await assert.rejects(stat(remoteWorkspace));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("brainctl backup, web setup, and Composio status are safe and metadata-only", async () => {
@@ -736,4 +812,16 @@ function spawnBrainctl(args: string[], env: Record<string, string> = {}) {
     encoding: "utf8",
     env: { ...process.env, ...env },
   });
+}
+
+async function initRepoWithPrivateIgnore(root: string): Promise<void> {
+  await mkdir(path.join(root, "private"), { recursive: true });
+  await writeFile(path.join(root, ".gitignore"), [
+    "private/*",
+    "!private/README.md",
+    "",
+  ].join("\n"));
+  await writeFile(path.join(root, "private", "README.md"), "private placeholder\n");
+  const init = spawnSync("git", ["init", "-q"], { cwd: root, encoding: "utf8" });
+  assert.equal(init.status, 0, init.stderr);
 }

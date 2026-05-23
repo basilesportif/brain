@@ -39,7 +39,7 @@ program.command("setup")
   .description("Create a private workspace directory scaffold without writing secrets.")
   .argument("[mode]", "optional mode: defaults, inspect, status, or reset")
   .option("--workspace <name>", "workspace id", DEFAULT_WORKSPACE_ID)
-  .option("--target <target>", "defaults target: local or remote", "local")
+  .option("--target <target>", "defaults target: local or remote")
   .option("--ssh-host <host>", "remote SSH IP/DNS host for setup defaults")
   .option("--ssh-user <user>", "remote SSH login user for setup defaults; defaults to root in remote mode")
   .option("--service-user <user>", "remote non-root service user for defaults", DEFAULT_SERVICE_USER)
@@ -53,7 +53,7 @@ program.command("setup")
   .option("--yes", "confirm setup reset should remove only state/setup-progress.json")
   .action(async (mode: string | undefined, options) => {
     if (mode === "defaults") {
-      return exitWith(setupDefaultsCommand(options));
+      return exitWith(await setupDefaultsCommand(options));
     }
     if (mode === "inspect" || mode === "status") {
       return exitWith(await setupInspectCommand({ ...options, config: options.config ?? "examples/config/runtime.yaml" }));
@@ -1617,6 +1617,11 @@ interface SetupInspectOptions {
   path?: string;
   config?: string;
   repo?: string;
+  target?: string;
+  sshHost?: string;
+  sshUser?: string;
+  serviceUser?: string;
+  dryRun?: boolean;
 }
 
 interface LocalSetupContext {
@@ -1630,6 +1635,35 @@ interface LocalSetupContext {
   repoPath?: string;
   configPath?: string;
   secretValuesStored?: false;
+}
+
+interface RemoteSetupDefaults {
+  serviceUser: string;
+  serviceHome: string;
+  sshHost?: string;
+  sshUser: string;
+  workspaceRoot: string;
+  repoPath: string;
+  configPath: string;
+}
+
+interface SetupContextGitSafety {
+  insideWorkTree: boolean;
+  tracked?: boolean;
+  ignored?: boolean;
+  safe: boolean;
+  reason?: string;
+}
+
+interface SetupContextWriteResult {
+  present: boolean;
+  path: string;
+  wrote: boolean;
+  metadata?: Awaited<ReturnType<typeof fileMetadata>>;
+  context?: LocalSetupContext;
+  skipped?: string;
+  warning?: string;
+  git?: SetupContextGitSafety;
 }
 
 interface SetupResetOptions {
@@ -1646,6 +1680,8 @@ interface SetupDefaultsOptions {
   sshUser?: string;
   serviceUser?: string;
   path?: string;
+  repo?: string;
+  dryRun?: boolean;
   verbose?: boolean;
 }
 
@@ -1657,15 +1693,16 @@ interface ConfigRef {
   optional?: boolean;
 }
 
-function setupDefaultsCommand(options: SetupDefaultsOptions): CliResult {
+async function setupDefaultsCommand(options: SetupDefaultsOptions): Promise<CliResult> {
   const target = normalizeSetupDefaultsTarget(options.target);
   if (!target) return { ok: false, summary: "setup defaults target must be local or remote", details: { supported: ["local", "remote"] } };
-  const sshUser = target === "remote" ? (options.sshUser || "root") : undefined;
-  const sshHost = target === "remote" ? (options.sshHost || "ask: server IP or DNS name") : undefined;
+  const remoteDefaults = target === "remote" ? remoteSetupDefaults(options) : undefined;
+  const sshUser = remoteDefaults?.sshUser;
+  const sshHost = target === "remote" ? (remoteDefaults?.sshHost ?? "ask: server IP or DNS name") : undefined;
   const serviceUser = options.serviceUser || DEFAULT_SERVICE_USER;
   const serviceHome = target === "remote" ? serviceUserHome(serviceUser) : "~";
-  const workspaceRoot = options.path ?? defaultWorkspaceRootDisplay(options.workspace, serviceHome);
-  const repoCheckout = target === "remote" ? `${serviceHome}/brain` : "<this checkout>";
+  const workspaceRoot = remoteDefaults?.workspaceRoot ?? (options.path ?? defaultWorkspaceRootDisplay(options.workspace, serviceHome));
+  const repoCheckout = remoteDefaults?.repoPath ?? "<this checkout>";
   const serviceName = `brain-${options.workspace}`;
   const decisions = [
     { decision: "Setup mode", default: target === "remote" ? "Remote Ubuntu server over SSH" : "Local private workspace" },
@@ -1686,6 +1723,23 @@ function setupDefaultsCommand(options: SetupDefaultsOptions): CliResult {
     ],
     setupFlow: conciseSetupFlow(),
   };
+  let remoteContextWrite: SetupContextWriteResult | undefined;
+  if (remoteDefaults) {
+    const context = remoteLocalSetupContext(options, remoteDefaults);
+    remoteContextWrite = options.dryRun
+      ? {
+        present: false,
+        path: localSetupContextPath(path.resolve(options.repo ?? process.cwd())),
+        wrote: false,
+        skipped: "dry run; local remote setup context was not written",
+        context,
+      }
+      : await writeLocalSetupContext(options.repo, context);
+    details.localSetupContext = setupContextWriteSummary(remoteContextWrite, options.verbose);
+    details.sideEffects = remoteContextWrite.wrote
+      ? "updated ignored local private/setup-context.json with non-secret remote resume metadata"
+      : remoteContextWrite.skipped ?? "none";
+  }
   if (options.verbose) {
     details.advanced = {
       target,
@@ -1708,8 +1762,10 @@ function setupDefaultsCommand(options: SetupDefaultsOptions): CliResult {
   }
 
   return {
-    ok: true,
-    summary: `${target} setup defaults ready; confirm concise choices or pass --verbose for implementation details`,
+    ok: remoteContextWrite ? remoteContextWrite.wrote || Boolean(options.dryRun) : true,
+    summary: remoteContextWrite && !remoteContextWrite.wrote && !options.dryRun
+      ? "remote setup defaults ready, but local setup context was not persisted safely"
+      : `${target} setup defaults ready; confirm concise choices or pass --verbose for implementation details`,
     details,
   };
 }
@@ -1755,6 +1811,48 @@ function serviceUserHome(serviceUser: string): string {
   return serviceUser === "root" ? "/root" : `/home/${serviceUser}`;
 }
 
+function remoteSetupDefaults(options: Pick<SetupDefaultsOptions, "workspace" | "path" | "sshHost" | "sshUser" | "serviceUser">): RemoteSetupDefaults {
+  const serviceUser = options.serviceUser || DEFAULT_SERVICE_USER;
+  const serviceHome = serviceUserHome(serviceUser);
+  const workspaceRoot = normalizeRemoteDisplayPath(options.path ?? defaultWorkspaceRootDisplay(options.workspace, serviceHome), serviceHome);
+  const repoPath = `${serviceHome}/brain`;
+  return {
+    serviceUser,
+    serviceHome,
+    sshHost: nonPromptValue(options.sshHost),
+    sshUser: options.sshUser || "root",
+    workspaceRoot,
+    repoPath,
+    configPath: `${workspaceRoot}/config/runtime.yaml`,
+  };
+}
+
+function remoteLocalSetupContext(options: Pick<SetupDefaultsOptions, "workspace">, defaults: RemoteSetupDefaults): LocalSetupContext {
+  return {
+    version: 1,
+    target: "remote",
+    workspace: options.workspace,
+    workspaceRoot: defaults.workspaceRoot,
+    updatedAt: new Date().toISOString(),
+    sshHost: defaults.sshHost,
+    sshUser: defaults.sshUser,
+    repoPath: defaults.repoPath,
+    configPath: defaults.configPath,
+    secretValuesStored: false,
+  };
+}
+
+function normalizeRemoteDisplayPath(value: string, home: string): string {
+  if (value === "~") return home;
+  if (value.startsWith("~/")) return `${home}/${value.slice(2)}`;
+  return value;
+}
+
+function nonPromptValue(value: string | undefined): string | undefined {
+  if (!value || value.startsWith("ask:") || /^<.+>$/.test(value)) return undefined;
+  return value;
+}
+
 function defaultWorkspaceRoot(workspace: string): string {
   return path.join(process.env.HOME ?? ".", ".brain", workspace === DEFAULT_WORKSPACE_ID ? "workspace" : path.join("workspaces", workspace));
 }
@@ -1764,8 +1862,10 @@ function defaultWorkspaceRootDisplay(workspace: string, home: string): string {
 }
 
 async function setupCommand(options: SetupInspectOptions & { dryRun?: boolean; force?: boolean; replace?: boolean }): Promise<CliResult> {
+  const requestedTarget = options.target ? normalizeSetupDefaultsTarget(options.target) : undefined;
+  if (options.target && !requestedTarget) return { ok: false, summary: "setup target must be local or remote", details: { supported: ["local", "remote"] } };
   const preflight = await setupInspectDetails(options);
-  if (preflight.resumeProbe?.target === "remote" && !options.path && !options.force && !options.replace) {
+  if (preflight.resumeProbe?.target === "remote" && !requestedTarget && !options.path && !options.force && !options.replace) {
     return {
       ok: true,
       summary: "prior remote setup context found; inspect remote progress before asking first-run setup questions",
@@ -1777,6 +1877,37 @@ async function setupCommand(options: SetupInspectOptions & { dryRun?: boolean; f
         setupWizard: setupResumeWizard(preflight),
         inspection: preflight,
         sideEffects: "none",
+      },
+    };
+  }
+  if (requestedTarget === "remote") {
+    const defaults = remoteSetupDefaults(options);
+    const context = remoteLocalSetupContext(options, defaults);
+    const contextWrite = options.dryRun
+      ? {
+        present: false,
+        path: localSetupContextPath(path.resolve(options.repo ?? process.cwd())),
+        wrote: false,
+        skipped: "dry run; local remote setup context was not written",
+        context,
+      }
+      : await writeLocalSetupContext(options.repo, context);
+    return {
+      ok: contextWrite.wrote || Boolean(options.dryRun),
+      summary: contextWrite.wrote
+        ? "remote setup context persisted; inspect remote progress before local first-run questions"
+        : options.dryRun
+          ? "remote setup context plan ready (dry run)"
+          : "remote setup context was not persisted safely",
+      details: {
+        workspace: options.workspace,
+        workspaceRoot: defaults.workspaceRoot,
+        localSetupContext: setupContextWriteSummary(contextWrite, true),
+        resumeProbe: buildSetupResumeProbe({ present: true, path: contextWrite.path, context }, defaults.workspaceRoot, options.workspace),
+        inspection: preflight,
+        sideEffects: contextWrite.wrote
+          ? "updated ignored local private/setup-context.json with non-secret remote resume metadata"
+          : "none",
       },
     };
   }
@@ -1948,7 +2079,7 @@ async function setupInspectDetails(options: SetupInspectOptions) {
 }
 
 async function readLocalSetupContext(repoRoot: string, workspace: string): Promise<{ present: boolean; path: string; context?: LocalSetupContext; warning?: string; note?: string }> {
-  const contextPath = path.join(repoRoot, LOCAL_SETUP_CONTEXT_RELATIVE_PATH);
+  const contextPath = localSetupContextPath(repoRoot);
   const metadata = await fileMetadata(contextPath);
   if (!metadata.present) return { present: false, path: contextPath, note: "no local setup context pointer found" };
   try {
@@ -1980,6 +2111,97 @@ async function readLocalSetupContext(repoRoot: string, workspace: string): Promi
   }
 }
 
+function localSetupContextPath(repoRoot: string): string {
+  return path.join(repoRoot, LOCAL_SETUP_CONTEXT_RELATIVE_PATH);
+}
+
+async function writeLocalSetupContext(repoRootInput: string | undefined, context: LocalSetupContext): Promise<SetupContextWriteResult> {
+  const repoRoot = path.resolve(repoRootInput ?? process.cwd());
+  const contextPath = localSetupContextPath(repoRoot);
+  const repoInfo = await stat(repoRoot).catch(() => undefined);
+  if (!repoInfo?.isDirectory()) {
+    return {
+      present: false,
+      path: contextPath,
+      wrote: false,
+      skipped: repoInfo ? "repository root is not a directory; local setup context was not written" : "repository root missing; local setup context was not written",
+      context,
+    };
+  }
+  const git = localSetupContextGitSafety(repoRoot);
+  if (!git.safe) {
+    return {
+      present: false,
+      path: contextPath,
+      wrote: false,
+      skipped: git.reason ?? "refusing to write local setup context to a git-managed path",
+      context,
+      git,
+    };
+  }
+  try {
+    await mkdir(path.dirname(contextPath), { recursive: true, mode: 0o700 });
+    await writeFile(contextPath, `${JSON.stringify(context, null, 2)}\n`, { mode: 0o600 });
+    await chmod(contextPath, 0o600);
+    return { present: true, path: contextPath, wrote: true, metadata: await fileMetadata(contextPath), context, git };
+  } catch (error) {
+    return {
+      present: false,
+      path: contextPath,
+      wrote: false,
+      skipped: `could not write local setup context: ${errorMessage(error)}`,
+      context,
+      git,
+    };
+  }
+}
+
+function localSetupContextGitSafety(repoRoot: string): SetupContextGitSafety {
+  const inside = spawnSync("git", ["-C", repoRoot, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8" });
+  if ((inside.status ?? 0) !== 0 || inside.stdout.trim() !== "true") {
+    return { insideWorkTree: false, safe: true };
+  }
+  const tracked = spawnSync("git", ["-C", repoRoot, "ls-files", "--error-unmatch", "--", LOCAL_SETUP_CONTEXT_RELATIVE_PATH], { encoding: "utf8" });
+  if ((tracked.status ?? 0) === 0) {
+    return {
+      insideWorkTree: true,
+      tracked: true,
+      ignored: false,
+      safe: false,
+      reason: "refusing to write setup context because private/setup-context.json is tracked by git",
+    };
+  }
+  const ignored = spawnSync("git", ["-C", repoRoot, "check-ignore", "--quiet", "--", LOCAL_SETUP_CONTEXT_RELATIVE_PATH], { encoding: "utf8" });
+  if ((ignored.status ?? 0) !== 0) {
+    return {
+      insideWorkTree: true,
+      tracked: false,
+      ignored: false,
+      safe: false,
+      reason: "refusing to write setup context because private/setup-context.json is not ignored by git",
+    };
+  }
+  return { insideWorkTree: true, tracked: false, ignored: true, safe: true };
+}
+
+function setupContextWriteSummary(result: SetupContextWriteResult, includeContext = false): Record<string, unknown> {
+  return {
+    present: result.present,
+    path: result.path,
+    wrote: result.wrote,
+    mode: result.metadata?.mode,
+    sizeBytes: result.metadata?.sizeBytes,
+    skipped: result.skipped,
+    warning: result.warning,
+    git: result.git,
+    context: includeContext ? result.context : result.context ? {
+      target: result.context.target,
+      workspace: result.context.workspace,
+      secretValuesStored: false,
+    } : undefined,
+  };
+}
+
 function buildSetupResumeProbe(
   localSetupContext: Awaited<ReturnType<typeof readLocalSetupContext>>,
   workspaceRoot: string,
@@ -1998,13 +2220,14 @@ function buildSetupResumeProbe(
     const progressPath = setupProgressPath(context.workspaceRoot);
     const remoteRepo = context.repoPath ?? "<remote-brain-checkout>";
     const remoteStatusCommand = `cd ${shellArg(remoteRepo)} && pnpm run brainctl setup status --workspace ${shellArg(workspace)} --path ${shellArg(context.workspaceRoot)}${context.configPath ? ` --config ${shellArg(context.configPath)}` : ""}`;
+    const sshDestination = context.sshHost ? remoteSshDestination(context.sshHost, context.sshUser) : undefined;
     return {
       target: "remote",
       firstAction: "inspect-remote-progress",
       progressPath,
       sshHost: context.sshHost ?? "<ssh-host>",
       sshUser: context.sshUser,
-      command: context.sshHost ? `ssh ${shellArg(context.sshHost)} ${shellArg(remoteStatusCommand)}` : `ssh <ssh-host> ${shellArg(remoteStatusCommand)}`,
+      command: sshDestination ? `ssh ${shellArg(sshDestination)} ${shellArg(remoteStatusCommand)}` : `ssh <ssh-host> ${shellArg(remoteStatusCommand)}`,
       note: "Prior setup context points at a remote workspace. Ask only for permission or a missing SSH host, then run this remote metadata check before restarting the setup wizard.",
     };
   }
@@ -2015,6 +2238,11 @@ function buildSetupResumeProbe(
     command: `pnpm run brainctl setup status --workspace ${shellArg(workspace)} --path ${shellArg(context.workspaceRoot)}${context.configPath ? ` --config ${shellArg(context.configPath)}` : ""}`,
     note: "Prior setup context points at a local private workspace; inspect this progress before asking first-run setup questions.",
   };
+}
+
+function remoteSshDestination(host: string, user: string | undefined): string {
+  if (!user || host.includes("@")) return host;
+  return `${user}@${host}`;
 }
 
 function buildSetupPlan(input: {

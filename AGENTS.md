@@ -55,11 +55,13 @@ docs and skills remain referenced files.
    host. Use the assistant-agent-logic setup-server skill at
    `/home/tim/pkg/tim/assistant-agent-logic/config/skills/setup-server.md` to
    prepare the server with its own non-root Brain service user.
-   As soon as the user confirms the remote target, write a non-secret local
-   resume pointer at ignored path `private/setup-context.json` with target,
-   workspace, remote workspace path, SSH host/user, remote repo path, and config
-   path. This file is private/local only and must never be committed; it lets a
-   later Codex/Claude session find remote progress before restarting the wizard.
+   As soon as the user confirms the remote target, run
+   `brainctl setup defaults --target remote` or
+   `brainctl setup --target remote` with the known host/path fields so the CLI
+   writes a non-secret local resume pointer at ignored path
+   `private/setup-context.json`. The CLI refuses tracked or non-ignored paths.
+   This file is private/local only and must never be committed; it lets a later
+   Codex/Claude session find remote progress before restarting the wizard.
 6. Treat the root-level `setup` request plus `brainctl setup` as the current
    safe setup flow. Keep it provider-agnostic where possible: Codex first, with
    Claude Code recorded only as a provider placeholder until real wiring exists.

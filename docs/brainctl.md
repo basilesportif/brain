@@ -7,6 +7,10 @@ questions. It reports the current private `state/setup-progress.json` and, when
 present, the ignored local `private/setup-context.json` pointer for a prior
 remote setup. If a remote pointer exists, follow `resumeProbe.command` to inspect
 remote metadata before restarting any wizard prompts.
+For remote installs, `setup defaults --target remote` and
+`setup --target remote` create/update that ignored local pointer immediately
+with non-secret host/path metadata, refusing to write if the path is not safely
+git-ignored.
 
 ## Commands
 
@@ -78,7 +82,8 @@ private workspace, initial workspace name, and the core setup flow. For remote
 setup, ask for an SSH IP/DNS host and SSH login username; if no username is
 given, default the SSH login to `root` for bootstrap. Pass `--verbose` only
 when you need derived config/secrets/log paths, service-user details, or
-copyable commands.
+copyable commands. In remote mode it also writes the ignored local
+`private/setup-context.json` resume pointer unless `--dry-run` is used.
 
 The normal core setup flow is:
 

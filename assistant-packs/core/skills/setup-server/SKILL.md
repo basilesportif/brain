@@ -52,7 +52,9 @@ Use this skill when a user asks to prepare a fresh Ubuntu host for Brain.
 7. Write/update metadata-only setup progress in private state, and ensure the
    local Brain checkout has an ignored non-secret `private/setup-context.json`
    pointer for the remote host/workspace so reruns can find that progress before
-   asking first-run questions.
+   asking first-run questions. Prefer `brainctl setup defaults --target remote`
+   or `brainctl setup --target remote` to create/update this pointer; the CLI
+   refuses unsafe tracked or non-ignored paths.
 8. Follow the core wizard order: Telegram token ref, private data/backup repo,
    Composio accounts if needed, then essential runtime choices.
 9. Configure/verify Codex auth before service start or live Telegram traffic;

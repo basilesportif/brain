@@ -28,6 +28,9 @@ that first-run question, setup should run `brainctl setup status` to inspect
 existing private setup progress and any ignored `private/setup-context.json`
 remote pointer, then resume from saved state when present. Do not `cd` into a
 separate setup directory.
+For remote installs, `brainctl setup defaults --target remote` or
+`brainctl setup --target remote` writes that ignored non-secret pointer early so
+an interrupted setup can be resumed after a later pull.
 
 After safe pre-live validation, setup should confirm essential runtime choices
 and, when the provider is Codex, configure or verify Codex auth before service

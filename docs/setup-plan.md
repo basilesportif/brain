@@ -106,9 +106,12 @@ config, secret metadata, provider health, and service status before continuing.
 When a remote target is selected or discovered, save an ignored local pointer at
 `private/setup-context.json` with non-secret metadata such as target, workspace,
 SSH host/user, remote repo path, remote workspace path, and remote config path.
-That file may contain private host/path metadata, is outside version control,
-and must never be committed. It exists so a later Codex/Claude session can find
-remote progress before asking first-run questions.
+`brainctl setup defaults --target remote` and `brainctl setup --target remote`
+write this pointer for the agent and refuse to write it unless the path is
+untracked and git-ignored. The file may contain private host/path metadata, is
+outside version control, and must never be committed. It exists so a later
+Codex/Claude session can find remote progress before asking first-run
+questions.
 
 ## First question after resume inspection: local directory or remote SSH server?
 
@@ -434,7 +437,9 @@ explicitly requested.
    The defaults ask for the remote SSH host/IP and default the SSH login user
    to `root` when omitted. They keep `/home/brain/brain` as the source checkout
    and `/home/brain/.brain/workspace` as the private workspace for the non-root
-   service user.
+   service user. They also create/update ignored local
+   `private/setup-context.json` with non-secret resume metadata so an
+   interrupted setup can survive a later `git pull`.
 2. Add or reuse a local SSH config entry:
 
    ```sshconfig
@@ -461,11 +466,13 @@ explicitly requested.
 4. Verify SSH as the service user through the local SSH config alias.
 5. Clone or update the Brain repo at the chosen path and run `pnpm install` if
    dependencies are needed, then `pnpm run check`.
-6. Create or update ignored local resume context in `private/setup-context.json`
-   with only non-secret metadata: target `remote`, workspace name, SSH
-   host/user, remote repo path, remote workspace path, and remote config path.
-   This lets a later interrupted setup inspect remote progress before asking
-   "local or remote?" again.
+6. Ensure the ignored local resume context exists in
+   `private/setup-context.json` with only non-secret metadata: target `remote`,
+   workspace name, SSH host/user, remote repo path, remote workspace path, and
+   remote config path. `brainctl setup defaults --target remote` or
+   `brainctl setup --target remote` should have created it before this point;
+   rerun one of those commands if it is missing. This lets a later interrupted
+   setup inspect remote progress before asking "local or remote?" again.
 7. Create the remote private workspace and config/secrets/log/state directories.
 8. Install placeholder runtime config with Telegram as the single primary
    entrypoint and selected provider recorded generically.

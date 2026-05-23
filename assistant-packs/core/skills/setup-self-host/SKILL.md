@@ -91,8 +91,13 @@ config/secret/service checks and continue from `setupWizard.nextIncompleteStep`.
 If no local context/progress exists, or the user says this is a different setup,
 then ask the first setup prompt below.
 
-When the user confirms a remote target, create/update ignored
-`private/setup-context.json` immediately with non-secret resume metadata:
+When the user confirms a remote target, immediately run
+`pnpm run brainctl setup defaults --target remote --workspace <name>` (add
+`--ssh-host`, `--ssh-user`, `--path`, and `--repo <repo-root>` when known) or
+`pnpm run brainctl setup --target remote ...` so Brain creates/updates the
+ignored `private/setup-context.json` pointer with non-secret resume metadata.
+The CLI refuses to write the pointer if that path is tracked or not ignored by
+git. The file shape is:
 
 ```json
 {

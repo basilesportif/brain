@@ -89,4 +89,6 @@ first-run questions. Start with `pnpm run brainctl setup status --repo
 ignored local `private/setup-context.json` pointer tells the agent which remote
 progress file to inspect, for example
 `/home/brain/.brain/workspace/state/setup-progress.json`, before asking whether
-the user wants local or remote setup again.
+the user wants local or remote setup again. Remote defaults/setup commands write
+this ignored pointer with non-secret metadata and refuse unsafe git-managed
+paths.
