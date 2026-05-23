@@ -48,10 +48,10 @@ The check validates that the repo structure exists, runtime config examples are 
 
 ```bash
 pnpm run build
-pnpm run brainctl -- doctor --config examples/config/runtime.yaml --pack assistant-packs/core
-pnpm run brainctl -- runtime smoke --config examples/config/runtime.yaml --workspace personal
-pnpm run brainctl -- operations plan --config examples/config/runtime.yaml --workspace personal
-pnpm run brainctl -- validate live --config examples/config/runtime.yaml --workspace personal --run-safe
+pnpm run brainctl doctor --config examples/config/runtime.yaml --pack assistant-packs/core
+pnpm run brainctl runtime smoke --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl operations plan --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl validate live --config examples/config/runtime.yaml --workspace personal --run-safe
 ```
 
 ## Design goals

@@ -29,13 +29,13 @@ Operators should override these through `BRAIN_WEB_PUBLIC_BASE_URL`, `BRAIN_WEB_
 pnpm --filter @brain/web run build
 pnpm --filter @brain/web run publish:page -- --dir /path/to/static-page --id demo-page --dry-run
 pnpm --filter @brain/web run prune:pages -- --dry-run
-pnpm run brainctl -- web setup --config examples/config/runtime.yaml --workspace personal \
+pnpm run brainctl web setup --config examples/config/runtime.yaml --workspace personal \
   --base-url http://203.0.113.10/pages --publish-root /srv/brain/pages
-pnpm run brainctl -- web status --config examples/config/runtime.yaml --workspace personal
-pnpm run brainctl -- web validate --dir /path/to/static-page
-pnpm run brainctl -- web publish --dir /path/to/static-page --id demo-page --dry-run
-pnpm run brainctl -- web manifest --manifest-path .brain/web-pages/manifest.json
-pnpm run brainctl -- web prune --dry-run
+pnpm run brainctl web status --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl web validate --dir /path/to/static-page
+pnpm run brainctl web publish --dir /path/to/static-page --id demo-page --dry-run
+pnpm run brainctl web manifest --manifest-path .brain/web-pages/manifest.json
+pnpm run brainctl web prune --dry-run
 ```
 
 No deployment is performed by this package. `brainctl web` is now the operator wrapper for validation, publish, manifest inspection, and TTL pruning; it still only copies into the configured runtime root/manifest and does not hand-copy files to a host or bypass the publisher boundary.

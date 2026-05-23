@@ -98,7 +98,7 @@ test("brainctl operations and live validation commands are non-mutating by defau
     assert.equal(systemd.status, 0, systemd.stderr);
     const systemdJson = JSON.parse(systemd.stdout) as { ok: boolean; details: { unit: string; sideEffects: string } };
     assert.equal(systemdJson.ok, true);
-    assert.match(systemdJson.details.unit, /ExecStart=pnpm run brainctl -- run/);
+    assert.match(systemdJson.details.unit, /ExecStart=pnpm run brainctl run/);
     assert.equal(systemdJson.details.sideEffects, "none");
 
     const validate = spawnBrainctl(["operations", "validate", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--repo", repoRoot, "--state", state, "--artifacts", artifacts, "--log", log]);

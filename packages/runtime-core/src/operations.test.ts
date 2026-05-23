@@ -20,7 +20,7 @@ test("operations plan renders systemd/update/rollback seams without side effects
   assert.match(plan.safety.join("\n"), /does not install systemd/);
 
   const unit = renderSystemdService(plan);
-  assert.match(unit, /ExecStart=pnpm run brainctl -- run/);
+  assert.match(unit, /ExecStart=pnpm run brainctl run/);
   assert.match(unit, /EnvironmentFile=-/);
   assert.match(unit, /Restart=on-failure/);
 });

@@ -257,8 +257,8 @@ on private workspace knowledge.
    directly or with:
 
    ```bash
-   pnpm run brainctl -- setup --workspace <workspace-name> --path <private-workspace-path>
-   pnpm run brainctl -- setup inspect --config <private-config> --workspace <workspace-name>
+   pnpm run brainctl setup --workspace <workspace-name> --path <private-workspace-path>
+   pnpm run brainctl setup inspect --config <private-config> --workspace <workspace-name>
    ```
 
 4. Copy `examples/config/runtime.yaml` or TOML into the private workspace config
@@ -276,18 +276,18 @@ on private workspace knowledge.
 7. Run current safe checks:
 
    ```bash
-   pnpm run brainctl -- setup status --config <private-config> --workspace <workspace-name>
-   pnpm run brainctl -- config validate <private-config>
-   pnpm run brainctl -- secrets check --config <private-config>
-   pnpm run brainctl -- backup plan --config <private-config> --workspace <workspace-name>
-   pnpm run brainctl -- web status --config <private-config> --workspace <workspace-name>
-   pnpm run brainctl -- composio status --config <private-config> --workspace <workspace-name>
-   pnpm run brainctl -- entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN \
+   pnpm run brainctl setup status --config <private-config> --workspace <workspace-name>
+   pnpm run brainctl config validate <private-config>
+   pnpm run brainctl secrets check --config <private-config>
+   pnpm run brainctl backup plan --config <private-config> --workspace <workspace-name>
+   pnpm run brainctl web status --config <private-config> --workspace <workspace-name>
+   pnpm run brainctl composio status --config <private-config> --workspace <workspace-name>
+   pnpm run brainctl entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN \
      --polling-state <workspace>/state/telegram-offset.json \
      --pairing-state <workspace>/state/telegram-pairing
-   pnpm run brainctl -- doctor --config <private-config> --pack assistant-packs/core
-   pnpm run brainctl -- operations validate --config <private-config> --workspace <workspace-name> --repo <repo-root>
-   pnpm run brainctl -- operations systemd --config <private-config> --workspace <workspace-name> --repo <repo-root>
+   pnpm run brainctl doctor --config <private-config> --pack assistant-packs/core
+   pnpm run brainctl operations validate --config <private-config> --workspace <workspace-name> --repo <repo-root>
+   pnpm run brainctl operations systemd --config <private-config> --workspace <workspace-name> --repo <repo-root>
    ```
 
 8. Use `brainctl run --fake --once --fake-text help` only for fake/dev smoke.
@@ -347,17 +347,17 @@ explicitly requested.
 Current commands are explicit and scriptable:
 
 ```bash
-pnpm run brainctl -- setup --workspace <name> --path <private-workspace-path>
-pnpm run brainctl -- doctor --config <runtime-config> --pack assistant-packs/core
-pnpm run brainctl -- config validate <runtime-config>
-pnpm run brainctl -- secrets check --config <runtime-config>
-pnpm run brainctl -- entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN \
+pnpm run brainctl setup --workspace <name> --path <private-workspace-path>
+pnpm run brainctl doctor --config <runtime-config> --pack assistant-packs/core
+pnpm run brainctl config validate <runtime-config>
+pnpm run brainctl secrets check --config <runtime-config>
+pnpm run brainctl entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN \
   --polling-state <workspace>/state/telegram-offset.json \
   --pairing-state <workspace>/state/telegram-pairing
-pnpm run brainctl -- start --config <runtime-config> --workspace <name>
-pnpm run brainctl -- run --config <runtime-config> --workspace <name> --fake --once --fake-text help
-pnpm run brainctl -- operations validate --config <runtime-config> --workspace <name> --repo <checkout>
-pnpm run brainctl -- operations systemd --config <runtime-config> --workspace <name> --repo <checkout>
+pnpm run brainctl start --config <runtime-config> --workspace <name>
+pnpm run brainctl run --config <runtime-config> --workspace <name> --fake --once --fake-text help
+pnpm run brainctl operations validate --config <runtime-config> --workspace <name> --repo <checkout>
+pnpm run brainctl operations systemd --config <runtime-config> --workspace <name> --repo <checkout>
 ```
 
 The CLI should print paths and actions, but not secret values.

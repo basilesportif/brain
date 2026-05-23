@@ -50,7 +50,7 @@ export function createOperationsPlan(input: OperationsPlanInput): OperationsPlan
   const logPath = path.resolve(input.logPath);
   const environmentFile = path.resolve(input.environmentFile ?? path.join(path.dirname(stateRoot), "config", `${serviceName}.env`));
   const pnpm = shellWord(input.pnpmBinary ?? "pnpm");
-  const brainctl = `${pnpm} --dir ${shellWord(repoPath)} run brainctl --`;
+  const brainctl = `${pnpm} --dir ${shellWord(repoPath)} run brainctl`;
   const runtimeCommand = [
     "run",
     "--config",
@@ -122,7 +122,6 @@ export function renderSystemdService(plan: OperationsPlan): string {
     "pnpm",
     "run",
     "brainctl",
-    "--",
     ...plan.runtimeCommand,
   ].map(systemdEscapeArg).join(" ");
 
@@ -166,7 +165,7 @@ export function createGuardedLiveValidationPlan(input: {
   telegramTokenRef?: string;
   allowLive?: boolean;
 }): GuardedLiveValidationPlan {
-  const brainctl = "pnpm run brainctl --";
+  const brainctl = "pnpm run brainctl";
   const allowLive = Boolean(input.allowLive);
   const codexTransport = input.codexTransport ?? "stub";
   const checks: GuardedLiveValidationPlan["checks"] = [

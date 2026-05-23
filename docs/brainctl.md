@@ -5,49 +5,49 @@
 ## Commands
 
 ```bash
-pnpm run brainctl -- setup --workspace personal --path ~/.brain/workspaces/personal
-pnpm run brainctl -- setup inspect --config ~/.brain/workspaces/personal/config/runtime.yaml --workspace personal
-pnpm run brainctl -- setup status --config ~/.brain/workspaces/personal/config/runtime.yaml --workspace personal
-pnpm run brainctl -- doctor --config examples/config/runtime.yaml --pack assistant-packs/core
-pnpm run brainctl -- config validate examples/config/runtime.yaml
-pnpm run brainctl -- secrets check --config examples/config/runtime.yaml
-pnpm run brainctl -- backup plan --config examples/config/runtime.yaml --workspace personal
-pnpm run brainctl -- backup init --config examples/config/runtime.yaml --workspace personal
-pnpm run brainctl -- backup init --config examples/config/runtime.yaml --workspace personal --apply
-pnpm run brainctl -- backup check --config examples/config/runtime.yaml --workspace personal
-pnpm run brainctl -- backup status --config examples/config/runtime.yaml --workspace personal
-pnpm run brainctl -- pack validate assistant-packs/core
-pnpm run brainctl -- provider check codex --transport stub
-pnpm run brainctl -- provider smoke codex --transport stub --prompt ping
-pnpm run brainctl -- provider check codex --transport app-server --app-server-url ws://127.0.0.1:9000 --timeout-ms 3000
-pnpm run brainctl -- provider check claude-code --transport stub
-pnpm run brainctl -- entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN \
+pnpm run brainctl setup --workspace personal --path ~/.brain/workspaces/personal
+pnpm run brainctl setup inspect --config ~/.brain/workspaces/personal/config/runtime.yaml --workspace personal
+pnpm run brainctl setup status --config ~/.brain/workspaces/personal/config/runtime.yaml --workspace personal
+pnpm run brainctl doctor --config examples/config/runtime.yaml --pack assistant-packs/core
+pnpm run brainctl config validate examples/config/runtime.yaml
+pnpm run brainctl secrets check --config examples/config/runtime.yaml
+pnpm run brainctl backup plan --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl backup init --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl backup init --config examples/config/runtime.yaml --workspace personal --apply
+pnpm run brainctl backup check --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl backup status --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl pack validate assistant-packs/core
+pnpm run brainctl provider check codex --transport stub
+pnpm run brainctl provider smoke codex --transport stub --prompt ping
+pnpm run brainctl provider check codex --transport app-server --app-server-url ws://127.0.0.1:9000 --timeout-ms 3000
+pnpm run brainctl provider check claude-code --transport stub
+pnpm run brainctl entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN \
   --polling-state ~/.brain/workspaces/personal/state/telegram-offset.json \
   --pairing-state ~/.brain/workspaces/personal/state/telegram-pairing
-pnpm run brainctl -- start --config examples/config/runtime.yaml --workspace personal
-pnpm run brainctl -- run --config examples/config/runtime.yaml --workspace personal --fake --once --fake-text help
-pnpm run brainctl -- health --config examples/config/runtime.yaml --workspace personal
-pnpm run brainctl -- status --config examples/config/runtime.yaml --workspace personal
-pnpm run brainctl -- logs --file ~/.brain/workspaces/personal/logs/runtime.jsonl --lines 100
-pnpm run brainctl -- operations plan --config examples/config/runtime.yaml --workspace personal
-pnpm run brainctl -- operations systemd --config examples/config/runtime.yaml --workspace personal
-pnpm run brainctl -- operations validate --config examples/config/runtime.yaml --workspace personal
-pnpm run brainctl -- validate live --config examples/config/runtime.yaml --workspace personal
-pnpm run brainctl -- validate live --config examples/config/runtime.yaml --workspace personal --run-safe
-pnpm run brainctl -- runtime status --state ~/.brain/workspaces/personal/state
-pnpm run brainctl -- runtime smoke --config examples/config/runtime.yaml --workspace personal --text ping
-pnpm run brainctl -- directives check docs/brainctl.md
-pnpm run brainctl -- automation validate examples/config/automation.yaml
-pnpm run brainctl -- automation run daily-summary --file examples/config/automation.yaml
-pnpm run brainctl -- automation due --file examples/config/automation.yaml --now 2026-05-21T09:00:00.000Z
-pnpm run brainctl -- automation monitor inbox-placeholder --file examples/config/automation.yaml
-pnpm run brainctl -- composio setup --config examples/config/runtime.yaml --workspace personal
-pnpm run brainctl -- composio status --config examples/config/runtime.yaml --workspace personal
-pnpm run brainctl -- web setup --config examples/config/runtime.yaml --workspace personal --base-url http://203.0.113.10/pages --publish-root /srv/brain/pages
-pnpm run brainctl -- web status --config examples/config/runtime.yaml --workspace personal
-pnpm run brainctl -- web validate --dir /path/to/static-page
-pnpm run brainctl -- web publish --dir /path/to/static-page --id demo-page --dry-run
-pnpm run brainctl -- web prune --dry-run
+pnpm run brainctl start --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl run --config examples/config/runtime.yaml --workspace personal --fake --once --fake-text help
+pnpm run brainctl health --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl status --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl logs --file ~/.brain/workspaces/personal/logs/runtime.jsonl --lines 100
+pnpm run brainctl operations plan --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl operations systemd --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl operations validate --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl validate live --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl validate live --config examples/config/runtime.yaml --workspace personal --run-safe
+pnpm run brainctl runtime status --state ~/.brain/workspaces/personal/state
+pnpm run brainctl runtime smoke --config examples/config/runtime.yaml --workspace personal --text ping
+pnpm run brainctl directives check docs/brainctl.md
+pnpm run brainctl automation validate examples/config/automation.yaml
+pnpm run brainctl automation run daily-summary --file examples/config/automation.yaml
+pnpm run brainctl automation due --file examples/config/automation.yaml --now 2026-05-21T09:00:00.000Z
+pnpm run brainctl automation monitor inbox-placeholder --file examples/config/automation.yaml
+pnpm run brainctl composio setup --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl composio status --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl web setup --config examples/config/runtime.yaml --workspace personal --base-url http://203.0.113.10/pages --publish-root /srv/brain/pages
+pnpm run brainctl web status --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl web validate --dir /path/to/static-page
+pnpm run brainctl web publish --dir /path/to/static-page --id demo-page --dry-run
+pnpm run brainctl web prune --dry-run
 ```
 
 ## Setup, inspect, and re-runnable plans
@@ -58,8 +58,8 @@ root. Run it any time to reconcile the directory scaffold, or run `setup inspect
 / `setup status` to get a metadata-only plan:
 
 ```bash
-pnpm run brainctl -- setup --workspace personal --path ~/.brain/workspaces/personal
-pnpm run brainctl -- setup inspect --config ~/.brain/workspaces/personal/config/runtime.yaml --workspace personal
+pnpm run brainctl setup --workspace personal --path ~/.brain/workspaces/personal
+pnpm run brainctl setup inspect --config ~/.brain/workspaces/personal/config/runtime.yaml --workspace personal
 ```
 
 The setup status response groups findings into:
@@ -99,19 +99,19 @@ config without using real credentials or printing values.
 
 ```bash
 # Prints the resolved start plan only; no providers, Telegram, deployment, or services start.
-pnpm run brainctl -- start --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl start --config examples/config/runtime.yaml --workspace personal
 
 # Foreground fake-entrypoint/fake-provider smoke through the supervisor and command intercepts.
-pnpm run brainctl -- run --config examples/config/runtime.yaml --workspace personal --fake --once --fake-text "help"
+pnpm run brainctl run --config examples/config/runtime.yaml --workspace personal --fake --once --fake-text "help"
 
 # Optional provider-backed Employee sessions (uses selected provider from config unless overridden).
-pnpm run brainctl -- run --config examples/config/runtime.yaml --workspace personal --employee-runtime
+pnpm run brainctl run --config examples/config/runtime.yaml --workspace personal --employee-runtime
 
 # Inspect state/log readiness without live processes.
-pnpm run brainctl -- health --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl health --config examples/config/runtime.yaml --workspace personal
 
 # Tail supervisor JSONL logs with conservative token/key redaction.
-pnpm run brainctl -- logs --file ~/.brain/workspaces/personal/logs/runtime.jsonl --lines 100
+pnpm run brainctl logs --file ~/.brain/workspaces/personal/logs/runtime.jsonl --lines 100
 ```
 
 `start` defaults to a dry-run plan. Use `start --foreground` or `run` to enter the foreground supervisor. Provider and entrypoint default to the selected workspace's runtime config; pass `--fake` or explicit `--provider fake --entrypoint fake` for CI/fresh-checkout smoke. Explicit live Telegram polling requires `--entrypoint telegram --telegram-polling` plus `--telegram-token-env` or `--telegram-token-file`; polling offsets remain Telegram-native state only. Telegram bootstrap uses first-user pairing by default and stores paired identity state under the private state root; pass `--telegram-pairing` only for the optional advanced `/pair` code flow. Attachment download is opt-in with `--telegram-downloads`/`--telegram-download-dir`; voice/audio transcription can come from workspace `transcription.provider: openai` with an `apiKeyRef` such as `env:OPENAI_API_KEY`, or from the private `--telegram-transcription-command` seam. Brainctl wires the Telegram adapter in codex-chat parity mode: disabled/unavailable voice transcription replies `Voice transcription is not enabled.` and is not sent to the provider, disabled audio stays an attachment event, and configured voice/audio transcription errors are dropped before provider dispatch. No transcription provider keys belong in the repo.
@@ -125,17 +125,17 @@ Deployment/update/rollback automation is represented as non-mutating plans:
 
 ```bash
 # Render preflight/update/restart/rollback/post-update smoke commands as JSON.
-pnpm run brainctl -- operations plan --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl operations plan --config examples/config/runtime.yaml --workspace personal
 
 # Render a systemd service unit without installing it or restarting anything.
-pnpm run brainctl -- operations systemd --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl operations systemd --config examples/config/runtime.yaml --workspace personal
 
 # Render a guarded Telegram/Codex live-readiness plan. Defaults to no network.
-pnpm run brainctl -- validate live --config examples/config/runtime.yaml --workspace personal --codex-transport app-server
+pnpm run brainctl validate live --config examples/config/runtime.yaml --workspace personal --codex-transport app-server
 
 # Execute only safe local checks from that plan: config, secret metadata, runtime smoke,
 # Codex stub provider check, and no-network Telegram adapter check.
-pnpm run brainctl -- validate live --config examples/config/runtime.yaml --workspace personal --run-safe
+pnpm run brainctl validate live --config examples/config/runtime.yaml --workspace personal --run-safe
 ```
 
 `operations` never runs git, pnpm, systemctl, or deployment commands; it returns the exact operator commands to run externally. `validate live` is a guarded smoke harness: without `--allow-live`, live Codex app-server checks are only planned, Telegram token refs are checked by metadata, and no polling/webhook or user task starts.

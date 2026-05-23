@@ -138,10 +138,10 @@ Then collect the path-specific fields below.
 Recommended safe commands:
 
 ```bash
-pnpm run brainctl -- setup status --config <private-config> --workspace <workspace-name>
-pnpm run brainctl -- backup plan --config <private-config> --workspace <workspace-name>
-pnpm run brainctl -- web status --config <private-config> --workspace <workspace-name>
-pnpm run brainctl -- composio status --config <private-config> --workspace <workspace-name>
+pnpm run brainctl setup status --config <private-config> --workspace <workspace-name>
+pnpm run brainctl backup plan --config <private-config> --workspace <workspace-name>
+pnpm run brainctl web status --config <private-config> --workspace <workspace-name>
+pnpm run brainctl composio status --config <private-config> --workspace <workspace-name>
 ```
 
 ## Remote SSH setup flow
@@ -239,13 +239,13 @@ Before a new server test, confirm:
 
 ```bash
 pnpm run check
-pnpm run brainctl -- setup --workspace <name> --path <workspace>
-pnpm run brainctl -- config validate <workspace>/config/runtime.yaml
-pnpm run brainctl -- secrets check --config <workspace>/config/runtime.yaml
-pnpm run brainctl -- entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN \
+pnpm run brainctl setup --workspace <name> --path <workspace>
+pnpm run brainctl config validate <workspace>/config/runtime.yaml
+pnpm run brainctl secrets check --config <workspace>/config/runtime.yaml
+pnpm run brainctl entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN \
   --polling-state <workspace>/state/telegram-offset.json \
   --pairing-state <workspace>/state/telegram-pairing
-pnpm run brainctl -- doctor --config <workspace>/config/runtime.yaml --pack assistant-packs/core
-pnpm run brainctl -- operations validate --config <workspace>/config/runtime.yaml --workspace <name> --repo <checkout>
-pnpm run brainctl -- operations systemd --config <workspace>/config/runtime.yaml --workspace <name> --repo <checkout>
+pnpm run brainctl doctor --config <workspace>/config/runtime.yaml --pack assistant-packs/core
+pnpm run brainctl operations validate --config <workspace>/config/runtime.yaml --workspace <name> --repo <checkout>
+pnpm run brainctl operations systemd --config <workspace>/config/runtime.yaml --workspace <name> --repo <checkout>
 ```
