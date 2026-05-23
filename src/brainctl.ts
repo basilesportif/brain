@@ -298,6 +298,7 @@ const provider = program.command("provider").description("Provider boundary chec
 provider.command("check")
   .description("Check a provider adapter without running a real task.")
   .argument("<provider>", "provider id: codex or claude-code")
+  .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--transport <kind>", "provider transport to instantiate")
   .option("--binary <path>", "provider CLI binary for exec health checks")
@@ -308,6 +309,7 @@ provider.command("check")
 provider.command("smoke")
   .description("Run one provider turn through the provider boundary; non-stub transports require --allow-live.")
   .argument("<provider>", "provider id: codex or claude-code")
+  .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--transport <kind>", "provider transport to instantiate", "stub")
   .option("--binary <path>", "provider CLI binary for exec health/smoke checks")
@@ -1085,7 +1087,7 @@ async function runSafeValidationChecks(
     else if (check.id === "runtime-smoke") results.push({ id: check.id, ...await runtimeSmokeCommand({ config: options.config, workspace: options.workspace, text: "ping" }) });
     else if (check.id === "codex-provider") {
       const transport = options.allowLive ? options.codexTransport : "stub";
-      results.push({ id: check.id, ...await providerCheckCommand("codex", { workspace: options.workspace, transport }) });
+      results.push({ id: check.id, ...await providerCheckCommand("codex", { config: options.config, workspace: options.workspace, transport }) });
     } else if (check.id === "telegram-entrypoint") {
       results.push({ id: check.id, ...await entrypointCheckCommand("telegram", { workspace: options.workspace, tokenEnv: options.telegramTokenEnv, tokenFile: options.telegramTokenFile }) });
     }
@@ -1692,10 +1694,25 @@ async function packValidateCommand(dir: string): Promise<CliResult> {
   };
 }
 
-async function providerCheckCommand(providerId: string, options: { workspace: string; transport?: string; binary?: string; cwd?: string; appServerUrl?: string; timeoutMs?: number }): Promise<CliResult> {
+async function configuredTranscriptionApiKeyRef(options: { config?: string; workspace: string }): Promise<{ ok: true; transcriptionApiKeyRef?: string } | { ok: false; result: CliResult }> {
+  if (!options.config) return { ok: true };
+  const loaded = await loadValidConfig(options.config);
+  if (!loaded.ok || !loaded.config) {
+    return { ok: false, result: { ok: false, summary: "cannot load runtime config for provider check", details: loaded.details } };
+  }
+  const workspace = loaded.config.workspaces[options.workspace];
+  if (!workspace) {
+    return { ok: false, result: { ok: false, summary: `workspace not found: ${options.workspace}`, details: { available: Object.keys(loaded.config.workspaces) } } };
+  }
+  return { ok: true, transcriptionApiKeyRef: workspace.transcription?.apiKeyRef };
+}
+
+async function providerCheckCommand(providerId: string, options: { config?: string; workspace: string; transport?: string; binary?: string; cwd?: string; appServerUrl?: string; timeoutMs?: number }): Promise<CliResult> {
   const normalized = providerId.toLowerCase();
+  const transcription = normalized === "codex" ? await configuredTranscriptionApiKeyRef(options) : { ok: true as const, transcriptionApiKeyRef: undefined };
+  if (!transcription.ok) return transcription.result;
   const adapter = normalized === "codex"
-    ? createCodexProvider({ transport: (options.transport as CodexTransportKind | undefined) ?? "stub", binary: options.binary, cwd: options.cwd, appServerUrl: options.appServerUrl, timeoutMs: options.timeoutMs, appServerStartupTimeoutMs: options.timeoutMs })
+    ? createCodexProvider({ transport: (options.transport as CodexTransportKind | undefined) ?? "stub", binary: options.binary, cwd: options.cwd, appServerUrl: options.appServerUrl, timeoutMs: options.timeoutMs, appServerStartupTimeoutMs: options.timeoutMs, transcriptionApiKeyRef: transcription.transcriptionApiKeyRef })
     : normalized === "claude-code" || normalized === "claude"
       ? createClaudeCodeProvider({ transport: (options.transport as ClaudeCodeTransportKind | undefined) ?? "stub" })
       : undefined;
@@ -1720,7 +1737,7 @@ async function providerCheckCommand(providerId: string, options: { workspace: st
   }
 }
 
-async function providerSmokeCommand(providerId: string, options: { workspace: string; transport?: string; binary?: string; cwd?: string; appServerUrl?: string; timeoutMs?: number; prompt: string; allowLive?: boolean }): Promise<CliResult> {
+async function providerSmokeCommand(providerId: string, options: { config?: string; workspace: string; transport?: string; binary?: string; cwd?: string; appServerUrl?: string; timeoutMs?: number; prompt: string; allowLive?: boolean }): Promise<CliResult> {
   const transport = options.transport ?? "stub";
   if (transport !== "stub" && !options.allowLive) {
     return {
@@ -1730,8 +1747,10 @@ async function providerSmokeCommand(providerId: string, options: { workspace: st
     };
   }
   const normalized = providerId.toLowerCase();
+  const transcription = normalized === "codex" ? await configuredTranscriptionApiKeyRef(options) : { ok: true as const, transcriptionApiKeyRef: undefined };
+  if (!transcription.ok) return transcription.result;
   const adapter = normalized === "codex"
-    ? createCodexProvider({ transport: transport as CodexTransportKind, binary: options.binary, cwd: options.cwd, appServerUrl: options.appServerUrl, timeoutMs: options.timeoutMs, appServerStartupTimeoutMs: options.timeoutMs })
+    ? createCodexProvider({ transport: transport as CodexTransportKind, binary: options.binary, cwd: options.cwd, appServerUrl: options.appServerUrl, timeoutMs: options.timeoutMs, appServerStartupTimeoutMs: options.timeoutMs, transcriptionApiKeyRef: transcription.transcriptionApiKeyRef })
     : normalized === "claude-code" || normalized === "claude"
       ? createClaudeCodeProvider({ transport: transport as ClaudeCodeTransportKind })
       : undefined;

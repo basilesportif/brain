@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -227,6 +227,64 @@ test("brainctl wires runtime OpenAI transcription config into Telegram without e
   }
 });
 
+
+test("brainctl Codex provider CLI paths strip configured transcription env refs", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-codex-provider-env-"));
+  try {
+    const workspace = path.join(root, "workspace");
+    const backupRepo = path.join(root, "backup-repo");
+    const config = path.join(root, "runtime.yaml");
+    const fakeCodex = path.join(root, "codex");
+    const healthEnvPath = path.join(root, "health-env.json");
+    const turnEnvPath = path.join(root, "turn-env.json");
+    await writeFile(config, testRuntimeConfig(workspace, backupRepo, { transcriptionEnabled: true, transcriptionApiKeyRef: "env:BRAIN_TRANSCRIPTION_KEY" }));
+    await writeFile(fakeCodex, `#!/usr/bin/env node
+import { writeFile } from "node:fs/promises";
+const snapshot = () => JSON.stringify({
+  openai: Boolean(process.env.OPENAI_API_KEY),
+  transcription: Boolean(process.env.BRAIN_TRANSCRIPTION_KEY),
+  other: process.env.OTHER_VAR || null
+});
+if (process.argv.includes("--version")) {
+  await writeFile(${JSON.stringify(healthEnvPath)}, snapshot());
+  console.log("fake-codex 1.0.0");
+  process.exit(0);
+}
+await writeFile(${JSON.stringify(turnEnvPath)}, snapshot());
+console.log(JSON.stringify({ method: "item/agentMessage/delta", params: { delta: "ok" } }));
+console.log(JSON.stringify({ method: "turn/completed", params: { turn: { id: "turn_fake", status: "completed", items: [] } } }));
+`);
+    await chmod(fakeCodex, 0o755);
+
+    const env = {
+      BRAIN_TRANSCRIPTION_KEY: "sk-test-custom-transcription-value-must-not-print",
+      OPENAI_API_KEY: "sk-test-openai-value-must-not-print",
+      OTHER_VAR: "keep-me",
+    };
+    const readSnapshot = async (file: string) => JSON.parse(await readFile(file, "utf8")) as { openai: boolean; transcription: boolean; other: string | null };
+
+    const providerCheck = spawnBrainctl(["provider", "check", "codex", "--config", config, "--workspace", "personal", "--transport", "exec", "--binary", fakeCodex, "--timeout-ms", "5000"], env);
+    assert.equal(providerCheck.status, 0, providerCheck.stderr);
+    assert.doesNotMatch(providerCheck.stdout, /sk-test-/);
+    assert.deepEqual(await readSnapshot(healthEnvPath), { openai: false, transcription: false, other: "keep-me" });
+
+    const providerSmoke = spawnBrainctl(["provider", "smoke", "codex", "--config", config, "--workspace", "personal", "--transport", "exec", "--binary", fakeCodex, "--timeout-ms", "5000", "--prompt", "ping", "--allow-live"], env);
+    assert.equal(providerSmoke.status, 0, providerSmoke.stderr);
+    assert.doesNotMatch(providerSmoke.stdout, /sk-test-/);
+    assert.deepEqual(await readSnapshot(turnEnvPath), { openai: false, transcription: false, other: "keep-me" });
+
+    const live = spawnBrainctl(["validate", "live", "--config", config, "--workspace", "personal", "--codex-transport", "exec", "--allow-live", "--run-safe"], {
+      ...env,
+      PATH: `${root}${path.delimiter}${process.env.PATH ?? ""}`,
+    });
+    assert.equal(live.status, 0, live.stderr);
+    assert.doesNotMatch(live.stdout, /sk-test-/);
+    assert.deepEqual(await readSnapshot(healthEnvPath), { openai: false, transcription: false, other: "keep-me" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("brainctl status, provider smoke, automation monitor, and web wrappers are safe and testable", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brainctl-parity-"));
   try {
@@ -383,7 +441,7 @@ test("brainctl backup, web setup, and Composio status are safe and metadata-only
   }
 });
 
-function testRuntimeConfig(workspace: string, backupRepo: string, options: { composioEnabled?: boolean; webEnabled?: boolean; transcriptionEnabled?: boolean } = {}): string {
+function testRuntimeConfig(workspace: string, backupRepo: string, options: { composioEnabled?: boolean; webEnabled?: boolean; transcriptionEnabled?: boolean; transcriptionApiKeyRef?: string } = {}): string {
   return [
     "runtime:",
     "  activeEntrypointMode: single-primary",
@@ -416,7 +474,7 @@ function testRuntimeConfig(workspace: string, backupRepo: string, options: { com
     "    transcription:",
     `      enabled: ${options.transcriptionEnabled ? "true" : "false"}`,
     "      provider: openai",
-    "      apiKeyRef: env:OPENAI_API_KEY",
+    `      apiKeyRef: ${options.transcriptionApiKeyRef ?? "env:OPENAI_API_KEY"}`,
     "      model: gpt-4o-mini-transcribe",
     "      scope:",
     "        entrypointIds:",
