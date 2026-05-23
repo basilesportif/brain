@@ -40,6 +40,8 @@ program.command("setup")
   .argument("[mode]", "optional mode: defaults, inspect, or status")
   .option("--workspace <name>", "workspace id", DEFAULT_WORKSPACE_ID)
   .option("--target <target>", "defaults target: local or remote", "local")
+  .option("--ssh-host <host>", "remote SSH IP/DNS host for setup defaults")
+  .option("--ssh-user <user>", "remote SSH login user for setup defaults; defaults to root in remote mode")
   .option("--service-user <user>", "remote non-root service user for defaults", DEFAULT_SERVICE_USER)
   .option("--path <path>", "private workspace path; setup defaults to ~/.brain/workspace for the default workspace, inspect defaults to config workspacePath")
   .option("--config <path>", "runtime YAML/TOML/JSON config to inspect before planning")
@@ -1145,8 +1147,45 @@ function liveValidationWizard(
   ];
   const guidedSequence = [
     {
+      step: "telegram-connection",
+      title: "Connect Telegram.",
+      prompt: "Create or choose the Telegram bot and store its token in a private secret ref.",
+      botFatherSteps: botFatherSteps(),
+      privateStorage: telegramTokenStorageGuidance(options),
+      requiresConfirmation: "Starting Telegram polling/webhooks happens later, after Codex auth and service readiness are confirmed.",
+    },
+    {
+      step: "private-data-repo",
+      title: "Connect private data and backups.",
+      prompt: "Choose an existing private data/backup repo to pull, or initialize one in the private workspace.",
+      actions: [
+        "Keep private workspace data outside the source checkout.",
+        "Use private-git by default when a remote is available; otherwise initialize the local private repo and add a remote later.",
+        "Keep secret values excluded from backups by default.",
+      ],
+      requiresConfirmation: "Pulling from or pushing to a private backup remote requires an explicit private remote target.",
+    },
+    {
+      step: "composio-accounts",
+      title: "Connect Composio accounts.",
+      prompt: "Connect Google Calendar/chat accounts only if this workspace should use them.",
+      actions: [
+        "Store Composio API keys and connected-account metadata as private secret refs.",
+        "Skip this step for a minimal Telegram + Codex setup and return later.",
+      ],
+    },
+    {
+      step: "essential-runtime-choices",
+      title: "Confirm essential runtime choices.",
+      prompt: "Confirm workspace path, provider, primary entrypoint, and service target before any live start.",
+      actions: [
+        "Validate the private runtime config and secret-reference metadata.",
+        "Keep implementation details such as derived state/log paths in verbose/details output.",
+      ],
+    },
+    {
       step: "configure-verify-codex-auth",
-      title: "Next up, configure or verify Codex auth.",
+      title: "Verify Codex auth before service start.",
       actions: [
         "Confirm the selected Codex transport and auth path for this machine or server.",
         "If a credential is needed, store it only in a private server env file or secret store, then verify by metadata/health check without printing the value.",
@@ -1156,36 +1195,39 @@ function liveValidationWizard(
     },
     {
       step: "install-start-service",
-      title: "Then install and start the Brain service.",
+      title: "Install and start the Brain service.",
       actions: [
         `Review the service plan with: pnpm run brainctl operations systemd --config ${shellArg(options.config)} --workspace ${shellArg(options.workspace)}`,
         "Install/enable systemd only after the user confirms the unit path, service user, working directory, and private env file.",
-        "Start the service only after Codex auth is verified and the private secret file/env store is in place.",
+        "Start the service only after Telegram token storage, private data setup, and Codex auth are verified.",
       ],
       requiresConfirmation: "Privileged systemd installation, enablement, and service start require explicit user confirmation.",
     },
     {
-      step: "configure-telegram-token",
-      title: "Next up, let's configure your Telegram token.",
-      botFatherSteps: botFatherSteps(),
-      privateStorage: telegramTokenStorageGuidance(options),
-    },
-    {
       step: "first-user-pairing",
-      title: "Finally, complete first-user pairing.",
+      title: "Optional follow-up: first-user pairing.",
       actions: [
         "After the service is running with the private Telegram token, send the bot its first Telegram message.",
         "That first user/chat becomes paired admin state by default and is persisted only in private Brain state.",
         "If a token was ever pasted into a repo, chat, or log, revoke it in @BotFather with /revoke before starting live polling.",
       ],
     },
+    {
+      step: "optional-follow-ups",
+      title: "Optional follow-ups.",
+      actions: [
+        "Enable OpenAI voice/audio transcription only after the base Telegram path is working.",
+        "Enable web publishing only when a publish root/base URL is chosen.",
+        "Tune backup strategy, include/exclude policy, and remotes after the initial private repo is initialized or pulled.",
+      ],
+    },
   ];
   return {
     summary: ok
       ? options.runSafe
-        ? "Pre-live checks passed. Next up, configure or verify Codex auth, then install/start the service, then configure Telegram."
-        : "Pre-live validation plan ready. Run the safe checks, then configure Codex auth, install/start the service, and configure Telegram."
-      : "Pre-live validation needs attention before Codex auth, service start, or Telegram setup.",
+        ? "Pre-live checks passed. Connect Telegram/private data/Composio, verify Codex auth, then start the service."
+        : "Pre-live validation plan ready. Run safe checks, then connect Telegram/private data/Composio, verify Codex auth, and start the service."
+      : "Pre-live validation needs attention before Telegram setup, private data setup, Codex auth, or service start.",
     completedChecks,
     notLiveYet,
     nextStep: guidedSequence[0],
@@ -1573,6 +1615,8 @@ interface SetupInspectOptions {
 interface SetupDefaultsOptions {
   workspace: string;
   target?: string;
+  sshHost?: string;
+  sshUser?: string;
   serviceUser?: string;
   path?: string;
   verbose?: boolean;
@@ -1589,6 +1633,8 @@ interface ConfigRef {
 function setupDefaultsCommand(options: SetupDefaultsOptions): CliResult {
   const target = normalizeSetupDefaultsTarget(options.target);
   if (!target) return { ok: false, summary: "setup defaults target must be local or remote", details: { supported: ["local", "remote"] } };
+  const sshUser = target === "remote" ? (options.sshUser || "root") : undefined;
+  const sshHost = target === "remote" ? (options.sshHost || "ask: server IP or DNS name") : undefined;
   const serviceUser = options.serviceUser || DEFAULT_SERVICE_USER;
   const serviceHome = target === "remote" ? serviceUserHome(serviceUser) : "~";
   const workspaceRoot = options.path ?? defaultWorkspaceRootDisplay(options.workspace, serviceHome);
@@ -1596,6 +1642,10 @@ function setupDefaultsCommand(options: SetupDefaultsOptions): CliResult {
   const serviceName = `brain-${options.workspace}`;
   const decisions = [
     { decision: "Setup mode", default: target === "remote" ? "Remote Ubuntu server over SSH" : "Local private workspace" },
+    ...(target === "remote" ? [
+      { decision: "Remote SSH host", default: sshHost },
+      { decision: "Remote SSH user", default: sshUser },
+    ] : []),
     { decision: "Source checkout", default: repoCheckout },
     { decision: "Private workspace", default: workspaceRoot },
     { decision: "Initial workspace", default: options.workspace },
@@ -1607,10 +1657,12 @@ function setupDefaultsCommand(options: SetupDefaultsOptions): CliResult {
       "secrets and runtime state stay outside git",
       "setup does not write secret values",
     ],
+    setupFlow: conciseSetupFlow(),
   };
   if (options.verbose) {
     details.advanced = {
       target,
+      ssh: target === "remote" ? { host: sshHost, user: sshUser } : undefined,
       serviceUser: target === "remote" ? serviceUser : undefined,
       serviceName: target === "remote" ? serviceName : undefined,
       paths: {
@@ -1630,8 +1682,35 @@ function setupDefaultsCommand(options: SetupDefaultsOptions): CliResult {
 
   return {
     ok: true,
-    summary: `${target} setup defaults ready; confirm these choices or pass --verbose for details`,
+    summary: `${target} setup defaults ready; confirm concise choices or pass --verbose for implementation details`,
     details,
+  };
+}
+
+function conciseSetupFlow() {
+  return {
+    coreSteps: [
+      {
+        step: "telegram-connection",
+        prompt: "Connect Telegram bot and private token ref.",
+      },
+      {
+        step: "private-data-repo",
+        prompt: "Pull or initialize the private data/backup repo.",
+      },
+      {
+        step: "composio-accounts",
+        prompt: "Connect Composio accounts if this workspace needs them.",
+      },
+      {
+        step: "essential-runtime-choices",
+        prompt: "Confirm workspace, provider, entrypoint, and service target.",
+      },
+    ],
+    orderingNotes: [
+      "Verify Codex auth before starting the service or accepting Telegram traffic.",
+      "Keep OpenAI transcription, web publishing, backup tuning, and first-user pairing as follow-up steps unless explicitly requested now.",
+    ],
   };
 }
 
@@ -1829,16 +1908,61 @@ function setupResumeWizard(details: {
   primaryEntrypointId: unknown;
   entrypoints: Array<{ kind: string; enabled: boolean; configRefPresent: boolean }>;
   secretRefs: Array<Record<string, unknown>>;
+  backup?: ReturnType<typeof setupBackupStatus>;
+  composio?: Awaited<ReturnType<typeof setupComposioStatus>>;
+  transcription?: ReturnType<typeof setupTranscriptionStatus>;
+  webPublishing?: ReturnType<typeof setupWebPublishingStatus>;
   setupState?: Awaited<ReturnType<typeof readSetupProgress>>;
 }) {
   const workspaceReady = details.workspaceDirectory.present && WORKSPACE_DIRS.every((dir) => details.directories[dir]?.present);
   const runtimeConfigReady = details.config.present && details.config.valid && details.provider !== "missing" && details.primaryEntrypointId !== "missing";
   const telegramEntrypoint = details.entrypoints.find((entrypoint) => entrypoint.kind === "telegram" && entrypoint.enabled);
   const telegramSecretRefPresent = Boolean(telegramEntrypoint?.configRefPresent && details.secretRefs.some((ref) => ref.source === "entrypoint.configRef" && ref.present === true));
+  const backupConfigured = Boolean(details.backup && details.backup.strategy !== "none");
+  const composioConnected = Boolean(details.composio?.enabled && details.composio.missing.length === 0);
   const state = details.setupState?.state;
   const codexAuthVerifiedByState = state?.statuses.codexAuth.status === "verified";
   const serviceStartedByState = state?.statuses.service.started === true;
   const steps = [
+    {
+      step: "telegram-connection",
+      title: "Connect Telegram.",
+      complete: telegramSecretRefPresent,
+      evidence: telegramSecretRefPresent
+        ? ["Telegram entrypoint secret ref is present by metadata only; value was not printed."]
+        : ["Telegram token/private entrypoint secret metadata is missing or not inspectable."],
+      botFatherSteps: botFatherSteps(),
+      resumePrompt: "Create or choose the bot, store its token only as a private secret ref, and validate metadata before live polling.",
+    },
+    {
+      step: "private-data-repo",
+      title: "Pull or initialize private data/backup repo.",
+      complete: backupConfigured,
+      evidence: backupConfigured
+        ? [`Backup/private data strategy configured: ${details.backup?.strategy}.`]
+        : ["Private data/backup repo is not configured; choose a private-git remote to pull or initialize a private local repo."],
+      resumePrompt: "Use backup plan/init after confirming the private repo path or remote; secret values remain excluded by default.",
+    },
+    {
+      step: "composio-accounts",
+      title: "Connect Composio accounts.",
+      complete: composioConnected || details.composio?.enabled === false,
+      evidence: composioConnected
+        ? ["Composio API and connected-account refs are present by metadata only."]
+        : details.composio?.enabled === false
+          ? ["Composio is disabled for this workspace; skip unless the user wants calendar/chat data sources."]
+          : [`Composio refs missing: ${details.composio?.missing.join(", ") || "account metadata"}.`],
+      resumePrompt: "Connect Composio only if this workspace needs Google Calendar or chat data-source access.",
+    },
+    {
+      step: "essential-runtime-choices",
+      title: "Confirm essential runtime choices.",
+      complete: workspaceReady && runtimeConfigReady,
+      evidence: workspaceReady && runtimeConfigReady
+        ? [`Workspace directories exist under ${details.workspaceRoot}.`, "Runtime config is present, valid, and selects provider/primary entrypoint."]
+        : ["Workspace scaffold, runtime config, provider, or primary entrypoint is still missing/invalid."],
+      resumePrompt: "Keep path/log/state details in verbose/status output unless the user asks for implementation details.",
+    },
     {
       step: "workspace-scaffold",
       title: "Create private workspace scaffold.",
@@ -1853,7 +1977,7 @@ function setupResumeWizard(details: {
     },
     {
       step: "configure-verify-codex-auth",
-      title: "Configure or verify Codex auth.",
+      title: "Verify Codex auth before service start.",
       complete: codexAuthVerifiedByState,
       evidence: codexAuthVerifiedByState
         ? ["Private setup state says Codex auth was verified; rerun a provider health check if the session may have changed."]
@@ -1868,24 +1992,19 @@ function setupResumeWizard(details: {
       complete: serviceStartedByState,
       evidence: serviceStartedByState
         ? ["Private setup state says the service was installed/started; verify with health/status before live Telegram traffic."]
-        : ["Service installation/start is never assumed by setup status; review the systemd plan and require explicit confirmation."],
-      resumePrompt: "If the service is already installed and running, confirm with health/status output before continuing to Telegram.",
+        : ["Service installation/start is never assumed by setup status; verify Codex auth first, then review the systemd plan and require explicit confirmation."],
+      resumePrompt: "If the service is already installed and running, confirm with health/status output before accepting Telegram traffic.",
     },
     {
-      step: "configure-telegram-token",
-      title: "Next up, let's configure your Telegram token.",
-      complete: telegramSecretRefPresent,
-      evidence: telegramSecretRefPresent
-        ? ["Telegram entrypoint secret ref is present by metadata only; value was not printed."]
-        : ["Telegram token/private entrypoint secret metadata is missing or not inspectable."],
-      botFatherSteps: botFatherSteps(),
-    },
-    {
-      step: "first-user-pairing",
-      title: "Complete first-user pairing.",
+      step: "optional-follow-ups",
+      title: "Optional follow-ups.",
       complete: false,
-      evidence: ["Pairing state is private runtime state; setup status does not print raw user/chat IDs."],
-      resumePrompt: "After the service is running with the token, message the bot once from the admin account.",
+      evidence: [
+        details.transcription?.enabled ? "OpenAI transcription is configured." : "OpenAI transcription can be enabled after the base Telegram flow works.",
+        details.webPublishing?.enabled ? "Web publishing is configured." : "Web publishing can be configured after the service path is stable.",
+        "First-user pairing happens after the service starts with the Telegram token; raw user/chat IDs stay private.",
+      ],
+      resumePrompt: "Handle first-user pairing, OpenAI transcription, web publishing, or backup tuning only when requested or when the base setup is ready.",
     },
   ];
   const completedSteps = steps.filter((step) => step.complete).map((step) => ({ step: step.step, title: step.title, evidence: step.evidence }));

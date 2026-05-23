@@ -61,40 +61,62 @@ Then collect the path-specific fields below.
 ## Common guided questions
 
 For the first default confirmation, optimize for confidence over completeness:
-show only the setup mode, source checkout path, private workspace path, and
-initial workspace name. Hide service user, systemd service name, derived
-config/secrets/log paths, and command lists unless the user asks for details or
-`brainctl setup defaults --verbose` is used.
+show only the setup mode, remote SSH host/user when remote mode is selected,
+source checkout path, private workspace path, initial workspace name, and the
+core setup flow. For a remote server, ask for the SSH IP/DNS host and SSH login
+username; default that SSH login username to `root` if omitted. Hide service
+user, systemd service name, derived config/secrets/log paths, and command lists
+unless the user asks for details or `brainctl setup defaults --verbose` is used.
 
-1. Workspace name? Default: `personal`.
-2. Provider? Choose exactly one:
+1. Telegram connection? Default entrypoint is Telegram as `telegram-main`.
+   Create/choose the BotFather bot, store only a private token ref, and do not
+   start polling/webhooks yet.
+2. Private data/backup repo? Pull an existing private repo or initialize one in
+   the private workspace. Safe defaults exclude secrets, logs, tmp, and caches.
+3. Composio accounts? Connect Google Calendar/chat refs only if this workspace
+   needs them; otherwise skip for minimal Telegram + Codex setup.
+4. Workspace name? Default: `personal`.
+5. Provider? Choose exactly one:
    - `codex` for the Codex provider; app-server mechanics stay inside the
      provider adapter/private config boundary.
    - `claude-code` only as a placeholder/seam for now; do not install real
      Claude Code wiring in this setup flow.
-3. Provider auth status?
+6. Provider auth status?
    - Existing CLI/session already authenticated.
    - Private API key/token to store outside git.
    - Not ready; create placeholders and report pending auth.
-4. Initial entrypoint? Default: Telegram as `telegram-main` in single-primary
-   mode. Use fake entrypoint only if the user explicitly declines Telegram for
-   smoke testing.
-5. Codex auth ready? Configure or verify this before Telegram:
+7. Codex auth ready? Configure or verify this before service start and before
+   accepting Telegram traffic:
    - confirm the selected Codex transport/auth path,
    - store any credential only in the private workspace/server env file or host
      secret store,
    - run redacted metadata/health checks only, unless the user explicitly
      confirms a live provider check with `--allow-live`,
    - never print provider tokens, keys, session material, or raw env values.
-6. Service install/start ready? Guide this before Telegram live traffic:
+8. Service install/start ready? Guide this after Telegram token storage,
+   private data setup, and Codex auth are ready:
    - render and review the systemd plan,
    - confirm service user, working directory, private env file, and unit path,
    - require explicit user confirmation before privileged install, enable, or
      start commands,
    - keep the service stopped/pending if Codex auth or private secrets are not
      ready.
-7. Telegram bot token from BotFather ready? If not, guide the user to create
-   one before live start:
+9. Optional follow-up: first-user pairing/admin bootstrap?
+   - default: first-user pairing after service start, where the first Telegram
+     user/chat to message the newly configured bot becomes paired/admin state,
+   - user supplies an explicit admin allowlist privately,
+   - optional advanced one-time `/pair <code>` flow,
+   - not ready; leave pairing pending.
+10. Optional follow-up: Telegram voice/audio transcription? Default: disabled.
+    If enabled, configure `transcription.provider: openai`, `apiKeyRef` such as
+    `env:OPENAI_API_KEY`, a model such as `gpt-4o-mini-transcribe`, and scope
+    it to `telegram-main` with `voice`/`audio` attachment kinds. Store the
+    OpenAI key only in the private workspace or host secret store.
+11. Optional follow-up: generated pages/web preview? Default: disabled.
+12. Optional follow-up: backup strategy tuning after the initial private repo
+    exists.
+
+BotFather token creation guidance:
    - open Telegram and message `@BotFather`,
    - send `/newbot`,
    - choose a display name,
@@ -103,21 +125,6 @@ config/secrets/log paths, and command lists unless the user asks for details or
      private env store, or configured secret-store reference,
    - never commit or paste the token into repo files, chat transcripts, logs,
      or setup summaries.
-   If yes, store privately; if no, leave token pending with those exact next
-   steps.
-8. Initial Telegram admin bootstrap method?
-   - default: first-user pairing, where the first Telegram user/chat to message
-     the newly configured bot becomes paired/admin state,
-   - user supplies an explicit admin allowlist privately,
-   - optional advanced one-time `/pair <code>` flow,
-   - not ready; leave pairing pending.
-9. Optional Telegram voice/audio transcription? Default: disabled. If enabled,
-   configure `transcription.provider: openai`, `apiKeyRef` such as
-   `env:OPENAI_API_KEY`, a model such as `gpt-4o-mini-transcribe`, and scope it
-   to `telegram-main` with `voice`/`audio` attachment kinds. Store the OpenAI
-   key only in the private workspace or host secret store; never paste it into
-   repo files, prompts, logs, or setup summaries.
-10. Optional generated pages/web preview? Default: disabled.
 11. Optional private workspace backup? Default: none. Offer `local-snapshot` or
    `private-git` with private repo path, optional remote, branch, and safe
    include/exclude defaults that exclude secrets/logs/tmp/caches.
@@ -165,12 +172,14 @@ config/secrets/log paths, and command lists unless the user asks for details or
    before live Telegram traffic:
    - completed checks,
    - not live yet,
-   - next step: configure/verify Codex auth,
+   - next step: connect Telegram and show BotFather/private-token guidance,
+   - then pull or initialize the private data/backup repo,
+   - then connect Composio accounts if needed,
+   - then confirm essential runtime choices,
+   - then configure/verify Codex auth before service start,
    - then review/install/start the service after explicit confirmation,
-   - then say "Next up, let's configure your Telegram token" and show the
-     BotFather steps,
-   - finally first-user pairing (or the requested private allowlist/`/pair`
-     flow).
+   - finally optional follow-ups such as first-user pairing, OpenAI
+     transcription, web publishing, or backup tuning.
 9. If the user reruns setup after closing a Codex/Claude session, inspect
    `<workspace>/state/setup-progress.json` plus current live metadata, report
    completed steps, identify the next incomplete step, and continue from there
@@ -192,7 +201,7 @@ Use this flow only after the user chooses remote mode and confirms the host.
 1. Collect:
    - local SSH config host label,
    - server address/IP,
-   - initial bootstrap user, often `root`,
+   - initial SSH login username, default `root` when omitted,
    - repo clone path, default `/home/brain/brain` for the `brain` service user,
    - remote workspace path, default `/home/brain/.brain/workspace`,
    - provider and Telegram readiness.

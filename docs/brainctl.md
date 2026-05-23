@@ -65,9 +65,27 @@ pnpm run brainctl setup inspect --config ~/.brain/workspace/config/runtime.yaml 
 ```
 
 `setup defaults` is intentionally concise: by default it shows only the setup
-mode, source checkout, private workspace, and initial workspace name. Pass
-`--verbose` only when you need derived config/secrets/log paths, service-user
-details, or copyable commands.
+mode, remote SSH host/user when `--target remote` is selected, source checkout,
+private workspace, initial workspace name, and the core setup flow. For remote
+setup, ask for an SSH IP/DNS host and SSH login username; if no username is
+given, default the SSH login to `root` for bootstrap. Pass `--verbose` only
+when you need derived config/secrets/log paths, service-user details, or
+copyable commands.
+
+The normal core setup flow is:
+
+1. Connect Telegram: create or choose the bot and store its token as a private
+   secret ref; do not start polling/webhooks yet.
+2. Pull or initialize the private data/backup repo.
+3. Connect Composio accounts only if this workspace needs calendar/chat data
+   sources.
+4. Confirm other essential runtime choices: workspace path, provider, primary
+   entrypoint, and service target.
+
+Codex auth is verified after those setup choices but before service start or
+live Telegram traffic. OpenAI transcription, web publishing, backup policy
+tuning, and first-user pairing are follow-up steps unless explicitly requested
+during initial setup.
 
 The setup status response groups findings into:
 
@@ -164,7 +182,16 @@ pnpm run brainctl validate live --config examples/config/runtime.yaml --workspac
 - not live yet;
 - next step / guided sequence.
 
-The guided sequence is intentionally: configure or verify Codex auth, review/install/start the service after explicit confirmation, then configure the Telegram token, then complete first-user pairing. The Telegram step shows the BotFather flow: message `@BotFather`, send `/newbot`, choose a display name, choose a unique username ending in `bot`, and copy the token only into the private server secret file or configured env/secret store. Never paste tokens into the repo, setup chat, command output, or logs.
+The guided sequence is intentionally: connect Telegram token storage, connect or
+initialize the private data/backup repo, connect Composio accounts if needed,
+confirm essential runtime choices, verify Codex auth, review/install/start the
+service after explicit confirmation, then handle optional follow-ups such as
+first-user pairing, OpenAI transcription, web publishing, and backup tuning.
+The Telegram step shows the BotFather flow: message `@BotFather`, send
+`/newbot`, choose a display name, choose a unique username ending in `bot`, and
+copy the token only into the private server secret file or configured
+env/secret store. Never paste tokens into the repo, setup chat, command output,
+or logs.
 
 When `validate live --run-safe` runs against an existing private workspace, it
 may update `state/setup-progress.json` with metadata-only results such as Codex

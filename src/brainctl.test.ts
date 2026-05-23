@@ -125,11 +125,14 @@ test("brainctl operations and live validation commands are non-mutating by defau
     assert.equal(liveJson.details.sideEffects, "none");
     assert.equal(liveJson.details.plan.networkStarted, false);
     assert.equal(liveJson.details.plan.checks.find((check) => check.id === "codex-provider")?.mode, "plan");
-    assert.equal(liveJson.details.nextStep.step, "configure-verify-codex-auth");
-    assert.match(liveJson.details.nextStep.title, /Codex auth/);
+    assert.equal(liveJson.details.nextStep.step, "telegram-connection");
+    assert.ok(liveJson.details.guidedSequence.find((step) => step.step === "private-data-repo"));
+    assert.ok(liveJson.details.guidedSequence.find((step) => step.step === "composio-accounts"));
+    assert.ok(liveJson.details.guidedSequence.find((step) => step.step === "configure-verify-codex-auth"));
+    assert.match(liveJson.details.nextStep.title, /Connect Telegram/);
     assert.ok(liveJson.details.guidedSequence.find((step) => step.step === "install-start-service"));
-    const telegramStep = liveJson.details.guidedSequence.find((step) => step.step === "configure-telegram-token");
-    assert.match(telegramStep?.title ?? "", /configure your Telegram token/);
+    const telegramStep = liveJson.details.guidedSequence.find((step) => step.step === "telegram-connection");
+    assert.match(telegramStep?.title ?? "", /Connect Telegram/);
     assert.ok(telegramStep?.botFatherSteps?.some((step) => /@BotFather/.test(step)));
     assert.ok(liveJson.details.notLiveYet.some((item) => /has not started Telegram polling/.test(item)));
 
@@ -309,9 +312,9 @@ console.log(JSON.stringify({ method: "turn/completed", params: { turn: { id: "tu
     };
     assert.match(liveJson.summary, /Pre-live checks passed/);
     assert.ok(liveJson.details.completedChecks.some((check) => /Runtime config/.test(check)));
-    assert.equal(liveJson.details.nextStep.step, "configure-verify-codex-auth");
+    assert.equal(liveJson.details.nextStep.step, "telegram-connection");
     assert.ok(liveJson.details.guidedSequence.find((step) => step.step === "install-start-service")?.requiresConfirmation?.includes("systemd"));
-    assert.ok(liveJson.details.guidedSequence.find((step) => step.step === "configure-telegram-token")?.privateStorage?.some((item) => /never paste the token into the repo/.test(item)));
+    assert.ok(liveJson.details.guidedSequence.find((step) => step.step === "telegram-connection")?.privateStorage?.some((item) => /never paste the token into the repo/.test(item)));
     assert.equal(liveJson.details.setupStateUpdate.wrote, true);
     assert.equal(liveJson.details.setupStateUpdate.metadata.mode, "0600");
     assert.equal(liveJson.details.setupStateUpdate.state.secretValuesStored, false);
@@ -419,11 +422,11 @@ test("brainctl setup inspect is idempotent and redacts secret values", async () 
     assert.equal(firstJson.details.idempotency.reRunnable, true);
     assert.equal(firstJson.details.idempotency.defaultOverwrite, false);
     assert.deepEqual(firstJson.details.plan.missing_required, []);
-    assert.equal(firstJson.details.setupWizard.nextIncompleteStep.step, "configure-verify-codex-auth");
+    assert.equal(firstJson.details.setupWizard.nextIncompleteStep.step, "telegram-connection");
     assert.ok(firstJson.details.setupWizard.completedSteps.some((step) => step.step === "workspace-scaffold"));
     assert.equal(firstJson.details.setupState.metadata.mode, "0600");
     assert.equal(firstJson.details.setupState.state.secretValuesStored, false);
-    assert.equal(firstJson.details.setupState.state.nextRecommendedStep, "configure-verify-codex-auth");
+    assert.equal(firstJson.details.setupState.state.nextRecommendedStep, "telegram-connection");
     const progressState = JSON.parse(await readFile(firstJson.details.setupState.path, "utf8")) as { secretValuesStored: boolean; workspace: string; workspaceRoot: string; statuses: { telegramToken: { configured: boolean } } };
     assert.equal(progressState.secretValuesStored, false);
     assert.equal(progressState.workspace, "personal");
@@ -447,13 +450,13 @@ test("brainctl setup inspect is idempotent and redacts secret values", async () 
     assert.equal(secondJson.ok, true);
     assert.equal(secondJson.details.secretValuesPrinted, false);
     assert.ok(secondJson.details.plan.unsafe_to_overwrite.some((item) => /runtime\.yaml/.test(item)));
-    assert.match(secondJson.summary, /resume from Configure or verify Codex auth/);
+    assert.match(secondJson.summary, /resume from Connect Telegram/);
     assert.equal(secondJson.details.setupState.present, true);
     assert.equal(secondJson.details.setupState.state.secretValuesStored, false);
     assert.equal(secondJson.details.setupWizard.resumable, true);
     assert.equal(secondJson.details.setupWizard.idempotent, true);
     assert.match(secondJson.details.setupWizard.stateTrust, /resume aid only/);
-    assert.equal(secondJson.details.setupWizard.nextIncompleteStep.step, "configure-verify-codex-auth");
+    assert.equal(secondJson.details.setupWizard.nextIncompleteStep.step, "telegram-connection");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -467,20 +470,28 @@ test("brainctl setup defaults renders concise remote choices and hides plumbing"
     details: {
       decisions: Array<{ decision: string; default: string }>;
       safety: string[];
+      setupFlow: { coreSteps: Array<{ step: string; prompt: string }>; orderingNotes: string[] };
       advanced?: unknown;
     };
   };
   assert.equal(parsed.ok, true);
-  assert.deepEqual(parsed.details.decisions.map((item) => item.decision), ["Setup mode", "Source checkout", "Private workspace", "Initial workspace"]);
+  assert.deepEqual(parsed.details.decisions.map((item) => item.decision), ["Setup mode", "Remote SSH host", "Remote SSH user", "Source checkout", "Private workspace", "Initial workspace"]);
+  assert.equal(parsed.details.decisions.find((item) => item.decision === "Remote SSH host")?.default, "ask: server IP or DNS name");
+  assert.equal(parsed.details.decisions.find((item) => item.decision === "Remote SSH user")?.default, "root");
   assert.equal(parsed.details.decisions.find((item) => item.decision === "Source checkout")?.default, "/home/brain/brain");
   assert.equal(parsed.details.decisions.find((item) => item.decision === "Private workspace")?.default, "/home/brain/.brain/workspace");
+  assert.deepEqual(parsed.details.setupFlow.coreSteps.map((item) => item.step), ["telegram-connection", "private-data-repo", "composio-accounts", "essential-runtime-choices"]);
+  assert.ok(parsed.details.setupFlow.orderingNotes.some((item) => /Codex auth before starting the service/.test(item)));
   assert.ok(parsed.details.safety.some((item) => /outside git/.test(item)));
   assert.equal(parsed.details.advanced, undefined);
   assert.doesNotMatch(result.stdout, /serviceUser|serviceName|secretsEnv|runtimeConfig|pnpm caveat|package manager|srv\/brain/);
 
-  const verbose = spawnBrainctl(["setup", "defaults", "--target", "remote", "--workspace", "personal", "--verbose"]);
+  const verbose = spawnBrainctl(["setup", "defaults", "--target", "remote", "--workspace", "personal", "--ssh-host", "203.0.113.10", "--ssh-user", "ubuntu", "--verbose"]);
   assert.equal(verbose.status, 0, verbose.stderr);
-  const verboseJson = JSON.parse(verbose.stdout) as { details: { advanced: { serviceUser: string; serviceName: string; paths: { runtimeConfig: string; secretsEnv: string } } } };
+  const verboseJson = JSON.parse(verbose.stdout) as { details: { decisions: Array<{ decision: string; default: string }>; advanced: { ssh: { host: string; user: string }; serviceUser: string; serviceName: string; paths: { runtimeConfig: string; secretsEnv: string } } } };
+  assert.equal(verboseJson.details.decisions.find((item) => item.decision === "Remote SSH host")?.default, "203.0.113.10");
+  assert.equal(verboseJson.details.decisions.find((item) => item.decision === "Remote SSH user")?.default, "ubuntu");
+  assert.deepEqual(verboseJson.details.advanced.ssh, { host: "203.0.113.10", user: "ubuntu" });
   assert.equal(verboseJson.details.advanced.serviceUser, "brain");
   assert.equal(verboseJson.details.advanced.serviceName, "brain-personal");
   assert.equal(verboseJson.details.advanced.paths.runtimeConfig, "/home/brain/.brain/workspace/config/runtime.yaml");

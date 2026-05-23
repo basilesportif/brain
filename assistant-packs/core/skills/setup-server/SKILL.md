@@ -23,16 +23,24 @@ Use this skill when a user asks to prepare a fresh Ubuntu host for Brain.
 
 ## Baseline checklist
 
-1. Confirm host label/address, repo path, workspace path, and provider choice.
-   Ask for service-user/service details only when needed for bootstrap or when
-   the user asks for advanced details.
+1. Confirm host label/address and SSH login username; default the SSH login
+   username to `root` if omitted. Then confirm repo path, workspace path, and
+   provider choice. Ask for service-user/service details only when needed for
+   bootstrap or when the user asks for advanced details.
 2. Install base packages: Git, curl, build tools, certificates, Node, pnpm, and any provider CLI prerequisites the user selected.
 3. Clone or update the user-confirmed Brain repository.
 4. Run `pnpm install` and `pnpm run check`.
 5. Create private workspace directories with owner-only permissions for secrets.
 6. Copy example config into the private workspace and keep real values out of git.
 7. Write/update metadata-only setup progress in private state, then use it on rerun to resume at the next incomplete step.
-8. Configure/verify Codex auth before Telegram; require explicit confirmation before writing credentials or running live provider checks.
-9. Prepare/install/start the service only after confirmation.
-10. Then configure the Telegram BotFather token privately and complete first-user pairing.
-11. Report remaining blockers in order: Codex auth, service install/start, Telegram token/admin pairing, firewall/webhook/TLS.
+8. Follow the core wizard order: Telegram token ref, private data/backup repo,
+   Composio accounts if needed, then essential runtime choices.
+9. Configure/verify Codex auth before service start or live Telegram traffic;
+   require explicit confirmation before writing credentials or running live
+   provider checks.
+10. Prepare/install/start the service only after confirmation.
+11. Treat first-user pairing, OpenAI transcription, web publishing, and backup
+   tuning as optional follow-ups unless explicitly requested.
+12. Report remaining blockers in order: Telegram token ref, private data repo,
+   Composio refs if enabled, Codex auth, service install/start, pairing,
+   firewall/webhook/TLS.
