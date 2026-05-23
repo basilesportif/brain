@@ -26,21 +26,23 @@ running under Claude Code, `docs/setup-plan.md`, and
 up a local private workspace or a remote Ubuntu server over SSH. Do not `cd`
 into a separate setup directory.
 
-After safe pre-live validation, setup should continue in order: configure or
-verify Codex auth, review/install/start the service only after explicit
-confirmation, then configure Telegram. For the default Telegram entrypoint,
-setup will ask for a BotFather token. If you do not have one yet, open
-Telegram, message `@BotFather`, run `/newbot`, choose a bot name and a unique
-username ending in `bot`, then save the returned token only in Brain's private
-server secret file/env store or configured secret reference. Never commit or
-paste the token into chat/logs. After Brain starts, send the bot its first
-message to complete first-user pairing; rotate leaked tokens with BotFather
-`/revoke`.
+After safe pre-live validation, setup should confirm essential runtime choices
+and, when the provider is Codex, configure or verify Codex auth before service
+start or live Telegram traffic. For the default Telegram entrypoint, setup will
+ask for a BotFather token but must not start polling/webhooks until service
+start is explicitly confirmed. If you do not have a bot yet, open Telegram,
+message `@BotFather`, run `/newbot`, choose a bot name and a unique username
+ending in `bot`, then save the returned token only in Brain's private server
+secret file/env store or configured secret reference. Never commit or paste the
+token into chat/logs. After Brain starts, send the bot its first message to
+complete first-user pairing; rotate leaked tokens with BotFather `/revoke`.
 
 Setup is resumable: Brain writes only non-secret progress metadata to the
 private workspace at `state/setup-progress.json` and uses it with fresh metadata
 checks on rerun to continue from the next incomplete step. Raw secrets, tokens,
 provider sessions, Telegram IDs, and logs do not belong in that file.
+Use `brainctl setup reset --workspace <name> --path <workspace-path> --dry-run`
+to inspect a reset, and add `--yes` to remove only that progress file.
 
 ## Initial commands
 

@@ -38,6 +38,18 @@ session, but must reconcile it with current config, file metadata, secret-ref
 checks, provider health, and service health rather than trusting stale progress
 blindly.
 
+If the wizard needs a clean resume state, run:
+
+```bash
+pnpm run brainctl setup reset --workspace <workspace-name> --path <private-workspace> --dry-run
+pnpm run brainctl setup reset --workspace <workspace-name> --path <private-workspace> --yes
+```
+
+Reset is intentionally narrow: it reports only the target path, previous
+presence/mode/size, and action taken or skipped, and it can remove only
+`<private-workspace>/state/setup-progress.json`. It must not touch private
+secrets, config, backups, logs, documents, provider sessions, or Telegram state.
+
 ## Agent entrypoints
 
 When started from the repository root, Codex and Claude Code agents should treat
@@ -327,12 +339,13 @@ on private workspace knowledge.
 9. Summarize successful pre-live validation as a wizard:
    - completed checks;
    - not live yet;
-   - next step: connect Telegram with BotFather steps and private-secret-only
-     token storage guidance;
+   - confirm essential runtime choices;
+   - configure/verify Codex auth when the provider is Codex, before service
+     start or live Telegram traffic;
+   - connect Telegram with BotFather steps and private-secret-only token
+     storage guidance, but do not start polling/webhooks yet;
    - then pull or initialize the private data/backup repo;
    - then connect Composio accounts if needed;
-   - then confirm essential runtime choices;
-   - then configure/verify Codex auth before service start;
    - then review/install/start the service with explicit confirmation;
    - finally optional follow-ups such as first-user pairing, OpenAI
      transcription, web publishing, or backup tuning.

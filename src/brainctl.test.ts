@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -462,6 +462,68 @@ test("brainctl setup inspect is idempotent and redacts secret values", async () 
   }
 });
 
+test("brainctl setup reset only removes setup progress metadata", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-setup-reset-"));
+  try {
+    const workspace = path.join(root, "workspace");
+    const progress = path.join(workspace, "state", "setup-progress.json");
+    const secretFile = path.join(workspace, "secrets", "secrets.env");
+    const configFile = path.join(workspace, "config", "runtime.yaml");
+    const logFile = path.join(workspace, "logs", "runtime.jsonl");
+    const backupFile = path.join(workspace, "backups", "snapshot.txt");
+    const documentFile = path.join(workspace, "documents", "note.txt");
+    await mkdir(path.dirname(progress), { recursive: true });
+    await mkdir(path.dirname(secretFile), { recursive: true });
+    await mkdir(path.dirname(configFile), { recursive: true });
+    await mkdir(path.dirname(logFile), { recursive: true });
+    await mkdir(path.dirname(backupFile), { recursive: true });
+    await mkdir(path.dirname(documentFile), { recursive: true });
+    await writeFile(progress, `${JSON.stringify({ secret: "do-not-print-progress-content" })}\n`, { mode: 0o600 });
+    await chmod(progress, 0o600);
+    await writeFile(secretFile, "SECRET_VALUE=must-remain\n");
+    await writeFile(configFile, "runtime config must remain\n");
+    await writeFile(logFile, "log must remain\n");
+    await writeFile(backupFile, "backup must remain\n");
+    await writeFile(documentFile, "document must remain\n");
+
+    const dryRun = spawnBrainctl(["setup", "reset", "--workspace", "personal", "--path", workspace, "--dry-run"]);
+    assert.equal(dryRun.status, 0, dryRun.stderr);
+    assert.doesNotMatch(dryRun.stdout, /do-not-print-progress-content|SECRET_VALUE/);
+    const dryJson = JSON.parse(dryRun.stdout) as { details: { path: string; previous: { present: boolean; mode: string; sizeBytes: number }; action: string; sideEffects: string } };
+    assert.equal(dryJson.details.path, progress);
+    assert.equal(dryJson.details.previous.present, true);
+    assert.equal(dryJson.details.previous.mode, "0600");
+    assert.ok(dryJson.details.previous.sizeBytes > 0);
+    assert.equal(dryJson.details.action, "would_remove");
+    assert.equal(dryJson.details.sideEffects, "none");
+    assert.ok((await stat(progress)).isFile());
+
+    const unconfirmed = spawnBrainctl(["setup", "reset", "--workspace", "personal", "--path", workspace]);
+    assert.equal(unconfirmed.status, 0, unconfirmed.stderr);
+    const unconfirmedJson = JSON.parse(unconfirmed.stdout) as { details: { action: string; skipped: string } };
+    assert.equal(unconfirmedJson.details.action, "skipped");
+    assert.match(unconfirmedJson.details.skipped, /--yes/);
+    assert.ok((await stat(progress)).isFile());
+
+    const reset = spawnBrainctl(["setup", "reset", "--workspace", "personal", "--path", workspace, "--yes"]);
+    assert.equal(reset.status, 0, reset.stderr);
+    const resetJson = JSON.parse(reset.stdout) as { details: { previous: { present: boolean; mode: string; sizeBytes: number }; action: string; scope: string; sideEffects: string } };
+    assert.equal(resetJson.details.previous.present, true);
+    assert.equal(resetJson.details.previous.mode, "0600");
+    assert.equal(resetJson.details.action, "removed");
+    assert.equal(resetJson.details.scope, "state/setup-progress.json only");
+    assert.match(resetJson.details.sideEffects, /setup-progress\.json only/);
+    await assert.rejects(stat(progress));
+    assert.equal(await readFile(secretFile, "utf8"), "SECRET_VALUE=must-remain\n");
+    assert.equal(await readFile(configFile, "utf8"), "runtime config must remain\n");
+    assert.equal(await readFile(logFile, "utf8"), "log must remain\n");
+    assert.equal(await readFile(backupFile, "utf8"), "backup must remain\n");
+    assert.equal(await readFile(documentFile, "utf8"), "document must remain\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("brainctl setup defaults renders concise remote choices and hides plumbing", () => {
   const result = spawnBrainctl(["setup", "defaults", "--target", "remote", "--workspace", "personal"]);
   assert.equal(result.status, 0, result.stderr);
@@ -480,7 +542,8 @@ test("brainctl setup defaults renders concise remote choices and hides plumbing"
   assert.equal(parsed.details.decisions.find((item) => item.decision === "Remote SSH user")?.default, "root");
   assert.equal(parsed.details.decisions.find((item) => item.decision === "Source checkout")?.default, "/home/brain/brain");
   assert.equal(parsed.details.decisions.find((item) => item.decision === "Private workspace")?.default, "/home/brain/.brain/workspace");
-  assert.deepEqual(parsed.details.setupFlow.coreSteps.map((item) => item.step), ["telegram-connection", "private-data-repo", "composio-accounts", "essential-runtime-choices"]);
+  assert.deepEqual(parsed.details.setupFlow.coreSteps.map((item) => item.step), ["essential-runtime-choices", "configure-verify-codex-auth", "telegram-connection", "private-data-repo", "composio-accounts"]);
+  assert.ok(parsed.details.setupFlow.orderingNotes.some((item) => /provider is Codex/.test(item)));
   assert.ok(parsed.details.setupFlow.orderingNotes.some((item) => /Codex auth before starting the service/.test(item)));
   assert.ok(parsed.details.safety.some((item) => /outside git/.test(item)));
   assert.equal(parsed.details.advanced, undefined);

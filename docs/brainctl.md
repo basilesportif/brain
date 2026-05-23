@@ -9,6 +9,8 @@ pnpm run brainctl setup defaults --target remote --workspace personal
 pnpm run brainctl setup --workspace personal --path ~/.brain/workspace
 pnpm run brainctl setup inspect --config ~/.brain/workspace/config/runtime.yaml --workspace personal
 pnpm run brainctl setup status --config ~/.brain/workspace/config/runtime.yaml --workspace personal
+pnpm run brainctl setup reset --workspace personal --path ~/.brain/workspace --dry-run
+pnpm run brainctl setup reset --workspace personal --path ~/.brain/workspace --yes
 pnpm run brainctl doctor --config examples/config/runtime.yaml --pack assistant-packs/core
 pnpm run brainctl config validate examples/config/runtime.yaml
 pnpm run brainctl secrets check --config examples/config/runtime.yaml
@@ -74,18 +76,18 @@ copyable commands.
 
 The normal core setup flow is:
 
-1. Connect Telegram: create or choose the bot and store its token as a private
-   secret ref; do not start polling/webhooks yet.
-2. Pull or initialize the private data/backup repo.
-3. Connect Composio accounts only if this workspace needs calendar/chat data
-   sources.
-4. Confirm other essential runtime choices: workspace path, provider, primary
+1. Confirm essential runtime choices: workspace path, provider, primary
    entrypoint, and service target.
+2. If the provider is Codex, configure and verify Codex auth explicitly before
+   service start or live Telegram traffic.
+3. Connect Telegram: create or choose the bot and store its token as a private
+   secret ref; do not start polling/webhooks yet.
+4. Pull or initialize the private data/backup repo.
+5. Connect Composio accounts only if this workspace needs calendar/chat data
+   sources.
 
-Codex auth is verified after those setup choices but before service start or
-live Telegram traffic. OpenAI transcription, web publishing, backup policy
-tuning, and first-user pairing are follow-up steps unless explicitly requested
-during initial setup.
+OpenAI transcription, web publishing, backup policy tuning, and first-user
+pairing are follow-up steps unless explicitly requested during initial setup.
 
 The setup status response groups findings into:
 
@@ -110,6 +112,13 @@ workspace state. `setup inspect/status` reads this progress file as a resume aid
 but does not trust it blindly: current config, directory, secret-ref metadata,
 and explicit live/provider/health checks still decide whether setup can safely
 continue.
+
+To restart only the wizard resume metadata, use `setup reset` with an explicit
+workspace path. It targets exactly `<private-workspace>/state/setup-progress.json`;
+it does not remove secrets, config, backups, logs, documents, or other state.
+`--dry-run` reports the target path, previous presence/mode/size, and planned
+action. Without `--yes`, reset skips removal. With `--yes`, it removes only that
+progress file and prints metadata only.
 
 ## Backup and private Git model
 
@@ -182,9 +191,10 @@ pnpm run brainctl validate live --config examples/config/runtime.yaml --workspac
 - not live yet;
 - next step / guided sequence.
 
-The guided sequence is intentionally: connect Telegram token storage, connect or
-initialize the private data/backup repo, connect Composio accounts if needed,
-confirm essential runtime choices, verify Codex auth, review/install/start the
+The guided sequence is intentionally: confirm essential runtime choices,
+configure/verify Codex auth when the provider is Codex, connect Telegram token
+storage without starting polling/webhooks, connect or initialize the private
+data/backup repo, connect Composio accounts if needed, review/install/start the
 service after explicit confirmation, then handle optional follow-ups such as
 first-user pairing, OpenAI transcription, web publishing, and backup tuning.
 The Telegram step shows the BotFather flow: message `@BotFather`, send

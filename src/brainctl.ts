@@ -37,7 +37,7 @@ program
 
 program.command("setup")
   .description("Create a private workspace directory scaffold without writing secrets.")
-  .argument("[mode]", "optional mode: defaults, inspect, or status")
+  .argument("[mode]", "optional mode: defaults, inspect, status, or reset")
   .option("--workspace <name>", "workspace id", DEFAULT_WORKSPACE_ID)
   .option("--target <target>", "defaults target: local or remote", "local")
   .option("--ssh-host <host>", "remote SSH IP/DNS host for setup defaults")
@@ -50,6 +50,7 @@ program.command("setup")
   .option("--force", "allow explicitly requested non-destructive rewrites in future setup flows")
   .option("--replace", "allow explicitly requested destructive replacement in future setup flows")
   .option("--dry-run", "show actions without creating directories")
+  .option("--yes", "confirm setup reset should remove only state/setup-progress.json")
   .action(async (mode: string | undefined, options) => {
     if (mode === "defaults") {
       return exitWith(setupDefaultsCommand(options));
@@ -57,7 +58,10 @@ program.command("setup")
     if (mode === "inspect" || mode === "status") {
       return exitWith(await setupInspectCommand({ ...options, config: options.config ?? "examples/config/runtime.yaml" }));
     }
-    if (mode) return exitWith({ ok: false, summary: `unknown setup mode: ${mode}`, details: { supported: ["defaults", "inspect", "status"] } });
+    if (mode === "reset") {
+      return exitWith(await setupResetCommand(options));
+    }
+    if (mode) return exitWith({ ok: false, summary: `unknown setup mode: ${mode}`, details: { supported: ["defaults", "inspect", "status", "reset"] } });
     return exitWith(await setupCommand(options));
   });
 
@@ -1612,6 +1616,13 @@ interface SetupInspectOptions {
   repo?: string;
 }
 
+interface SetupResetOptions {
+  workspace: string;
+  path?: string;
+  dryRun?: boolean;
+  yes?: boolean;
+}
+
 interface SetupDefaultsOptions {
   workspace: string;
   target?: string;
@@ -1691,8 +1702,16 @@ function conciseSetupFlow() {
   return {
     coreSteps: [
       {
+        step: "essential-runtime-choices",
+        prompt: "Confirm workspace, provider, entrypoint, and service target.",
+      },
+      {
+        step: "configure-verify-codex-auth",
+        prompt: "When provider is Codex, verify auth before service start or live Telegram traffic.",
+      },
+      {
         step: "telegram-connection",
-        prompt: "Connect Telegram bot and private token ref.",
+        prompt: "Connect Telegram bot and private token ref; do not start live traffic yet.",
       },
       {
         step: "private-data-repo",
@@ -1702,13 +1721,10 @@ function conciseSetupFlow() {
         step: "composio-accounts",
         prompt: "Connect Composio accounts if this workspace needs them.",
       },
-      {
-        step: "essential-runtime-choices",
-        prompt: "Confirm workspace, provider, entrypoint, and service target.",
-      },
     ],
     orderingNotes: [
-      "Verify Codex auth before starting the service or accepting Telegram traffic.",
+      "Codex auth is an explicit step whenever the provider is Codex.",
+      "Verify Codex auth before starting the service or accepting live Telegram traffic.",
       "Keep OpenAI transcription, web publishing, backup tuning, and first-user pairing as follow-up steps unless explicitly requested now.",
     ],
   };
@@ -1762,6 +1778,54 @@ async function setupCommand(options: SetupInspectOptions & { dryRun?: boolean; f
       setupState,
       inspection: after,
       sideEffects: options.dryRun ? "none" : "created missing directories and updated private setup progress state",
+    },
+  };
+}
+
+async function setupResetCommand(options: SetupResetOptions): Promise<CliResult> {
+  if (!options.path) {
+    return {
+      ok: false,
+      summary: "setup reset needs an explicit --path",
+      details: {
+        workspace: options.workspace,
+        path: undefined,
+        action: "skipped",
+        skipped: "pass --path <workspace-path> so reset targets only that workspace state file",
+      },
+    };
+  }
+  const workspaceRoot = path.resolve(options.path);
+  const progressPath = setupProgressPath(workspaceRoot);
+  const previous = await setupProgressMetadata(progressPath);
+  let action: "skipped" | "would_remove" | "removed" = "skipped";
+  let skipped: string | undefined;
+  if (!previous.present) {
+    skipped = "setup progress file is absent";
+  } else if (options.dryRun) {
+    action = "would_remove";
+    skipped = "dry run; no files changed";
+  } else if (!options.yes) {
+    skipped = "confirmation required; rerun with --yes to remove only state/setup-progress.json";
+  } else {
+    await rm(progressPath, { force: true });
+    action = "removed";
+  }
+  return {
+    ok: true,
+    summary: action === "removed"
+      ? "setup progress reset; rerun setup/status to resume fresh"
+      : action === "would_remove"
+        ? "setup progress reset plan ready"
+        : "setup progress reset skipped",
+    details: {
+      workspace: options.workspace,
+      path: progressPath,
+      previous,
+      action,
+      skipped,
+      scope: "state/setup-progress.json only",
+      sideEffects: action === "removed" ? "removed state/setup-progress.json only" : "none",
     },
   };
 }
@@ -2661,6 +2725,15 @@ async function fileMetadata(filePath: string) {
     return { present: true, path: filePath, mode: `0${(info.mode & 0o777).toString(8)}`, sizeBytes: info.size, value: "redacted" };
   } catch {
     return { present: false, path: filePath, value: "redacted" };
+  }
+}
+
+async function setupProgressMetadata(filePath: string) {
+  try {
+    const info = await stat(filePath);
+    return { present: true, mode: `0${(info.mode & 0o777).toString(8)}`, sizeBytes: info.size };
+  } catch {
+    return { present: false, mode: null, sizeBytes: 0 };
   }
 }
 
