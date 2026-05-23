@@ -80,6 +80,19 @@ Destructive replacement is never implicit; commands that support replacement
 require explicit `--force` or `--replace` and still print the planned target.
 Secret refs are checked only by env/file existence, mode, and byte size.
 
+Setup is resumable across Codex sessions. `brainctl setup` writes a
+metadata-only private progress file at
+`<private-workspace>/state/setup-progress.json` with mode `0600` where
+practical. It records non-secret setup progress such as workspace name/path,
+completed step ids, Codex auth status metadata, service install/start status,
+Telegram token configured metadata, and the next recommended step. It never
+stores raw tokens, API keys, session material, Telegram IDs, or logs. The file
+is excluded from the private workspace Git template and source checkout ignores
+workspace state. `setup inspect/status` reads this progress file as a resume aid
+but does not trust it blindly: current config, directory, secret-ref metadata,
+and explicit live/provider/health checks still decide whether setup can safely
+continue.
+
 ## Backup and private Git model
 
 `backup plan/init/check/status` manages private-workspace backup metadata. The
@@ -137,7 +150,7 @@ pnpm run brainctl operations plan --config examples/config/runtime.yaml --worksp
 # Render a systemd service unit without installing it or restarting anything.
 pnpm run brainctl operations systemd --config examples/config/runtime.yaml --workspace personal
 
-# Render a guarded Telegram/Codex live-readiness plan. Defaults to no network.
+# Render a guarded pre-live setup plan. Defaults to no network.
 pnpm run brainctl validate live --config examples/config/runtime.yaml --workspace personal --codex-transport app-server
 
 # Execute only safe local checks from that plan: config, secret metadata, runtime smoke,
@@ -145,7 +158,19 @@ pnpm run brainctl validate live --config examples/config/runtime.yaml --workspac
 pnpm run brainctl validate live --config examples/config/runtime.yaml --workspace personal --run-safe
 ```
 
-`operations` never runs git, pnpm, systemctl, or deployment commands; it returns the exact operator commands to run externally. `validate live` is a guarded smoke harness: without `--allow-live`, live Codex app-server checks are only planned, Telegram token refs are checked by metadata, and no polling/webhook or user task starts.
+`operations` never runs git, pnpm, systemctl, or deployment commands; it returns the exact operator commands to run externally. `validate live` is a guarded smoke harness: without `--allow-live`, live Codex app-server checks are only planned, Telegram token refs are checked by metadata, and no polling/webhook or user task starts. When the pre-live checks pass, the output is organized like a setup wizard instead of a raw dump:
+
+- completed checks;
+- not live yet;
+- next step / guided sequence.
+
+The guided sequence is intentionally: configure or verify Codex auth, review/install/start the service after explicit confirmation, then configure the Telegram token, then complete first-user pairing. The Telegram step shows the BotFather flow: message `@BotFather`, send `/newbot`, choose a display name, choose a unique username ending in `bot`, and copy the token only into the private server secret file or configured env/secret store. Never paste tokens into the repo, setup chat, command output, or logs.
+
+When `validate live --run-safe` runs against an existing private workspace, it
+may update `state/setup-progress.json` with metadata-only results such as Codex
+auth verified by a guarded provider check or Telegram token ref presence. That
+update still stores no secret values and remains a resume aid, not proof that
+future provider/service health checks can be skipped.
 
 `provider smoke` sends one provider turn through the provider abstraction. Stub transport is safe by default; `exec` and `app-server` require `--allow-live`.
 

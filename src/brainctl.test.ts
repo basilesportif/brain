@@ -109,11 +109,29 @@ test("brainctl operations and live validation commands are non-mutating by defau
 
     const live = spawnBrainctl(["validate", "live", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--codex-transport", "app-server"]);
     assert.equal(live.status, 0, live.stderr);
-    const liveJson = JSON.parse(live.stdout) as { ok: boolean; details: { plan: { networkStarted: boolean; checks: Array<{ id: string; mode: string }> }; sideEffects: string } };
+    const liveJson = JSON.parse(live.stdout) as {
+      ok: boolean;
+      summary: string;
+      details: {
+        plan: { networkStarted: boolean; checks: Array<{ id: string; mode: string }> };
+        sideEffects: string;
+        nextStep: { step: string; title: string };
+        guidedSequence: Array<{ step: string; title: string; botFatherSteps?: string[] }>;
+        notLiveYet: string[];
+      };
+    };
     assert.equal(liveJson.ok, true);
+    assert.match(liveJson.summary, /Pre-live validation plan ready/);
     assert.equal(liveJson.details.sideEffects, "none");
     assert.equal(liveJson.details.plan.networkStarted, false);
     assert.equal(liveJson.details.plan.checks.find((check) => check.id === "codex-provider")?.mode, "plan");
+    assert.equal(liveJson.details.nextStep.step, "configure-verify-codex-auth");
+    assert.match(liveJson.details.nextStep.title, /Codex auth/);
+    assert.ok(liveJson.details.guidedSequence.find((step) => step.step === "install-start-service"));
+    const telegramStep = liveJson.details.guidedSequence.find((step) => step.step === "configure-telegram-token");
+    assert.match(telegramStep?.title ?? "", /configure your Telegram token/);
+    assert.ok(telegramStep?.botFatherSteps?.some((step) => /@BotFather/.test(step)));
+    assert.ok(liveJson.details.notLiveYet.some((item) => /has not started Telegram polling/.test(item)));
 
     const pairingState = path.join(root, "telegram-pairing");
     await mkdir(pairingState, { recursive: true });
@@ -237,6 +255,7 @@ test("brainctl Codex provider CLI paths strip configured transcription env refs"
     const fakeCodex = path.join(root, "codex");
     const healthEnvPath = path.join(root, "health-env.json");
     const turnEnvPath = path.join(root, "turn-env.json");
+    await mkdir(workspace, { recursive: true });
     await writeFile(config, testRuntimeConfig(workspace, backupRepo, { transcriptionEnabled: true, transcriptionApiKeyRef: "env:BRAIN_TRANSCRIPTION_KEY" }));
     await writeFile(fakeCodex, `#!/usr/bin/env node
 import { writeFile } from "node:fs/promises";
@@ -279,6 +298,25 @@ console.log(JSON.stringify({ method: "turn/completed", params: { turn: { id: "tu
     });
     assert.equal(live.status, 0, live.stderr);
     assert.doesNotMatch(live.stdout, /sk-test-/);
+    const liveJson = JSON.parse(live.stdout) as {
+      summary: string;
+      details: {
+        completedChecks: string[];
+        nextStep: { step: string };
+        guidedSequence: Array<{ step: string; requiresConfirmation?: string; privateStorage?: string[] }>;
+        setupStateUpdate: { wrote: boolean; metadata: { mode: string }; state: { secretValuesStored: boolean; statuses: { codexAuth: { status: string }; telegramToken: { configured: boolean } } } };
+      };
+    };
+    assert.match(liveJson.summary, /Pre-live checks passed/);
+    assert.ok(liveJson.details.completedChecks.some((check) => /Runtime config/.test(check)));
+    assert.equal(liveJson.details.nextStep.step, "configure-verify-codex-auth");
+    assert.ok(liveJson.details.guidedSequence.find((step) => step.step === "install-start-service")?.requiresConfirmation?.includes("systemd"));
+    assert.ok(liveJson.details.guidedSequence.find((step) => step.step === "configure-telegram-token")?.privateStorage?.some((item) => /never paste the token into the repo/.test(item)));
+    assert.equal(liveJson.details.setupStateUpdate.wrote, true);
+    assert.equal(liveJson.details.setupStateUpdate.metadata.mode, "0600");
+    assert.equal(liveJson.details.setupStateUpdate.state.secretValuesStored, false);
+    assert.equal(liveJson.details.setupStateUpdate.state.statuses.codexAuth.status, "verified");
+    assert.equal(liveJson.details.setupStateUpdate.state.statuses.telegramToken.configured, false);
     assert.deepEqual(await readSnapshot(healthEnvPath), { openai: false, transcription: false, other: "keep-me" });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -368,20 +406,54 @@ test("brainctl setup inspect is idempotent and redacts secret values", async () 
 
     const first = spawnBrainctl(["setup", "--config", config, "--workspace", "personal", "--path", workspace]);
     assert.equal(first.status, 0, first.stderr);
-    const firstJson = JSON.parse(first.stdout) as { ok: boolean; details: { idempotency: { reRunnable: boolean; defaultOverwrite: boolean }; plan: { missing_required: string[] } } };
+    const firstJson = JSON.parse(first.stdout) as {
+      ok: boolean;
+      details: {
+        idempotency: { reRunnable: boolean; defaultOverwrite: boolean };
+        plan: { missing_required: string[] };
+        setupWizard: { nextIncompleteStep: { step: string }; completedSteps: Array<{ step: string }>; stateFile: string; stateFilePresent: boolean };
+        setupState: { path: string; metadata: { mode: string }; state: { secretValuesStored: boolean; nextRecommendedStep: string } };
+      };
+    };
     assert.equal(firstJson.ok, true);
     assert.equal(firstJson.details.idempotency.reRunnable, true);
     assert.equal(firstJson.details.idempotency.defaultOverwrite, false);
     assert.deepEqual(firstJson.details.plan.missing_required, []);
+    assert.equal(firstJson.details.setupWizard.nextIncompleteStep.step, "configure-verify-codex-auth");
+    assert.ok(firstJson.details.setupWizard.completedSteps.some((step) => step.step === "workspace-scaffold"));
+    assert.equal(firstJson.details.setupState.metadata.mode, "0600");
+    assert.equal(firstJson.details.setupState.state.secretValuesStored, false);
+    assert.equal(firstJson.details.setupState.state.nextRecommendedStep, "configure-verify-codex-auth");
+    const progressState = JSON.parse(await readFile(firstJson.details.setupState.path, "utf8")) as { secretValuesStored: boolean; workspace: string; workspaceRoot: string; statuses: { telegramToken: { configured: boolean } } };
+    assert.equal(progressState.secretValuesStored, false);
+    assert.equal(progressState.workspace, "personal");
+    assert.equal(progressState.workspaceRoot, workspace);
+    assert.equal(progressState.statuses.telegramToken.configured, false);
 
     const privateConfig = path.join(workspace, "config", "runtime.yaml");
     await writeFile(privateConfig, "existing private config placeholder\n");
     const second = spawnBrainctl(["setup", "status", "--config", config, "--workspace", "personal", "--path", workspace]);
     assert.equal(second.status, 0, second.stderr);
-    const secondJson = JSON.parse(second.stdout) as { ok: boolean; details: { plan: { unsafe_to_overwrite: string[] }; secretValuesPrinted: boolean } };
+    const secondJson = JSON.parse(second.stdout) as {
+      ok: boolean;
+      summary: string;
+      details: {
+        plan: { unsafe_to_overwrite: string[] };
+        secretValuesPrinted: boolean;
+        setupState: { present: boolean; state: { nextRecommendedStep: string; secretValuesStored: boolean } };
+        setupWizard: { resumable: boolean; idempotent: boolean; stateTrust: string; nextIncompleteStep: { step: string }; completedSteps: Array<{ step: string }> };
+      };
+    };
     assert.equal(secondJson.ok, true);
     assert.equal(secondJson.details.secretValuesPrinted, false);
     assert.ok(secondJson.details.plan.unsafe_to_overwrite.some((item) => /runtime\.yaml/.test(item)));
+    assert.match(secondJson.summary, /resume from Configure or verify Codex auth/);
+    assert.equal(secondJson.details.setupState.present, true);
+    assert.equal(secondJson.details.setupState.state.secretValuesStored, false);
+    assert.equal(secondJson.details.setupWizard.resumable, true);
+    assert.equal(secondJson.details.setupWizard.idempotent, true);
+    assert.match(secondJson.details.setupWizard.stateTrust, /resume aid only/);
+    assert.equal(secondJson.details.setupWizard.nextIncompleteStep.step, "configure-verify-codex-auth");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -34,6 +34,7 @@ export const defaultBackupExclude = [
   "tmp/**",
   "cache/**",
   "caches/**",
+  "state/setup-progress.json",
   "**/.cache/**",
   "**/node_modules/**",
   "**/*.log",

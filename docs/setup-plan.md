@@ -7,8 +7,11 @@ hosts.
 
 Status: guided setup documentation. `brainctl`, runtime packages, provider
 adapters, Telegram entrypoint seams, and non-mutating operations planning exist.
-Setup should prepare and validate a local or remote workspace, then stop before
-live deployment unless the user explicitly confirms.
+Setup should prepare and validate a local or remote workspace, then guide the
+user through Codex auth, reviewed service installation/start, Telegram token
+configuration, and first-user pairing. It still stops before credentials,
+privileged service changes, or live deployment unless the user explicitly
+confirms.
 
 Setup is intentionally re-runnable. At any time, `brainctl setup inspect` or
 `brainctl setup status` should show configured, missing required, missing
@@ -19,6 +22,18 @@ entrypoints, providers, and integrations.
 Existing config or backup metadata is never overwritten by default; destructive
 replacement requires an explicit `--force` or `--replace` flag on a command that
 documents what it will replace.
+
+Setup also keeps a private, metadata-only resume file in the private workspace:
+`state/setup-progress.json`. This file is created with restrictive permissions
+where practical, is excluded from the private workspace Git template, and must
+never be checked into GitHub. It may record completed setup step ids, workspace
+name/path, Codex auth status metadata, reviewed service install/start status,
+Telegram token configured metadata, and the next recommended step. It must never
+store raw tokens, provider credentials, session material, Telegram user/chat IDs,
+or logs. `setup inspect/status` may use the file to resume after a closed Codex
+session, but must reconcile it with current config, file metadata, secret-ref
+checks, provider health, and service health rather than trusting stale progress
+blindly.
 
 ## Agent entrypoints
 
@@ -74,32 +89,41 @@ config/secrets/log paths, and command lists unless the user asks for details or
    - Not ready yet; create placeholders and report unauthenticated state.
 4. Should the initial primary entrypoint be Telegram? Initial bootstrap assumes
    `telegram-main` unless the user asks for a fake/smoke-test entrypoint only.
-5. Do you already have a Telegram bot token from BotFather? If not, tell the
+5. After validation passes, configure or verify Codex auth before Telegram:
+   use the selected Codex transport, store any credential only in the private
+   workspace/server env file or host secret store, and run only redacted
+   metadata/health checks unless the user explicitly allows live provider
+   checks.
+6. Review and install/start the Brain service before Telegram live traffic:
+   render the systemd plan, confirm service user, working directory, private env
+   file, and unit path, and require explicit confirmation before any `sudo
+   systemctl` install/enable/start.
+7. Do you already have a Telegram bot token from BotFather? If not, tell the
    user how to create one before live start: open Telegram, message
    `@BotFather`, send `/newbot`, choose a display name, choose a unique
    username ending in `bot`, copy the returned token into Brain's private
-   `secrets.env` or the configured secret reference, and never commit or print
-   the token.
-6. Which Telegram admin bootstrap should be used? Default: first-user pairing,
+   server `secrets.env`/env store or the configured secret reference, and never
+   commit, chat, log, or print the token.
+8. Which Telegram admin bootstrap should be used? Default: first-user pairing,
    where the first Telegram user/chat to message the newly configured bot is
    persisted as the paired/admin identity in private state. Use a user-supplied
    explicit allowlist or optional `/pair` code only if requested.
-7. Should voice/audio transcription be enabled for Telegram attachments?
+9. Should voice/audio transcription be enabled for Telegram attachments?
    Default: no. If yes, use `transcription.provider: openai`, store the OpenAI
    key only as a private ref such as `env:OPENAI_API_KEY` or `file:/...`, choose
    the model, and scope it to `telegram-main` with `voice`/`audio` attachment
    kinds. Never paste or commit the key.
-8. Is generated web/page publishing needed now? Default: no; keep web preview
+10. Is generated web/page publishing needed now? Default: no; keep web preview
    disabled unless the user explicitly enables it. If yes, choose domain vs
    direct IP, public base URL, publish root, and Caddy/reverse-proxy plan. DNS
    is needed for a domain and not needed for direct-IP publishing; setup never
    changes DNS.
-9. Should private workspace backup be configured now?
+11. Should private workspace backup be configured now?
    - `none` — default/no backup.
    - `local-snapshot` — local snapshot root and retention notes.
    - `private-git` — private repo path, optional remote, branch, include/exclude
      policy. Safe defaults exclude secrets, logs, tmp, and caches.
-10. Should optional Google Calendar or chat data-source access be configured via
+12. Should optional Google Calendar or chat data-source access be configured via
    Composio? Default: no. If yes, collect only env/file refs for the Composio
    API key and connected-account metadata; never collect or print credential
    values.
@@ -292,9 +316,19 @@ on private workspace knowledge.
 8. Use `brainctl run --fake --once --fake-text help` only for fake/dev smoke.
    Config-driven `brainctl start`/`run` resolves the provider and entrypoint
    from runtime config by default.
-9. Summarize next steps to complete provider auth, Telegram first-user pairing
-   (or the explicitly selected allowlist/`/pair` advanced path), and any
-   explicit live start confirmation.
+9. Summarize successful pre-live validation as a wizard:
+   - completed checks;
+   - not live yet;
+   - next step: configure/verify Codex auth;
+   - then review/install/start the service with explicit confirmation;
+   - then "Next up, let's configure your Telegram token" with the BotFather
+     steps and private-secret-only storage guidance;
+   - finally first-user pairing (or the explicitly selected allowlist/`/pair`
+     advanced path).
+10. On rerun, read `<workspace>/state/setup-progress.json`, inspect the current
+    workspace/config/secret metadata again, report completed steps, identify the
+    next incomplete step, and continue there instead of restarting from defaults
+    or dumping every setup option.
 
 ## Remote SSH setup flow
 

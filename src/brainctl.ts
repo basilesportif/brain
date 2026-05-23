@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { access, appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, appendFile, chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -1076,22 +1076,38 @@ async function liveValidateCommand(options: {
   });
   const safeResults = options.runSafe ? await runSafeValidationChecks(options, plan.checks.filter((check) => check.mode === "run")) : [];
   const ok = safeResults.every((result) => result.ok !== false);
+  const wizard = liveValidationWizard(options, plan, safeResults, ok);
+  const setupStateUpdate = options.runSafe && ok
+    ? await updateSetupProgressFromLiveValidation(config.config.workspaces[options.workspace]?.workspacePath ?? defaultWorkspaceRoot(options.workspace), options, safeResults)
+    : undefined;
   return {
     ok,
-    summary: options.runSafe ? "guarded validation safe checks executed" : "guarded validation plan rendered without live side effects",
+    summary: wizard.summary,
     details: {
+      completedChecks: wizard.completedChecks,
+      notLiveYet: wizard.notLiveYet,
+      nextStep: wizard.nextStep,
+      guidedSequence: wizard.guidedSequence,
+      setupStateUpdate,
       plan,
       results: safeResults,
-      sideEffects: options.runSafe ? "safe local checks only" : "none",
+      sideEffects: options.runSafe ? "safe local checks and private setup progress metadata update when workspace state exists" : "none",
     },
   };
+}
+
+interface SafeValidationResult {
+  id: string;
+  ok: boolean;
+  summary: string;
+  details?: unknown;
 }
 
 async function runSafeValidationChecks(
   options: { config: string; workspace: string; telegramTokenEnv?: string; telegramTokenFile?: string; codexTransport: string; allowLive?: boolean },
   checks: Array<{ id: string }>,
-): Promise<Array<{ id: string; ok: boolean; summary: string; details?: unknown }>> {
-  const results = [];
+): Promise<SafeValidationResult[]> {
+  const results: SafeValidationResult[] = [];
   for (const check of checks) {
     if (check.id === "config") results.push({ id: check.id, ...await configValidateCommand(options.config) });
     else if (check.id === "secrets") results.push({ id: check.id, ...await secretsCheckCommand(options.config) });
@@ -1104,6 +1120,116 @@ async function runSafeValidationChecks(
     }
   }
   return results;
+}
+
+function liveValidationWizard(
+  options: { config: string; workspace: string; telegramTokenEnv?: string; telegramTokenFile?: string; codexTransport: string; allowLive?: boolean; runSafe?: boolean },
+  plan: ReturnType<typeof createGuardedLiveValidationPlan>,
+  safeResults: SafeValidationResult[],
+  ok: boolean,
+) {
+  const plannedChecks = plan.checks.filter((check) => check.mode === "plan");
+  const completedChecks = options.runSafe
+    ? safeResults
+        .filter((result) => result.ok !== false)
+        .map((result) => friendlyLiveCheckName(result.id))
+    : [
+        "Validation plan rendered; safe checks have not been executed yet.",
+        "Run again with --run-safe to execute local config, secret-metadata, runtime, Codex stub, and Telegram adapter checks.",
+      ];
+  const notLiveYet = [
+    "Brain has not started Telegram polling or webhooks.",
+    "No provider user task, deployment, systemd install, service restart, or live chat message was started by this validation.",
+    "Secret refs were checked by metadata only; token values must stay out of the repository, chat, and logs.",
+    ...plannedChecks.map((check) => `${friendlyLiveCheckName(check.id).replace(/\.$/, "")} is still planned, not run: ${check.reason}`),
+  ];
+  const guidedSequence = [
+    {
+      step: "configure-verify-codex-auth",
+      title: "Next up, configure or verify Codex auth.",
+      actions: [
+        "Confirm the selected Codex transport and auth path for this machine or server.",
+        "If a credential is needed, store it only in a private server env file or secret store, then verify by metadata/health check without printing the value.",
+        `Run a guarded provider check for the chosen transport before accepting live user traffic.`,
+      ],
+      requiresConfirmation: "Writing credentials requires an explicit private target; live provider checks require explicit --allow-live.",
+    },
+    {
+      step: "install-start-service",
+      title: "Then install and start the Brain service.",
+      actions: [
+        `Review the service plan with: pnpm run brainctl operations systemd --config ${shellArg(options.config)} --workspace ${shellArg(options.workspace)}`,
+        "Install/enable systemd only after the user confirms the unit path, service user, working directory, and private env file.",
+        "Start the service only after Codex auth is verified and the private secret file/env store is in place.",
+      ],
+      requiresConfirmation: "Privileged systemd installation, enablement, and service start require explicit user confirmation.",
+    },
+    {
+      step: "configure-telegram-token",
+      title: "Next up, let's configure your Telegram token.",
+      botFatherSteps: botFatherSteps(),
+      privateStorage: telegramTokenStorageGuidance(options),
+    },
+    {
+      step: "first-user-pairing",
+      title: "Finally, complete first-user pairing.",
+      actions: [
+        "After the service is running with the private Telegram token, send the bot its first Telegram message.",
+        "That first user/chat becomes paired admin state by default and is persisted only in private Brain state.",
+        "If a token was ever pasted into a repo, chat, or log, revoke it in @BotFather with /revoke before starting live polling.",
+      ],
+    },
+  ];
+  return {
+    summary: ok
+      ? options.runSafe
+        ? "Pre-live checks passed. Next up, configure or verify Codex auth, then install/start the service, then configure Telegram."
+        : "Pre-live validation plan ready. Run the safe checks, then configure Codex auth, install/start the service, and configure Telegram."
+      : "Pre-live validation needs attention before Codex auth, service start, or Telegram setup.",
+    completedChecks,
+    notLiveYet,
+    nextStep: guidedSequence[0],
+    guidedSequence,
+  };
+}
+
+function friendlyLiveCheckName(id: string): string {
+  switch (id) {
+    case "config": return "Runtime config check completed.";
+    case "secrets": return "Secret-reference metadata check completed with values redacted.";
+    case "runtime-smoke": return "No-network runtime smoke check completed.";
+    case "codex-provider": return "Codex provider health check completed.";
+    case "telegram-entrypoint": return "Telegram adapter check completed without polling or webhook start.";
+    default: return `${id} check completed.`;
+  }
+}
+
+function botFatherSteps(): string[] {
+  return [
+    "Open Telegram and message @BotFather.",
+    "Send /newbot.",
+    "Choose a bot display name.",
+    "Choose a unique username ending in bot, such as my_brain_bot.",
+    "Copy the returned token only into Brain's private server secret file or configured env/secret store.",
+  ];
+}
+
+function telegramTokenStorageGuidance(options: { telegramTokenEnv?: string; telegramTokenFile?: string }): string[] {
+  const target = options.telegramTokenEnv
+    ? `env:${options.telegramTokenEnv}`
+    : options.telegramTokenFile
+      ? `file:${options.telegramTokenFile}`
+      : "a private env var such as TELEGRAM_BOT_TOKEN or a private file referenced by --telegram-token-file";
+  return [
+    `Use ${target}; never paste the token into the repo, setup chat, command output, or logs.`,
+    "Keep the secret file owner-readable only where practical and outside the source checkout.",
+    "Re-run validation with the token ref to check only presence/metadata before starting live polling.",
+  ];
+}
+
+function shellArg(value: string): string {
+  if (/^[A-Za-z0-9_./:=@+-]+$/.test(value)) return value;
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function supervisorPaths(workspace: string, options: { state?: string; artifacts?: string; log?: string; workspacePath?: string }): { stateRoot: string; artifactRoot: string; logPath: string } {
@@ -1417,6 +1543,7 @@ function errorMessage(error: unknown): string {
 }
 
 const WORKSPACE_DIRS = ["config", "secrets", "logs", "artifacts", "state", "backups", "tmp"] as const;
+const SETUP_PROGRESS_FILE = "setup-progress.json";
 const PRIVATE_WORKSPACE_GITIGNORE = [
   "# Brain private workspace backup safety defaults",
   "# Keep secret-bearing, noisy, and local-cache paths out of private Git backups.",
@@ -1425,6 +1552,7 @@ const PRIVATE_WORKSPACE_GITIGNORE = [
   "tmp/**",
   "cache/**",
   "caches/**",
+  "state/setup-progress.json",
   "**/.cache/**",
   "**/node_modules/**",
   "**/*.log",
@@ -1533,6 +1661,8 @@ async function setupCommand(options: SetupInspectOptions & { dryRun?: boolean; f
     for (const dir of dirs) await mkdir(dir, { recursive: true, mode: dir.endsWith("secrets") ? 0o700 : 0o755 });
   }
   const after = options.dryRun ? preflight : await setupInspectDetails(options);
+  const setupWizard = setupResumeWizard(after);
+  const setupState = options.dryRun ? after.setupState : await writeSetupProgress(after, setupWizard);
   return {
     ok: true,
     summary: options.dryRun ? "setup plan ready (dry run; no overwrite by default)" : "private workspace scaffold reconciled without writing secrets",
@@ -1549,8 +1679,10 @@ async function setupCommand(options: SetupInspectOptions & { dryRun?: boolean; f
         replaceRequested: Boolean(options.replace),
       },
       plan: after.plan,
+      setupWizard,
+      setupState,
       inspection: after,
-      sideEffects: options.dryRun ? "none" : "created missing directories only",
+      sideEffects: options.dryRun ? "none" : "created missing directories and updated private setup progress state",
     },
   };
 }
@@ -1560,8 +1692,8 @@ async function setupInspectCommand(options: SetupInspectOptions): Promise<CliRes
   const ok = details.plan.missing_required.length === 0;
   return {
     ok,
-    summary: ok ? "setup status inspected; workspace is configured enough to proceed" : "setup status inspected; required pieces are missing",
-    details: { ...details, sideEffects: "none", secretValuesPrinted: false },
+    summary: ok ? `setup status inspected; resume from ${setupResumeWizard(details).nextIncompleteStep.title}` : "setup status inspected; required pieces are missing",
+    details: { ...details, setupWizard: setupResumeWizard(details), sideEffects: "none", secretValuesPrinted: false },
   };
 }
 
@@ -1628,6 +1760,7 @@ async function setupInspectDetails(options: SetupInspectOptions) {
     composio,
     transcription,
     plan,
+    setupState: await readSetupProgress(workspaceRoot),
   };
 }
 
@@ -1685,6 +1818,236 @@ function buildSetupPlan(input: {
   else configured.push("OpenAI voice/audio transcription config present");
 
   return { configured, missing_required, missing_optional, unsafe_to_overwrite };
+}
+
+function setupResumeWizard(details: {
+  workspaceRoot: string;
+  config: { present: boolean; valid: boolean };
+  workspaceDirectory: Awaited<ReturnType<typeof fileMetadata>>;
+  directories: Record<string, Awaited<ReturnType<typeof fileMetadata>>>;
+  provider: unknown;
+  primaryEntrypointId: unknown;
+  entrypoints: Array<{ kind: string; enabled: boolean; configRefPresent: boolean }>;
+  secretRefs: Array<Record<string, unknown>>;
+  setupState?: Awaited<ReturnType<typeof readSetupProgress>>;
+}) {
+  const workspaceReady = details.workspaceDirectory.present && WORKSPACE_DIRS.every((dir) => details.directories[dir]?.present);
+  const runtimeConfigReady = details.config.present && details.config.valid && details.provider !== "missing" && details.primaryEntrypointId !== "missing";
+  const telegramEntrypoint = details.entrypoints.find((entrypoint) => entrypoint.kind === "telegram" && entrypoint.enabled);
+  const telegramSecretRefPresent = Boolean(telegramEntrypoint?.configRefPresent && details.secretRefs.some((ref) => ref.source === "entrypoint.configRef" && ref.present === true));
+  const state = details.setupState?.state;
+  const codexAuthVerifiedByState = state?.statuses.codexAuth.status === "verified";
+  const serviceStartedByState = state?.statuses.service.started === true;
+  const steps = [
+    {
+      step: "workspace-scaffold",
+      title: "Create private workspace scaffold.",
+      complete: workspaceReady,
+      evidence: workspaceReady ? [`Workspace directories exist under ${details.workspaceRoot}.`] : ["Workspace root or required directories are missing."],
+    },
+    {
+      step: "runtime-config",
+      title: "Validate runtime config.",
+      complete: runtimeConfigReady,
+      evidence: runtimeConfigReady ? ["Runtime config is present, valid, and selects provider/primary entrypoint."] : ["Runtime config, provider, or primary entrypoint is still missing/invalid."],
+    },
+    {
+      step: "configure-verify-codex-auth",
+      title: "Configure or verify Codex auth.",
+      complete: codexAuthVerifiedByState,
+      evidence: codexAuthVerifiedByState
+        ? ["Private setup state says Codex auth was verified; rerun a provider health check if the session may have changed."]
+        : details.provider === "codex"
+          ? ["Codex is selected; credential/session verification needs an explicit private check and is not inferred from repo files."]
+          : [`Selected provider is ${String(details.provider)}; verify provider auth before service start.`],
+      resumePrompt: "If you already verified Codex auth in the previous session, confirm or recheck it and continue to service install/start.",
+    },
+    {
+      step: "install-start-service",
+      title: "Install and start the Brain service.",
+      complete: serviceStartedByState,
+      evidence: serviceStartedByState
+        ? ["Private setup state says the service was installed/started; verify with health/status before live Telegram traffic."]
+        : ["Service installation/start is never assumed by setup status; review the systemd plan and require explicit confirmation."],
+      resumePrompt: "If the service is already installed and running, confirm with health/status output before continuing to Telegram.",
+    },
+    {
+      step: "configure-telegram-token",
+      title: "Next up, let's configure your Telegram token.",
+      complete: telegramSecretRefPresent,
+      evidence: telegramSecretRefPresent
+        ? ["Telegram entrypoint secret ref is present by metadata only; value was not printed."]
+        : ["Telegram token/private entrypoint secret metadata is missing or not inspectable."],
+      botFatherSteps: botFatherSteps(),
+    },
+    {
+      step: "first-user-pairing",
+      title: "Complete first-user pairing.",
+      complete: false,
+      evidence: ["Pairing state is private runtime state; setup status does not print raw user/chat IDs."],
+      resumePrompt: "After the service is running with the token, message the bot once from the admin account.",
+    },
+  ];
+  const completedSteps = steps.filter((step) => step.complete).map((step) => ({ step: step.step, title: step.title, evidence: step.evidence }));
+  const nextIncompleteStep = steps.find((step) => !step.complete) ?? {
+    step: "ready-for-live",
+    title: "Ready for explicit live confirmation.",
+    complete: false,
+    evidence: ["All inspectable setup steps are complete."],
+  };
+  return {
+    resumable: true,
+    idempotent: true,
+    stateFile: details.setupState?.path ?? setupProgressPath(details.workspaceRoot),
+    stateFilePresent: Boolean(details.setupState?.present),
+    stateIsPrivateMetadataOnly: true,
+    stateTrust: "Private setup state is used as a resume aid only; current metadata/live checks still decide whether it is safe to continue.",
+    completedSteps,
+    nextIncompleteStep,
+    sequence: steps,
+    note: "On rerun, setup inspects current state and resumes at the next incomplete step instead of restarting or overwriting defaults.",
+  };
+}
+
+interface SetupProgressState {
+  version: 1;
+  workspace: string;
+  workspaceRoot: string;
+  updatedAt: string;
+  completedSteps: string[];
+  statuses: {
+    workspace: { configured: boolean };
+    runtimeConfig: { valid: boolean };
+    codexAuth: { status: "unknown" | "pending" | "verified"; metadataOnly: true; checkedAt?: string };
+    service: { installed: boolean; started: boolean; metadataOnly: true; checkedAt?: string };
+    telegramToken: { configured: boolean; metadataOnly: true; source?: string; checkedAt?: string };
+  };
+  nextRecommendedStep: string;
+  secretValuesStored: false;
+}
+
+function setupProgressPath(workspaceRoot: string): string {
+  return path.join(workspaceRoot, "state", SETUP_PROGRESS_FILE);
+}
+
+async function readSetupProgress(workspaceRoot: string): Promise<{ present: boolean; path: string; state?: SetupProgressState; metadata?: Awaited<ReturnType<typeof fileMetadata>>; warning?: string }> {
+  const progressPath = setupProgressPath(workspaceRoot);
+  const metadata = await fileMetadata(progressPath);
+  if (!metadata.present) return { present: false, path: progressPath, metadata };
+  try {
+    const parsed = JSON.parse(await readFile(progressPath, "utf8")) as SetupProgressState;
+    return { present: true, path: progressPath, metadata, state: redactSetupProgress(parsed) };
+  } catch (error) {
+    return { present: true, path: progressPath, metadata, warning: `could not parse setup progress state: ${errorMessage(error)}` };
+  }
+}
+
+async function writeSetupProgress(details: Awaited<ReturnType<typeof setupInspectDetails>>, wizard: ReturnType<typeof setupResumeWizard>) {
+  const progressPath = setupProgressPath(details.workspaceRoot);
+  const telegramSecretRef = details.secretRefs.find((ref) => ref.source === "entrypoint.configRef" && ref.present === true);
+  const prior = details.setupState?.state;
+  const state: SetupProgressState = {
+    version: 1,
+    workspace: details.workspace,
+    workspaceRoot: details.workspaceRoot,
+    updatedAt: new Date().toISOString(),
+    completedSteps: wizard.completedSteps.map((step) => step.step),
+    statuses: {
+      workspace: { configured: wizard.sequence.find((step) => step.step === "workspace-scaffold")?.complete === true },
+      runtimeConfig: { valid: details.config.valid },
+      codexAuth: prior?.statuses.codexAuth ?? { status: "pending", metadataOnly: true },
+      service: prior?.statuses.service ?? { installed: false, started: false, metadataOnly: true },
+      telegramToken: {
+        configured: Boolean(telegramSecretRef),
+        metadataOnly: true,
+        source: typeof telegramSecretRef?.kind === "string" ? telegramSecretRef.kind : undefined,
+        checkedAt: new Date().toISOString(),
+      },
+    },
+    nextRecommendedStep: wizard.nextIncompleteStep.step,
+    secretValuesStored: false,
+  };
+  await mkdir(path.dirname(progressPath), { recursive: true, mode: 0o700 });
+  await writeFile(progressPath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+  await chmod(progressPath, 0o600);
+  const metadata = await fileMetadata(progressPath);
+  return { present: true, path: progressPath, metadata, state: redactSetupProgress(state), wrote: true };
+}
+
+async function updateSetupProgressFromLiveValidation(
+  workspaceRoot: string,
+  options: { workspace: string; telegramTokenEnv?: string; telegramTokenFile?: string; codexTransport: string; allowLive?: boolean },
+  results: SafeValidationResult[],
+) {
+  const workspaceMetadata = await fileMetadata(workspaceRoot);
+  const progressPath = setupProgressPath(workspaceRoot);
+  if (!workspaceMetadata.present) return { present: false, path: progressPath, wrote: false, skipped: "workspace root missing; setup progress state was not updated" };
+  const prior = await readSetupProgress(workspaceRoot);
+  const now = new Date().toISOString();
+  const resultOk = (id: string) => results.find((result) => result.id === id)?.ok === true;
+  const codexVerified = resultOk("codex-provider") && Boolean(options.allowLive) && options.codexTransport !== "stub";
+  const telegramConfigured = resultOk("telegram-entrypoint") && Boolean(options.telegramTokenEnv || options.telegramTokenFile);
+  const priorState = prior.state;
+  const statuses: SetupProgressState["statuses"] = {
+    workspace: { configured: true },
+    runtimeConfig: { valid: resultOk("config") },
+    codexAuth: codexVerified
+      ? { status: "verified", metadataOnly: true, checkedAt: now }
+      : priorState?.statuses.codexAuth ?? { status: "pending", metadataOnly: true, checkedAt: now },
+    service: priorState?.statuses.service ?? { installed: false, started: false, metadataOnly: true },
+    telegramToken: telegramConfigured
+      ? { configured: true, metadataOnly: true, source: options.telegramTokenEnv ? "env" : "file", checkedAt: now }
+      : priorState?.statuses.telegramToken ?? { configured: false, metadataOnly: true, checkedAt: now },
+  };
+  const completedSteps = [
+    "workspace-scaffold",
+    ...(statuses.runtimeConfig.valid ? ["runtime-config"] : []),
+    ...(statuses.codexAuth.status === "verified" ? ["configure-verify-codex-auth"] : []),
+    ...(statuses.service.started ? ["install-start-service"] : []),
+    ...(statuses.telegramToken.configured ? ["configure-telegram-token"] : []),
+  ];
+  const nextRecommendedStep = statuses.codexAuth.status !== "verified"
+    ? "configure-verify-codex-auth"
+    : !statuses.service.started
+      ? "install-start-service"
+      : !statuses.telegramToken.configured
+        ? "configure-telegram-token"
+        : "first-user-pairing";
+  const state: SetupProgressState = {
+    version: 1,
+    workspace: priorState?.workspace ?? options.workspace,
+    workspaceRoot,
+    updatedAt: now,
+    completedSteps,
+    statuses,
+    nextRecommendedStep,
+    secretValuesStored: false,
+  };
+  await mkdir(path.dirname(progressPath), { recursive: true, mode: 0o700 });
+  await writeFile(progressPath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+  await chmod(progressPath, 0o600);
+  return { present: true, path: progressPath, metadata: await fileMetadata(progressPath), state: redactSetupProgress(state), wrote: true };
+}
+
+function redactSetupProgress(state: SetupProgressState): SetupProgressState {
+  return {
+    ...state,
+    secretValuesStored: false,
+    statuses: {
+      ...state.statuses,
+      telegramToken: {
+        configured: Boolean(state.statuses.telegramToken.configured),
+        metadataOnly: true,
+        source: state.statuses.telegramToken.source,
+        checkedAt: state.statuses.telegramToken.checkedAt,
+      },
+      codexAuth: {
+        status: state.statuses.codexAuth.status,
+        metadataOnly: true,
+        checkedAt: state.statuses.codexAuth.checkedAt,
+      },
+    },
+  };
 }
 
 async function tryLoadValidConfig(file: string): Promise<{ path: string; present: boolean; ok: boolean; summary: string; issues: unknown[]; config?: BrainConfig }> {

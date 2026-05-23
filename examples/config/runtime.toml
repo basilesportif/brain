@@ -40,7 +40,7 @@ repoPath = "/home/brain/.brain/workspace/backups/private-git"
 remote = "git@github.com:example/private-brain-backup.git"
 branch = "main"
 include = ["config/**", "state/**", "artifacts/metadata/**"]
-exclude = ["secrets/**", "logs/**", "tmp/**", "cache/**", "caches/**", "**/.cache/**", "**/node_modules/**", "**/*.log"]
+exclude = ["secrets/**", "logs/**", "tmp/**", "cache/**", "caches/**", "state/setup-progress.json", "**/.cache/**", "**/node_modules/**", "**/*.log"]
 
 [workspaces.personal.webPublishing]
 enabled = false
