@@ -79,9 +79,11 @@ The setup flow should make Telegram usable enough for future configuration work:
 
 1. Create or provide the BotFather token. To create a new bot, open Telegram,
    message `@BotFather`, send `/newbot`, choose a display name, choose a unique
-   username ending in `bot`, and copy the returned token into Brain's private
-   `secrets.env` or configured secret-store reference. Never commit, print, or
-   log the token.
+   username ending in `bot`, and store the returned token only through a
+   one-use private temporary script that prompts with hidden input and writes to
+   Brain's private `secrets.env` or configured secret-store reference. Never
+   commit, print, echo, log, paste into chat, or leave the token in shell
+   history.
 2. Configure `telegram-main` as the only enabled entrypoint in `single-primary` mode.
 3. Pair the initial admin with default first-user pairing: after the bot token is
    configured, the first Telegram user/chat to message the bot is stored as

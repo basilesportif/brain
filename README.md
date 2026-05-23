@@ -23,8 +23,11 @@ Clone or open this repository root in Codex or Claude Code, then say `setup`.
 The agent should stay in the repo root, read `AGENTS.md`, `CLAUDE.md` when
 running under Claude Code, `docs/setup-plan.md`, and
 `assistant-packs/core/skills/setup-self-host/SKILL.md`, then ask whether to set
-up a local private workspace or a remote Ubuntu server over SSH. Do not `cd`
-into a separate setup directory.
+up a local private workspace or a remote Ubuntu server over SSH. Before asking
+that first-run question, setup should run `brainctl setup status` to inspect
+existing private setup progress and any ignored `private/setup-context.json`
+remote pointer, then resume from saved state when present. Do not `cd` into a
+separate setup directory.
 
 After safe pre-live validation, setup should confirm essential runtime choices
 and, when the provider is Codex, configure or verify Codex auth before service
@@ -32,10 +35,12 @@ start or live Telegram traffic. For the default Telegram entrypoint, setup will
 ask for a BotFather token but must not start polling/webhooks until service
 start is explicitly confirmed. If you do not have a bot yet, open Telegram,
 message `@BotFather`, run `/newbot`, choose a bot name and a unique username
-ending in `bot`, then save the returned token only in Brain's private server
-secret file/env store or configured secret reference. Never commit or paste the
-token into chat/logs. After Brain starts, send the bot its first message to
-complete first-user pairing; rotate leaked tokens with BotFather `/revoke`.
+ending in `bot`, then store the returned token only through a one-use private
+temporary script that prompts with hidden input and writes to Brain's private
+server secret file/env store or configured secret reference. Never commit,
+paste, echo, log, or leave the token in shell history. After Brain starts, send
+the bot its first message to complete first-user pairing; rotate leaked tokens
+with BotFather `/revoke`.
 
 Setup is resumable: Brain writes only non-secret progress metadata to the
 private workspace at `state/setup-progress.json` and uses it with fresh metadata

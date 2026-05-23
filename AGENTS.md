@@ -41,16 +41,29 @@ docs and skills remain referenced files.
 1. Read `docs/setup-plan.md`.
 2. Read `assistant-packs/core/skills/setup-self-host/SKILL.md`. This is the
    discoverable setup skill for both Codex and Claude Code.
-3. Ask the first setup question before taking action: local private directory or
-   remote Ubuntu server over SSH?
-4. For remote setup, ask before editing local `~/.ssh/config` or contacting a
+3. Before asking first-run questions, inspect for existing setup context and
+   progress. Run `pnpm run brainctl setup status --repo <repo-root>
+   --workspace <name>` (default workspace `personal`) and check the reported
+   `state/setup-progress.json` or `private/setup-context.json` pointer. If a
+   prior remote context is found, ask only for permission or a missing SSH host
+   needed to run the reported remote metadata check, then resume from the next
+   incomplete step. Do not ask "local or remote?" until saved progress has been
+   checked or ruled out.
+4. If no progress/context exists, ask the first setup question: local private
+   directory or remote Ubuntu server over SSH?
+5. For remote setup, ask before editing local `~/.ssh/config` or contacting a
    host. Use the assistant-agent-logic setup-server skill at
    `/home/tim/pkg/tim/assistant-agent-logic/config/skills/setup-server.md` to
    prepare the server with its own non-root Brain service user.
-5. Treat the root-level `setup` request plus `brainctl setup` as the current
+   As soon as the user confirms the remote target, write a non-secret local
+   resume pointer at ignored path `private/setup-context.json` with target,
+   workspace, remote workspace path, SSH host/user, remote repo path, and config
+   path. This file is private/local only and must never be committed; it lets a
+   later Codex/Claude session find remote progress before restarting the wizard.
+6. Treat the root-level `setup` request plus `brainctl setup` as the current
    safe setup flow. Keep it provider-agnostic where possible: Codex first, with
    Claude Code recorded only as a provider placeholder until real wiring exists.
-6. Treat setup progress state as a resume aid, not authority. If
+7. Treat setup progress state as a resume aid, not authority. If
    `<workspace>/state/setup-progress.json` disagrees with actual config,
    remote/server state, secret metadata, provider health, or service health — or
    if setup cannot confidently determine the safe next step — run
@@ -60,14 +73,22 @@ docs and skills remain referenced files.
    or using destructive flags; it must remove only setup progress metadata and
    must not delete secrets, config, backups, logs, documents, provider sessions,
    Telegram state, or other private data.
-7. Bootstrap Telegram as the first primary entrypoint when the user wants live
+8. Bootstrap Telegram as the first primary entrypoint when the user wants live
    setup. Default admin bootstrap is first-user pairing: the first Telegram
    user/chat to message the newly configured bot becomes the paired/admin
    identity in private state. Explicit admin allowlists and optional `/pair`
    code bootstrap remain advanced paths. Do not require Composio or other
    optional integrations.
-8. Ask before using any real remote host, credential, Telegram token/admin ID,
+9. Ask before using any real remote host, credential, Telegram token/admin ID,
    provider auth, systemd unit, or secret store.
-9. Keep real workspace config, env files, tokens, Telegram IDs, logs, generated
+10. Any user copy-paste CLI command that inputs or stores a secret must be a
+   one-use private temporary script, not an inline command containing or reading
+   the secret in shell history. Put the script outside version control (for
+   example `/private/tmp/store-brain-telegram-token.sh` on macOS or a `0700`
+   `mktemp -d` directory on Linux), prompt/read the secret with hidden input,
+   write only to the private server env/secret store, and delete the script
+   after success. Never echo tokens in chat, shell history, logs, command
+   output, or repo files.
+11. Keep real workspace config, env files, tokens, Telegram IDs, logs, generated
    artifacts, hostnames, and repo-registry state outside git.
-10. Run `pnpm run check` after setup, documentation, or runtime changes.
+12. Run `pnpm run check` after setup, documentation, or runtime changes.

@@ -1256,7 +1256,7 @@ function botFatherSteps(): string[] {
     "Send /newbot.",
     "Choose a bot display name.",
     "Choose a unique username ending in bot, such as my_brain_bot.",
-    "Copy the returned token only into Brain's private server secret file or configured env/secret store.",
+    "Store the returned token only through a one-use private temp script that prompts for hidden input and writes to Brain's private server secret file or configured env/secret store.",
   ];
 }
 
@@ -1267,7 +1267,9 @@ function telegramTokenStorageGuidance(options: { telegramTokenEnv?: string; tele
       ? `file:${options.telegramTokenFile}`
       : "a private env var such as TELEGRAM_BOT_TOKEN or a private file referenced by --telegram-token-file";
   return [
-    `Use ${target}; never paste the token into the repo, setup chat, command output, or logs.`,
+    `Use ${target}; never paste the token into the repo, setup chat, shell history, command output, or logs.`,
+    "If you provide a copy-paste command for secret entry, make it run a private temporary script (for example bash /private/tmp/store-brain-telegram-token.sh, or a 0700 mktemp directory on Linux) that reads the secret with hidden input.",
+    "The temporary script directory must be outside version control, the script must not contain the secret value, and the script should delete itself after a successful write.",
     "Keep the secret file owner-readable only where practical and outside the source checkout.",
     "Re-run validation with the token ref to check only presence/metadata before starting live polling.",
   ];
@@ -1590,6 +1592,7 @@ function errorMessage(error: unknown): string {
 
 const WORKSPACE_DIRS = ["config", "secrets", "logs", "artifacts", "state", "backups", "tmp"] as const;
 const SETUP_PROGRESS_FILE = "setup-progress.json";
+const LOCAL_SETUP_CONTEXT_RELATIVE_PATH = path.join("private", "setup-context.json");
 const PRIVATE_WORKSPACE_GITIGNORE = [
   "# Brain private workspace backup safety defaults",
   "# Keep secret-bearing, noisy, and local-cache paths out of private Git backups.",
@@ -1614,6 +1617,19 @@ interface SetupInspectOptions {
   path?: string;
   config?: string;
   repo?: string;
+}
+
+interface LocalSetupContext {
+  version: 1;
+  target: "local" | "remote";
+  workspace: string;
+  workspaceRoot: string;
+  updatedAt?: string;
+  sshHost?: string;
+  sshUser?: string;
+  repoPath?: string;
+  configPath?: string;
+  secretValuesStored?: false;
 }
 
 interface SetupResetOptions {
@@ -1749,6 +1765,21 @@ function defaultWorkspaceRootDisplay(workspace: string, home: string): string {
 
 async function setupCommand(options: SetupInspectOptions & { dryRun?: boolean; force?: boolean; replace?: boolean }): Promise<CliResult> {
   const preflight = await setupInspectDetails(options);
+  if (preflight.resumeProbe?.target === "remote" && !options.path && !options.force && !options.replace) {
+    return {
+      ok: true,
+      summary: "prior remote setup context found; inspect remote progress before asking first-run setup questions",
+      details: {
+        workspace: options.workspace,
+        workspaceRoot: preflight.workspaceRoot,
+        localSetupContext: preflight.localSetupContext,
+        resumeProbe: preflight.resumeProbe,
+        setupWizard: setupResumeWizard(preflight),
+        inspection: preflight,
+        sideEffects: "none",
+      },
+    };
+  }
   const workspaceRoot = preflight.workspaceRoot;
   const dirs = WORKSPACE_DIRS.map((dir) => path.join(workspaceRoot, dir));
   if (!options.dryRun) {
@@ -1832,10 +1863,14 @@ async function setupResetCommand(options: SetupResetOptions): Promise<CliResult>
 
 async function setupInspectCommand(options: SetupInspectOptions): Promise<CliResult> {
   const details = await setupInspectDetails(options);
-  const ok = details.plan.missing_required.length === 0;
+  const remoteResumeProbe = details.resumeProbe?.target === "remote" && !details.setupState.present;
+  const ok = remoteResumeProbe || details.plan.missing_required.length === 0;
+  const summary = details.resumeProbe?.target === "remote" && !details.setupState.present
+    ? "setup status inspected; prior remote setup context found; inspect remote progress before asking first-run questions"
+    : ok ? `setup status inspected; resume from ${setupResumeWizard(details).nextIncompleteStep.title}` : "setup status inspected; required pieces are missing";
   return {
     ok,
-    summary: ok ? `setup status inspected; resume from ${setupResumeWizard(details).nextIncompleteStep.title}` : "setup status inspected; required pieces are missing",
+    summary,
     details: { ...details, setupWizard: setupResumeWizard(details), sideEffects: "none", secretValuesPrinted: false },
   };
 }
@@ -1843,7 +1878,10 @@ async function setupInspectCommand(options: SetupInspectOptions): Promise<CliRes
 async function setupInspectDetails(options: SetupInspectOptions) {
   const config = options.config ? await tryLoadValidConfig(options.config) : undefined;
   const workspace = config?.config?.workspaces[options.workspace];
-  const workspaceRoot = path.resolve(options.path ?? workspace?.workspacePath ?? defaultWorkspaceRoot(options.workspace));
+  const repoRoot = path.resolve(options.repo ?? process.cwd());
+  const localSetupContext = await readLocalSetupContext(repoRoot, options.workspace);
+  const context = localSetupContext.present ? localSetupContext.context : undefined;
+  const workspaceRoot = path.resolve(options.path ?? context?.workspaceRoot ?? workspace?.workspacePath ?? defaultWorkspaceRoot(options.workspace));
   const workspaceMeta = await fileMetadata(workspaceRoot);
   const directories = Object.fromEntries(await Promise.all(WORKSPACE_DIRS.map(async (dir) => [dir, await fileMetadata(path.join(workspaceRoot, dir))] as const)));
   const privateConfigCandidates = await Promise.all(["runtime.yaml", "runtime.yml", "runtime.toml", "runtime.json"].map(async (file) => {
@@ -1851,7 +1889,7 @@ async function setupInspectDetails(options: SetupInspectOptions) {
     return { file, metadata: await fileMetadata(fullPath) };
   }));
   const secretRefs = config?.config ? await secretRefMetadata(collectConfigRefs(config.config)) : [];
-  const repo = await gitMetadata(path.resolve(options.repo ?? process.cwd()));
+  const repo = await gitMetadata(repoRoot);
   const backup = setupBackupStatus(workspace, workspaceRoot);
   const webPublishing = setupWebPublishingStatus(workspace);
   const composio = await setupComposioStatus(workspace);
@@ -1884,7 +1922,9 @@ async function setupInspectDetails(options: SetupInspectOptions) {
       summary: "no config path supplied",
       issues: [],
     },
-    workspacePathSource: options.path ? "cli" : workspace?.workspacePath ? "config" : "default",
+    workspacePathSource: options.path ? "cli" : context?.workspaceRoot ? "local-setup-context" : workspace?.workspacePath ? "config" : "default",
+    localSetupContext,
+    resumeProbe: buildSetupResumeProbe(localSetupContext, workspaceRoot, options.workspace),
     workspaceDirectory: workspaceMeta,
     directories,
     privateConfigCandidates,
@@ -1904,6 +1944,76 @@ async function setupInspectDetails(options: SetupInspectOptions) {
     transcription,
     plan,
     setupState: await readSetupProgress(workspaceRoot),
+  };
+}
+
+async function readLocalSetupContext(repoRoot: string, workspace: string): Promise<{ present: boolean; path: string; context?: LocalSetupContext; warning?: string; note?: string }> {
+  const contextPath = path.join(repoRoot, LOCAL_SETUP_CONTEXT_RELATIVE_PATH);
+  const metadata = await fileMetadata(contextPath);
+  if (!metadata.present) return { present: false, path: contextPath, note: "no local setup context pointer found" };
+  try {
+    const parsed = JSON.parse(await readFile(contextPath, "utf8")) as Partial<LocalSetupContext>;
+    if (parsed.version !== 1 || (parsed.target !== "local" && parsed.target !== "remote") || typeof parsed.workspaceRoot !== "string") {
+      return { present: true, path: contextPath, warning: "local setup context is invalid or unsupported" };
+    }
+    if ((parsed.workspace ?? workspace) !== workspace) {
+      return { present: true, path: contextPath, warning: `local setup context is for workspace ${parsed.workspace}, not ${workspace}` };
+    }
+    return {
+      present: true,
+      path: contextPath,
+      context: {
+        version: 1,
+        target: parsed.target,
+        workspace,
+        workspaceRoot: parsed.workspaceRoot,
+        updatedAt: parsed.updatedAt,
+        sshHost: parsed.sshHost,
+        sshUser: parsed.sshUser,
+        repoPath: parsed.repoPath,
+        configPath: parsed.configPath,
+        secretValuesStored: false,
+      },
+    };
+  } catch (error) {
+    return { present: true, path: contextPath, warning: `could not parse local setup context: ${errorMessage(error)}` };
+  }
+}
+
+function buildSetupResumeProbe(
+  localSetupContext: Awaited<ReturnType<typeof readLocalSetupContext>>,
+  workspaceRoot: string,
+  workspace: string,
+) {
+  const context = localSetupContext.context;
+  if (!context) {
+    return {
+      target: "unknown",
+      firstAction: "check-local-default-progress",
+      progressPath: setupProgressPath(workspaceRoot),
+      note: "No local setup context pointer was found; inspect the default/private workspace before asking first-run questions, then ask for any prior remote target if progress is absent.",
+    };
+  }
+  if (context.target === "remote") {
+    const progressPath = setupProgressPath(context.workspaceRoot);
+    const remoteRepo = context.repoPath ?? "<remote-brain-checkout>";
+    const remoteStatusCommand = `cd ${shellArg(remoteRepo)} && pnpm run brainctl setup status --workspace ${shellArg(workspace)} --path ${shellArg(context.workspaceRoot)}${context.configPath ? ` --config ${shellArg(context.configPath)}` : ""}`;
+    return {
+      target: "remote",
+      firstAction: "inspect-remote-progress",
+      progressPath,
+      sshHost: context.sshHost ?? "<ssh-host>",
+      sshUser: context.sshUser,
+      command: context.sshHost ? `ssh ${shellArg(context.sshHost)} ${shellArg(remoteStatusCommand)}` : `ssh <ssh-host> ${shellArg(remoteStatusCommand)}`,
+      note: "Prior setup context points at a remote workspace. Ask only for permission or a missing SSH host, then run this remote metadata check before restarting the setup wizard.",
+    };
+  }
+  return {
+    target: "local",
+    firstAction: "inspect-local-progress",
+    progressPath: setupProgressPath(context.workspaceRoot),
+    command: `pnpm run brainctl setup status --workspace ${shellArg(workspace)} --path ${shellArg(context.workspaceRoot)}${context.configPath ? ` --config ${shellArg(context.configPath)}` : ""}`,
+    note: "Prior setup context points at a local private workspace; inspect this progress before asking first-run setup questions.",
   };
 }
 

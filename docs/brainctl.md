@@ -2,6 +2,12 @@
 
 `brainctl` is the operator CLI for Brain. It remains validation-first and safe by default: it prepares private workspace directories, checks config/assistant-pack hygiene, resolves supervisor provider/entrypoint defaults from runtime config, keeps explicit fake/no-network smoke flags for tests, and renders deployment plans without installing services, contacting Telegram, deploying, or writing secrets unless explicit live flags are supplied.
 
+For interrupted setup reruns, start with `setup status` before asking first-run
+questions. It reports the current private `state/setup-progress.json` and, when
+present, the ignored local `private/setup-context.json` pointer for a prior
+remote setup. If a remote pointer exists, follow `resumeProbe.command` to inspect
+remote metadata before restarting any wizard prompts.
+
 ## Commands
 
 ```bash
@@ -204,9 +210,10 @@ service after explicit confirmation, then handle optional follow-ups such as
 first-user pairing, OpenAI transcription, web publishing, and backup tuning.
 The Telegram step shows the BotFather flow: message `@BotFather`, send
 `/newbot`, choose a display name, choose a unique username ending in `bot`, and
-copy the token only into the private server secret file or configured
-env/secret store. Never paste tokens into the repo, setup chat, command output,
-or logs.
+store the token only via a one-use private temporary script that prompts with
+hidden input and writes into the private server secret file or configured
+env/secret store. Never paste tokens into the repo, setup chat, shell history,
+command output, or logs.
 
 When `validate live --run-safe` runs against an existing private workspace, it
 may update `state/setup-progress.json` with metadata-only results such as Codex

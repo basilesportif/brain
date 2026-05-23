@@ -116,7 +116,7 @@ test("brainctl operations and live validation commands are non-mutating by defau
         plan: { networkStarted: boolean; checks: Array<{ id: string; mode: string }> };
         sideEffects: string;
         nextStep: { step: string; title: string };
-        guidedSequence: Array<{ step: string; title: string; botFatherSteps?: string[] }>;
+        guidedSequence: Array<{ step: string; title: string; botFatherSteps?: string[]; privateStorage?: string[] }>;
         notLiveYet: string[];
       };
     };
@@ -134,6 +134,9 @@ test("brainctl operations and live validation commands are non-mutating by defau
     const telegramStep = liveJson.details.guidedSequence.find((step) => step.step === "telegram-connection");
     assert.match(telegramStep?.title ?? "", /Connect Telegram/);
     assert.ok(telegramStep?.botFatherSteps?.some((step) => /@BotFather/.test(step)));
+    assert.ok(telegramStep?.botFatherSteps?.some((step) => /temp script/.test(step)));
+    assert.ok(telegramStep?.privateStorage?.some((step) => /shell history/.test(step)));
+    assert.ok(telegramStep?.privateStorage?.some((step) => /bash \//.test(step) && /store-brain-telegram-token/.test(step)));
     assert.ok(liveJson.details.notLiveYet.some((item) => /has not started Telegram polling/.test(item)));
 
     const pairingState = path.join(root, "telegram-pairing");
@@ -151,6 +154,57 @@ test("brainctl operations and live validation commands are non-mutating by defau
       codePresent: false,
       rawIdentifiersPrinted: false,
     });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brainctl setup rerun surfaces remote resume context before first-run questions", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-setup-remote-context-"));
+  try {
+    await mkdir(path.join(root, "private"), { recursive: true });
+    await writeFile(path.join(root, "private", "setup-context.json"), `${JSON.stringify({
+      version: 1,
+      target: "remote",
+      workspace: "personal",
+      workspaceRoot: "/home/brain/.brain/workspace",
+      sshHost: "brain-prod",
+      sshUser: "brain",
+      repoPath: "/home/brain/brain",
+      configPath: "/home/brain/.brain/workspace/config/runtime.yaml",
+      updatedAt: "2026-05-23T00:00:00.000Z",
+      secretValuesStored: false,
+    }, null, 2)}\n`, { mode: 0o600 });
+
+    const status = spawnBrainctl(["setup", "status", "--repo", root, "--workspace", "personal"]);
+    assert.equal(status.status, 0, status.stderr);
+    const statusJson = JSON.parse(status.stdout) as {
+      summary: string;
+      details: {
+        workspacePathSource: string;
+        localSetupContext: { present: boolean; context: { target: string; sshHost: string; workspaceRoot: string } };
+        resumeProbe: { target: string; firstAction: string; command: string; progressPath: string; note: string };
+      };
+    };
+    assert.match(statusJson.summary, /prior remote setup context found/);
+    assert.equal(statusJson.details.workspacePathSource, "local-setup-context");
+    assert.equal(statusJson.details.localSetupContext.present, true);
+    assert.equal(statusJson.details.localSetupContext.context.target, "remote");
+    assert.equal(statusJson.details.localSetupContext.context.sshHost, "brain-prod");
+    assert.equal(statusJson.details.resumeProbe.target, "remote");
+    assert.equal(statusJson.details.resumeProbe.firstAction, "inspect-remote-progress");
+    assert.equal(statusJson.details.resumeProbe.progressPath, "/home/brain/.brain/workspace/state/setup-progress.json");
+    assert.match(statusJson.details.resumeProbe.command, /ssh brain-prod/);
+    assert.match(statusJson.details.resumeProbe.command, /setup status/);
+    assert.match(statusJson.details.resumeProbe.note, /before restarting the setup wizard/);
+
+    const setup = spawnBrainctl(["setup", "--repo", root, "--workspace", "personal"]);
+    assert.equal(setup.status, 0, setup.stderr);
+    const setupJson = JSON.parse(setup.stdout) as { summary: string; details: { sideEffects: string; resumeProbe: { target: string; firstAction: string } } };
+    assert.match(setupJson.summary, /prior remote setup context found/);
+    assert.equal(setupJson.details.sideEffects, "none");
+    assert.equal(setupJson.details.resumeProbe.target, "remote");
+    assert.equal(setupJson.details.resumeProbe.firstAction, "inspect-remote-progress");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

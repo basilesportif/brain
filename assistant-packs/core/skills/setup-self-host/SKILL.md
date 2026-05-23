@@ -18,8 +18,16 @@ deployment handoff.
   separate setup directory.
 - Read `AGENTS.md`, `CLAUDE.md` if running under Claude Code, and
   `docs/setup-plan.md` before changing anything.
-- Ask the user to choose **local directory** or **remote server over SSH** before
-  setup actions.
+- First inspect for existing setup progress/context before asking first-run
+  questions. Run `pnpm run brainctl setup status --repo <repo-root> --workspace
+  <workspace-name>` from the repo root and check the reported
+  `state/setup-progress.json` plus any ignored `private/setup-context.json`.
+  If a prior remote context is found, ask only for permission or a missing SSH
+  host needed to run the reported remote metadata check, then resume from the
+  next incomplete step. Do not ask **local directory** vs **remote server over
+  SSH** until saved progress has been checked or ruled out.
+- Ask the user to choose **local directory** or **remote server over SSH** only
+  when no existing progress/context was found.
 - Ask before editing local `~/.ssh/config`, contacting a real host, writing a
   secret, creating a systemd unit, or starting/enabling a service.
 - Keep real workspace contents, credentials, Telegram IDs, hostnames, logs,
@@ -50,14 +58,62 @@ deployment handoff.
   data.
 - Run `pnpm run check` after setup/documentation edits and before declaring
   setup ready.
+- Any copy-paste CLI command that inputs or stores a provider key, Telegram bot
+  token, webhook secret, pairing code, or other secret must be provided as a
+  one-use private temporary script rather than an inline command. The script
+  lives outside version control, prompts/reads the secret with hidden input,
+  writes only to the private workspace/server env file or configured secret
+  store, and deletes itself after successful use. Never echo tokens in shell
+  history, chat, logs, command output, or repo files.
 
 ## Canonical user flow
 
 The user clones/opens the Brain repo root in Codex or Claude Code and says
-`setup`. The agent then reads the referenced root docs/skill files and asks the
-first local-vs-remote question below.
+`setup`. The agent then reads the referenced root docs/skill files, checks for
+saved setup context/progress, and only asks the first local-vs-remote question
+after progress has been checked or ruled out.
 
-## Required first prompt
+## Required first action
+
+Before any "local or remote?" prompt, run a metadata-only resume inspection:
+
+```bash
+pnpm run brainctl setup status --repo <repo-root> --workspace <workspace-name>
+```
+
+If output reports a `resumeProbe.target` of `remote`, do not restart the wizard.
+Ask only for permission to contact that known host, or for the missing SSH host
+if the local pointer is incomplete, then run the reported `resumeProbe.command`
+to inspect `/home/brain/.brain/workspace/state/setup-progress.json` (or the
+configured remote path) on the server. Reconcile that metadata with actual
+config/secret/service checks and continue from `setupWizard.nextIncompleteStep`.
+
+If no local context/progress exists, or the user says this is a different setup,
+then ask the first setup prompt below.
+
+When the user confirms a remote target, create/update ignored
+`private/setup-context.json` immediately with non-secret resume metadata:
+
+```json
+{
+  "version": 1,
+  "target": "remote",
+  "workspace": "personal",
+  "workspaceRoot": "/home/brain/.brain/workspace",
+  "sshHost": "<ssh-host>",
+  "sshUser": "brain",
+  "repoPath": "/home/brain/brain",
+  "configPath": "/home/brain/.brain/workspace/config/runtime.yaml",
+  "secretValuesStored": false
+}
+```
+
+This file is a local/private pointer only. It may contain private host/path
+metadata, is under ignored `private/`, and must never be committed. It exists so
+a later interrupted Codex/Claude session can find remote progress before asking
+first-run questions again.
+
+## Required first prompt, only after resume inspection
 
 Ask:
 
@@ -129,10 +185,14 @@ BotFather token creation guidance:
    - send `/newbot`,
    - choose a display name,
    - choose a unique username ending in `bot` such as `my_brain_bot`,
-   - copy the returned token into the private Brain server `secrets.env`,
-     private env store, or configured secret-store reference,
-   - never commit or paste the token into repo files, chat transcripts, logs,
-     or setup summaries.
+   - store the returned token with a one-use private temporary script such as
+     `bash /private/tmp/store-brain-telegram-token.sh` on macOS or a script in
+     a `0700` `mktemp -d` directory on Linux; the script prompts with hidden
+     input, writes the token into the private Brain server `secrets.env`,
+     private env store, or configured secret-store reference, then deletes
+     itself after success,
+   - never commit, paste, echo, or log the token in repo files, chat
+     transcripts, shell history, command output, or setup summaries.
 11. Optional private workspace backup? Default: none. Offer `local-snapshot` or
    `private-git` with private repo path, optional remote, branch, and safe
    include/exclude defaults that exclude secrets/logs/tmp/caches.
@@ -165,9 +225,9 @@ BotFather token creation guidance:
    - `primaryEntrypointId: telegram-main`,
    - exactly one enabled entrypoint in `single-primary` mode,
    - optional `web-preview` disabled.
-6. Store provider auth and Telegram token/admin-pairing data only in workspace
-   secret files, private `state/telegram-pairing`, or the user's chosen secret
-   store.
+6. Store provider auth and Telegram token/admin-pairing data only through
+   private temporary secret-entry scripts into workspace secret files, private
+   `state/telegram-pairing`, or the user's chosen secret store.
 7. Run metadata-only validation:
    - workspace exists outside git,
    - expected directories exist,
@@ -238,7 +298,9 @@ Use this flow only after the user chooses remote mode and confirms the host.
    `pnpm run check` after any install step.
 7. Create the remote private workspace directories listed in the local flow.
 8. Install placeholder runtime config with Telegram as `telegram-main` and the
-   chosen provider identifier. Store real secret values only if supplied.
+   chosen provider identifier. Store real secret values only if supplied, and
+   only through a private temporary script/secret store flow that keeps values
+   out of shell history, chat, logs, and the checkout.
 9. Render systemd metadata with `brainctl operations systemd`; install or enable
    a unit only after explicit confirmation. Record working directory, env file
    path, `ExecStart`, restart policy, log command, health command, and
@@ -258,10 +320,11 @@ The initial Telegram setup is successful when:
   explicit confirmation or left pending before Telegram live traffic.
 - A private bot token secret is present or clearly marked pending. If missing,
   setup tells the user to open Telegram, message `@BotFather`, run `/newbot`,
-  choose a bot display name and a unique username ending in `bot`, then copy the
-  resulting token only into private Brain server `secrets.env`, private env
-  store, or the configured secret reference. The token must never be committed,
-  chatted, logged, or printed.
+  choose a bot display name and a unique username ending in `bot`, then use a
+  one-use private temporary script to prompt for the token and write it only
+  into private Brain server `secrets.env`, private env store, or the configured
+  secret reference. The token must never be committed, chatted, logged, printed,
+  echoed, or left in shell history.
 - Admin pairing defaults to first-user pairing with private
   `state/telegram-pairing` persistence; an explicit private admin allowlist or
   optional `/pair` code is used only when requested.

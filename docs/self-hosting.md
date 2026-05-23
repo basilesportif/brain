@@ -31,12 +31,14 @@ The setup docs and skills should be readable by Codex or Claude Code itself so a
 - Telegram bootstrap requires only bot token plus first-user admin pairing state
   in a private boundary by default. If the user needs a new bot, setup should
   tell them to open Telegram, message `@BotFather`, send `/newbot`, choose a
-  display name and a unique username ending in `bot`, copy the returned token
-  into Brain's private `secrets.env` or configured secret reference, and never
-  commit or print it. After Brain starts, the user sends the bot the first
-  message to complete first-user pairing. If the token leaks, rotate it with
-  BotFather `/revoke`, update the private secret, and restart Brain. Explicit
-  admin allowlists and optional `/pair` code bootstrap remain advanced paths.
+  display name and a unique username ending in `bot`, and store the returned
+  token only through a one-use private temporary script that prompts with hidden
+  input and writes to Brain's private `secrets.env` or configured secret
+  reference. Never commit, print, echo, log, paste into chat, or leave the token
+  in shell history. After Brain starts, the user sends the bot the first message
+  to complete first-user pairing. If the token leaks, rotate it with BotFather
+  `/revoke`, update the private secret, and restart Brain. Explicit admin
+  allowlists and optional `/pair` code bootstrap remain advanced paths.
   This should be enough to continue future integration setup through Telegram
   after pairing.
 - Composio and other third-party integrations are optional follow-ups, never
@@ -80,3 +82,11 @@ service installation/start unless the user explicitly confirms. Use
 credentials, hostnames, Telegram IDs, env files, logs, generated artifacts, and
 workspace state belong in the user's private workspace or host secret store,
 never in source control.
+
+On every `setup` rerun, agents must inspect saved progress before asking
+first-run questions. Start with `pnpm run brainctl setup status --repo
+<repo-root> --workspace <name>`. If a prior remote setup was in progress, the
+ignored local `private/setup-context.json` pointer tells the agent which remote
+progress file to inspect, for example
+`/home/brain/.brain/workspace/state/setup-progress.json`, before asking whether
+the user wants local or remote setup again.
