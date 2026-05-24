@@ -215,10 +215,12 @@ service after explicit confirmation, then handle optional follow-ups such as
 first-user pairing, OpenAI transcription, web publishing, and backup tuning.
 The Telegram step shows the BotFather flow: message `@BotFather`, send
 `/newbot`, choose a display name, choose a unique username ending in `bot`, and
-store the token only via a one-use private temporary script that prompts with
-hidden input and writes into the private server secret file or configured
-env/secret store. Never paste tokens into the repo, setup chat, shell history,
-command output, or logs.
+store the token only via the generated one-use helper:
+`pnpm run brainctl setup telegram-token-script --path <workspace>`. Run the
+returned `bash .../store-brain-telegram-token.sh` command with a TTY; the script
+is syntax-checked, prompts with hidden input, writes private token/config/env
+files, and deletes itself after success. Never paste tokens into the repo, setup
+chat, shell history, command output, or logs.
 
 When `validate live --run-safe` runs against an existing private workspace, it
 may update `state/setup-progress.json` with metadata-only results such as Codex

@@ -177,7 +177,7 @@ setInterval(() => {}, 1000);
       transport: "app-server",
       binary: fakeCodex,
       cwd: dir,
-      appServerStartupTimeoutMs: 100,
+      appServerStartupTimeoutMs: 1000,
       appServerRequestTimeoutMs: 100,
       transcriptionApiKeyRef: "BRAIN_TRANSCRIPTION_KEY",
     }).createSession({ workspaceId: "personal" });

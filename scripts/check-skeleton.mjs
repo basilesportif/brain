@@ -62,7 +62,10 @@ for (const relativePath of requiredPaths) {
 
 for (const dir of privateBoundaryDirs) {
   const entries = await readdir(path.join(root, dir));
-  const unexpected = entries.filter((entry) => entry !== "README.md");
+  const allowed = dir === "private"
+    ? new Set(["README.md", "setup-context.json"])
+    : new Set(["README.md"]);
+  const unexpected = entries.filter((entry) => !allowed.has(entry));
   if (unexpected.length > 0) {
     console.error(`${dir}/ contains non-placeholder entries: ${unexpected.join(", ")}`);
     failed = true;

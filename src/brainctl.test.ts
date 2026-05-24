@@ -380,6 +380,72 @@ console.log(JSON.stringify({ method: "turn/completed", params: { turn: { id: "tu
   }
 });
 
+test("brainctl live validation does not mark a missing Telegram token file configured", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-missing-telegram-token-"));
+  try {
+    const workspace = path.join(root, "workspace");
+    const backupRepo = path.join(root, "backup-repo");
+    const config = path.join(root, "runtime.yaml");
+    const missingToken = path.join(workspace, "secrets", "telegram-bot-token");
+    await mkdir(workspace, { recursive: true });
+    await writeFile(config, testRuntimeConfig(workspace, backupRepo));
+
+    const live = spawnBrainctl(["validate", "live", "--config", config, "--workspace", "personal", "--telegram-token-file", missingToken, "--run-safe"]);
+    assert.equal(live.status, 0, live.stderr);
+    const liveJson = JSON.parse(live.stdout) as {
+      details: {
+        results: Array<{ id: string; details?: { token?: { present: boolean } } }>;
+        setupStateUpdate: { state: { statuses: { telegramToken: { configured: boolean } } } };
+      };
+    };
+    assert.equal(liveJson.details.results.find((result) => result.id === "telegram-entrypoint")?.details?.token?.present, false);
+    assert.equal(liveJson.details.setupStateUpdate.state.statuses.telegramToken.configured, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brainctl setup telegram-token-script writes a syntax-checked one-use secret script", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-token-script-"));
+  try {
+    const workspace = path.join(root, "workspace");
+    const script = path.join(root, "store-brain-telegram-token.sh");
+    const token = "123456:abcDEF_ghi-JKLmnop";
+
+    const generated = spawnBrainctl(["setup", "telegram-token-script", "--workspace", "personal", "--path", workspace, "--output", script]);
+    assert.equal(generated.status, 0, generated.stderr);
+    const generatedJson = JSON.parse(generated.stdout) as { ok: boolean; details: { scriptPath: string; validation: string; secretValuesPrinted: boolean } };
+    assert.equal(generatedJson.ok, true);
+    assert.equal(generatedJson.details.scriptPath, script);
+    assert.equal(generatedJson.details.validation, "bash -n passed");
+    assert.equal(generatedJson.details.secretValuesPrinted, false);
+
+    const syntax = spawnSync("bash", ["-n", script], { encoding: "utf8" });
+    assert.equal(syntax.status, 0, syntax.stderr);
+
+    const stored = spawnSync("bash", [script], { input: `${token}\n`, encoding: "utf8" });
+    assert.equal(stored.status, 0, stored.stderr);
+    assert.doesNotMatch(stored.stdout, new RegExp(token));
+    assert.doesNotMatch(stored.stderr, new RegExp(token));
+    await assert.rejects(stat(script));
+
+    const tokenFile = path.join(workspace, "secrets", "telegram-bot-token");
+    const adapterConfig = path.join(workspace, "secrets", "telegram-main.json");
+    const serviceEnv = path.join(workspace, "config", "brain-personal.env");
+    const secretsEnv = path.join(workspace, "secrets", "secrets.env");
+    assert.equal(await readFile(tokenFile, "utf8"), `${token}\n`);
+    assert.equal((await stat(tokenFile)).mode & 0o777, 0o600);
+    assert.equal((await stat(adapterConfig)).mode & 0o777, 0o600);
+    assert.match(await readFile(adapterConfig, "utf8"), new RegExp(`"tokenRef": "file:${escapeRegExp(tokenFile)}"`));
+    assert.doesNotMatch(await readFile(serviceEnv, "utf8"), new RegExp(token));
+    assert.doesNotMatch(await readFile(secretsEnv, "utf8"), new RegExp(token));
+    assert.match(await readFile(serviceEnv, "utf8"), new RegExp(`TELEGRAM_BOT_TOKEN_FILE=${escapeRegExp(tokenFile)}`));
+    assert.match(await readFile(secretsEnv, "utf8"), new RegExp(`TELEGRAM_MAIN_CONFIG=${escapeRegExp(adapterConfig)}`));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("brainctl status, provider smoke, automation monitor, and web wrappers are safe and testable", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brainctl-parity-"));
   try {
@@ -812,6 +878,10 @@ function spawnBrainctl(args: string[], env: Record<string, string> = {}) {
     encoding: "utf8",
     env: { ...process.env, ...env },
   });
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function initRepoWithPrivateIgnore(root: string): Promise<void> {

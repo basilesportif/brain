@@ -85,9 +85,10 @@ docs and skills remain referenced files.
    provider auth, systemd unit, or secret store.
 10. Any user copy-paste CLI command that inputs or stores a secret must be a
    one-use private temporary script, not an inline command containing or reading
-   the secret in shell history. Put the script outside version control (for
-   example `/private/tmp/store-brain-telegram-token.sh` on macOS or a `0700`
-   `mktemp -d` directory on Linux), prompt/read the secret with hidden input,
+   the secret in shell history. For Telegram bot tokens, generate the helper
+   with `pnpm run brainctl setup telegram-token-script --path <workspace>` and
+   run the returned command; do not hand-write the shell script. Put any helper
+   script outside version control, prompt/read the secret with hidden input,
    write only to the private server env/secret store, and delete the script
    after success. Never echo tokens in chat, shell history, logs, command
    output, or repo files.

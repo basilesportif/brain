@@ -37,7 +37,7 @@ program
 
 program.command("setup")
   .description("Create a private workspace directory scaffold without writing secrets.")
-  .argument("[mode]", "optional mode: defaults, inspect, status, or reset")
+  .argument("[mode]", "optional mode: defaults, inspect, status, reset, or telegram-token-script")
   .option("--workspace <name>", "workspace id", DEFAULT_WORKSPACE_ID)
   .option("--target <target>", "defaults target: local or remote")
   .option("--ssh-host <host>", "remote SSH IP/DNS host for setup defaults")
@@ -46,6 +46,11 @@ program.command("setup")
   .option("--path <path>", "private workspace path; setup defaults to ~/.brain/workspace for the default workspace, inspect defaults to config workspacePath")
   .option("--config <path>", "runtime YAML/TOML/JSON config to inspect before planning")
   .option("--repo <path>", "source checkout path to inspect", process.cwd())
+  .option("--output <path>", "output path for generated setup helper scripts")
+  .option("--token-file <path>", "private Telegram token file for generated token storage script")
+  .option("--adapter-config <path>", "private Telegram adapter config file for generated token storage script")
+  .option("--service-env <path>", "private service env file for generated token storage script")
+  .option("--secrets-env <path>", "private secrets env file for generated token storage script")
   .option("--verbose", "include derived config, secrets, state, log, and command details in setup defaults")
   .option("--force", "allow explicitly requested non-destructive rewrites in future setup flows")
   .option("--replace", "allow explicitly requested destructive replacement in future setup flows")
@@ -61,7 +66,10 @@ program.command("setup")
     if (mode === "reset") {
       return exitWith(await setupResetCommand(options));
     }
-    if (mode) return exitWith({ ok: false, summary: `unknown setup mode: ${mode}`, details: { supported: ["defaults", "inspect", "status", "reset"] } });
+    if (mode === "telegram-token-script") {
+      return exitWith(await setupTelegramTokenScriptCommand(options));
+    }
+    if (mode) return exitWith({ ok: false, summary: `unknown setup mode: ${mode}`, details: { supported: ["defaults", "inspect", "status", "reset", "telegram-token-script"] } });
     return exitWith(await setupCommand(options));
   });
 
@@ -1268,7 +1276,8 @@ function telegramTokenStorageGuidance(options: { telegramTokenEnv?: string; tele
       : "a private env var such as TELEGRAM_BOT_TOKEN or a private file referenced by --telegram-token-file";
   return [
     `Use ${target}; never paste the token into the repo, setup chat, shell history, command output, or logs.`,
-    "If you provide a copy-paste command for secret entry, make it run a private temporary script (for example bash /private/tmp/store-brain-telegram-token.sh, or a 0700 mktemp directory on Linux) that reads the secret with hidden input.",
+    "Prefer generating the secret-entry helper with: pnpm run brainctl setup telegram-token-script --path <workspace>; then run the returned bash /.../store-brain-telegram-token.sh command.",
+    "If you provide a copy-paste command for secret entry, make it run that generated private temporary script, which is syntax-checked and reads the secret with hidden input.",
     "The temporary script directory must be outside version control, the script must not contain the secret value, and the script should delete itself after a successful write.",
     "Keep the secret file owner-readable only where practical and outside the source checkout.",
     "Re-run validation with the token ref to check only presence/metadata before starting live polling.",
@@ -1685,6 +1694,16 @@ interface SetupDefaultsOptions {
   verbose?: boolean;
 }
 
+interface SetupTelegramTokenScriptOptions {
+  workspace: string;
+  path?: string;
+  output?: string;
+  tokenFile?: string;
+  adapterConfig?: string;
+  serviceEnv?: string;
+  secretsEnv?: string;
+}
+
 interface ConfigRef {
   workspaceId: string;
   ref: string;
@@ -1992,9 +2011,146 @@ async function setupResetCommand(options: SetupResetOptions): Promise<CliResult>
   };
 }
 
+async function setupTelegramTokenScriptCommand(options: SetupTelegramTokenScriptOptions): Promise<CliResult> {
+  const workspaceRoot = path.resolve(options.path ?? defaultWorkspaceRoot(options.workspace));
+  const scriptDir = options.output ? path.dirname(path.resolve(options.output)) : await mkdtemp(path.join(os.tmpdir(), "brain-token-"));
+  const scriptPath = path.resolve(options.output ?? path.join(scriptDir, "store-brain-telegram-token.sh"));
+  const tokenFile = path.resolve(options.tokenFile ?? path.join(workspaceRoot, "secrets", "telegram-bot-token"));
+  const adapterConfig = path.resolve(options.adapterConfig ?? path.join(workspaceRoot, "secrets", "telegram-main.json"));
+  const serviceEnv = path.resolve(options.serviceEnv ?? path.join(workspaceRoot, "config", `brain-${options.workspace}.env`));
+  const secretsEnv = path.resolve(options.secretsEnv ?? path.join(workspaceRoot, "secrets", "secrets.env"));
+  const script = renderTelegramTokenStorageScript({ workspaceRoot, tokenFile, adapterConfig, serviceEnv, secretsEnv });
+
+  await mkdir(scriptDir, { recursive: true, mode: 0o700 });
+  await chmod(scriptDir, 0o700).catch(() => undefined);
+  await writeFile(scriptPath, script, { mode: 0o700 });
+  await chmod(scriptPath, 0o700);
+  const syntax = spawnSync("bash", ["-n", scriptPath], { encoding: "utf8" });
+  if ((syntax.status ?? 0) !== 0) {
+    return {
+      ok: false,
+      summary: "Telegram token script was written but failed bash syntax validation",
+      details: {
+        scriptPath,
+        stderr: redactSecrets(String(syntax.stderr ?? "")),
+        sideEffects: "wrote script only; no secret values read or stored",
+        secretValuesPrinted: false,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    summary: "Telegram token storage script written and syntax checked",
+    details: {
+      scriptPath,
+      runCommand: `bash ${shellArg(scriptPath)}`,
+      workspaceRoot,
+      writes: {
+        tokenFile,
+        adapterConfig,
+        serviceEnv,
+        secretsEnv,
+      },
+      validation: "bash -n passed",
+      sideEffects: "wrote one-use private temporary script only; no secret values read or stored",
+      secretValuesPrinted: false,
+    },
+  };
+}
+
+function renderTelegramTokenStorageScript(input: { workspaceRoot: string; tokenFile: string; adapterConfig: string; serviceEnv: string; secretsEnv: string }): string {
+  return `#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+script_path="\${BASH_SOURCE[0]:-$0}"
+workspace=${shellLiteral(input.workspaceRoot)}
+token_file=${shellLiteral(input.tokenFile)}
+adapter_config=${shellLiteral(input.adapterConfig)}
+service_env=${shellLiteral(input.serviceEnv)}
+secrets_env=${shellLiteral(input.secretsEnv)}
+
+restore_tty() {
+  if [ -t 0 ]; then stty echo 2>/dev/null || true; fi
+}
+
+cleanup() {
+  status="$?"
+  restore_tty
+  if [ "$status" -eq 0 ]; then rm -f -- "$script_path"; fi
+}
+trap cleanup EXIT
+
+mkdir -p "$workspace/secrets" "$workspace/config" "$workspace/state/telegram-pairing"
+chmod 700 "$workspace/secrets"
+
+printf "Telegram bot token: " >&2
+if [ -t 0 ]; then stty -echo; fi
+IFS= read -r token
+restore_tty
+printf "\\n" >&2
+
+if [ -z "$token" ]; then
+  printf "No token entered; nothing was written.\\n" >&2
+  exit 1
+fi
+if ! printf "%s" "$token" | grep -Eq "^[0-9]+:[A-Za-z0-9_-]+$"; then
+  printf "Token format did not look like a Telegram bot token; nothing was written.\\n" >&2
+  exit 1
+fi
+
+printf "%s\\n" "$token" > "$token_file"
+chmod 600 "$token_file"
+
+cat > "$adapter_config" <<JSON
+{
+  "entrypointId": "telegram-main",
+  "kind": "telegram",
+  "tokenRef": "file:$token_file",
+  "pollingState": "$workspace/state/telegram-offset.json",
+  "pairingState": "$workspace/state/telegram-pairing",
+  "adminBootstrap": "first-user"
+}
+JSON
+chmod 600 "$adapter_config"
+
+update_env_file() {
+  file="$1"
+  key="$2"
+  value="$3"
+  mkdir -p "$(dirname "$file")"
+  tmp="$(mktemp "$file.tmp.XXXXXX")"
+  if [ -f "$file" ]; then
+    while IFS= read -r line; do
+      case "$line" in
+        "$key="*) ;;
+        *) printf "%s\\n" "$line" ;;
+      esac
+    done < "$file" > "$tmp"
+  fi
+  printf "%s=%s\\n" "$key" "$value" >> "$tmp"
+  install -m 600 "$tmp" "$file"
+  rm -f "$tmp"
+}
+
+update_env_file "$service_env" TELEGRAM_MAIN_CONFIG "$adapter_config"
+update_env_file "$service_env" TELEGRAM_BOT_TOKEN_FILE "$token_file"
+update_env_file "$secrets_env" TELEGRAM_MAIN_CONFIG "$adapter_config"
+update_env_file "$secrets_env" TELEGRAM_BOT_TOKEN_FILE "$token_file"
+
+unset token
+printf "Stored Telegram token in private Brain secret files. Token value was not printed.\\n" >&2
+`;
+}
+
+function shellLiteral(value: string): string {
+  return `'${value.replaceAll("'", "'\"'\"'")}'`;
+}
+
 async function setupInspectCommand(options: SetupInspectOptions): Promise<CliResult> {
   const details = await setupInspectDetails(options);
-  const remoteResumeProbe = details.resumeProbe?.target === "remote" && !details.setupState.present;
+  const remoteResumeProbe = details.resumeProbe?.target === "remote" && !details.setupState.present && !options.path;
   const ok = remoteResumeProbe || details.plan.missing_required.length === 0;
   const summary = details.resumeProbe?.target === "remote" && !details.setupState.present
     ? "setup status inspected; prior remote setup context found; inspect remote progress before asking first-run questions"
@@ -2507,7 +2663,7 @@ async function updateSetupProgressFromLiveValidation(
   const now = new Date().toISOString();
   const resultOk = (id: string) => results.find((result) => result.id === id)?.ok === true;
   const codexVerified = resultOk("codex-provider") && Boolean(options.allowLive) && options.codexTransport !== "stub";
-  const telegramConfigured = resultOk("telegram-entrypoint") && Boolean(options.telegramTokenEnv || options.telegramTokenFile);
+  const telegramConfigured = resultOk("telegram-entrypoint") && telegramTokenPresent(results.find((result) => result.id === "telegram-entrypoint"));
   const priorState = prior.state;
   const statuses: SetupProgressState["statuses"] = {
     workspace: { configured: true },
@@ -2548,6 +2704,13 @@ async function updateSetupProgressFromLiveValidation(
   await writeFile(progressPath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
   await chmod(progressPath, 0o600);
   return { present: true, path: progressPath, metadata: await fileMetadata(progressPath), state: redactSetupProgress(state), wrote: true };
+}
+
+function telegramTokenPresent(result: SafeValidationResult | undefined): boolean {
+  const details = result?.details;
+  if (!details || typeof details !== "object" || !("token" in details)) return false;
+  const token = (details as { token?: unknown }).token;
+  return Boolean(token && typeof token === "object" && "present" in token && (token as { present?: unknown }).present === true);
 }
 
 function redactSetupProgress(state: SetupProgressState): SetupProgressState {
