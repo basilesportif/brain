@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { CodexAppServerTransport, CodexExecTransport, buildCodexExecArgs, codexProviderSecretEnvNames, createCodexProvider, createCodexTransport, sanitizeCodexProviderEnv, type CodexAppServerWebSocket } from "./index.js";
+import { CodexAppServerTransport, CodexExecTransport, buildCodexExecArgs, codexProviderProcessEnv, codexProviderSecretEnvNames, createCodexProvider, createCodexTransport, sanitizeCodexProviderEnv, type CodexAppServerWebSocket } from "./index.js";
 
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) delete process.env[name];
@@ -62,6 +62,23 @@ test("Codex provider env sanitizer strips OpenAI and configured transcription re
   assert.equal(env.OTHER_VAR, "keep");
   assert.deepEqual(new Set(codexProviderSecretEnvNames({ transcriptionApiKeyRef: "BRAIN_TRANSCRIPTION_KEY" })), new Set(["OPENAI_API_KEY", "BRAIN_TRANSCRIPTION_KEY"]));
   assert.deepEqual(codexProviderSecretEnvNames({ transcriptionApiKeyRef: "file:/tmp/transcription-key" }), ["OPENAI_API_KEY"]);
+});
+
+test("Codex provider process env uses workspace temp dir without leaking secrets", () => {
+  const env = codexProviderProcessEnv(
+    { transcriptionApiKeyRef: "env:BRAIN_TRANSCRIPTION_KEY", tmpDir: "/workspace/tmp" },
+    {
+      OPENAI_API_KEY: "present",
+      BRAIN_TRANSCRIPTION_KEY: "present",
+      TMPDIR: "/tmp",
+      OTHER_VAR: "keep",
+    },
+  );
+
+  assert.equal(env.OPENAI_API_KEY, undefined);
+  assert.equal(env.BRAIN_TRANSCRIPTION_KEY, undefined);
+  assert.equal(env.TMPDIR, "/workspace/tmp");
+  assert.equal(env.OTHER_VAR, "keep");
 });
 
 test("Codex app-server transport speaks JSON-RPC over the protocol seam", async () => {

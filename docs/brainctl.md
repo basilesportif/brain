@@ -266,7 +266,7 @@ future provider/service health checks can be skipped.
 
 ## Safety model
 
-- `setup` creates only private directory scaffolding (`config/`, `secrets/`, `logs/`, `artifacts/`, `state/`, `backups/`, `tmp/`).
+- `setup` creates only private directory scaffolding (`config/`, `secrets/`, `logs/`, `artifacts/`, `state/`, `backups/`, `tmp/`, `projects/`, `notes/`, `documents/`, `documents/metadata/`).
 - `setup inspect/status` reports configured, missing required, missing optional,
   and unsafe-to-overwrite items for workspace dirs, config, provider/entrypoint,
   secret refs, source/backup Git state, backup policy, web publishing, and

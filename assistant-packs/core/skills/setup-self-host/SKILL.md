@@ -99,8 +99,8 @@ deployment handoff.
 - The initial private workspace scaffold must include project memory paths:
   `projects/`, `notes/`, `documents/`, and `documents/metadata/`. Before the
   first live provider turn, make sure Codex is launched from the private
-  workspace path so project questions can be answered by inspecting those files,
-  not from active entrypoint metadata alone.
+  workspace path with `TMPDIR=<workspace>/tmp` so project questions can be
+  answered by inspecting those files, not from active entrypoint metadata alone.
 
 ## Canonical user flow
 

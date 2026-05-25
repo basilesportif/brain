@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { mkdirSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import path from "node:path";
@@ -31,6 +32,8 @@ export interface CodexProviderOptions {
   /** Capture Codex's last assistant message as a file in the turn artifact dir. */
   captureLastMessage?: boolean;
   lastMessageFilename?: string;
+  /** Workspace-local temporary directory for Codex sandbox helper files. */
+  tmpDir?: string;
   timeoutMs?: number;
   maxOutputBytes?: number;
   appServerStartupTimeoutMs?: number;
@@ -112,6 +115,15 @@ export function sanitizeCodexProviderEnv(
     if (value !== undefined) env[key] = value;
   }
   for (const name of codexProviderSecretEnvNames(options)) delete env[name];
+  return env;
+}
+
+export function codexProviderProcessEnv(
+  options: Pick<CodexProviderOptions, "secretEnvNames" | "transcriptionApiKeyRef" | "tmpDir"> = {},
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const env = sanitizeCodexProviderEnv(options, baseEnv);
+  if (options.tmpDir) env.TMPDIR = options.tmpDir;
   return env;
 }
 
@@ -402,7 +414,8 @@ export class CodexAppServerProtocolSession implements ProviderSession {
     const binary = this.options.binary ?? "codex";
     const args = ["app-server", "--listen", listenUrl];
     for (const item of this.options.extraConfig ?? []) args.push("-c", item);
-    const safeEnv = sanitizeCodexProviderEnv(this.options);
+    ensureTmpDirSync(this.options.tmpDir);
+    const safeEnv = codexProviderProcessEnv(this.options);
     const child = spawn(binary, args, { cwd: this.options.cwd, env: safeEnv, stdio: ["ignore", "pipe", "pipe"] });
     this.child = child;
     child.stdout?.on("data", () => undefined);
@@ -557,9 +570,10 @@ export class CodexExecSession implements ProviderSession {
 
   async health(): Promise<ProviderHealth> {
     const binary = this.options.binary ?? "codex";
+    await ensureTmpDir(this.options.tmpDir);
     const result = await collectProcess(binary, ["--version"], {
       cwd: this.options.cwd,
-      env: sanitizeCodexProviderEnv(this.options),
+      env: codexProviderProcessEnv(this.options),
       timeoutMs: Math.min(this.options.timeoutMs ?? 5_000, 10_000),
       maxOutputBytes: 32_000,
     });
@@ -593,7 +607,8 @@ export class CodexExecSession implements ProviderSession {
 
     let child: ChildProcess;
     try {
-      child = spawn(binary, args, { cwd: this.options.cwd, env: sanitizeCodexProviderEnv(this.options), stdio: ["pipe", "pipe", "pipe"] });
+      await ensureTmpDir(this.options.tmpDir);
+      child = spawn(binary, args, { cwd: this.options.cwd, env: codexProviderProcessEnv(this.options), stdio: ["pipe", "pipe", "pipe"] });
     } catch (error) {
       queue.push({ type: "error", message: `Failed to spawn Codex exec transport: ${errorMessage(error)}`, raw: { binary, args: redactPromptArgs(args, turn.prompt) } });
       queue.close();
@@ -757,6 +772,14 @@ function turnInputForAppServer(turn: ProviderTurn): unknown[] {
 
 function compactUnknown<T extends Record<string, unknown>>(record: T): T {
   return Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined && value !== "")) as T;
+}
+
+async function ensureTmpDir(tmpDir: string | undefined): Promise<void> {
+  if (tmpDir) await mkdir(tmpDir, { recursive: true, mode: 0o700 });
+}
+
+function ensureTmpDirSync(tmpDir: string | undefined): void {
+  if (tmpDir) mkdirSync(tmpDir, { recursive: true, mode: 0o700 });
 }
 
 function envNameFromSecretRef(ref: string | undefined): string | undefined {

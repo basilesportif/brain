@@ -320,7 +320,8 @@ import { writeFile } from "node:fs/promises";
 const snapshot = () => JSON.stringify({
   openai: Boolean(process.env.OPENAI_API_KEY),
   transcription: Boolean(process.env.BRAIN_TRANSCRIPTION_KEY),
-  other: process.env.OTHER_VAR || null
+  other: process.env.OTHER_VAR || null,
+  tmpdir: process.env.TMPDIR || null
 });
 if (process.argv.includes("--version")) {
   await writeFile(${JSON.stringify(healthEnvPath)}, snapshot());
@@ -339,17 +340,17 @@ console.log(JSON.stringify({ method: "turn/completed", params: { turn: { id: "tu
       OPENAI_API_KEY: "sk-test-openai-value-must-not-print",
       OTHER_VAR: "keep-me",
     };
-    const readSnapshot = async (file: string) => JSON.parse(await readFile(file, "utf8")) as { openai: boolean; transcription: boolean; other: string | null };
+    const readSnapshot = async (file: string) => JSON.parse(await readFile(file, "utf8")) as { openai: boolean; transcription: boolean; other: string | null; tmpdir: string | null };
 
     const providerCheck = spawnBrainctl(["provider", "check", "codex", "--config", config, "--workspace", "personal", "--transport", "exec", "--binary", fakeCodex, "--timeout-ms", "5000"], env);
     assert.equal(providerCheck.status, 0, providerCheck.stderr);
     assert.doesNotMatch(providerCheck.stdout, /sk-test-/);
-    assert.deepEqual(await readSnapshot(healthEnvPath), { openai: false, transcription: false, other: "keep-me" });
+    assert.deepEqual(await readSnapshot(healthEnvPath), { openai: false, transcription: false, other: "keep-me", tmpdir: path.join(workspace, "tmp") });
 
     const providerSmoke = spawnBrainctl(["provider", "smoke", "codex", "--config", config, "--workspace", "personal", "--transport", "exec", "--binary", fakeCodex, "--timeout-ms", "5000", "--prompt", "ping", "--allow-live"], env);
     assert.equal(providerSmoke.status, 0, providerSmoke.stderr);
     assert.doesNotMatch(providerSmoke.stdout, /sk-test-/);
-    assert.deepEqual(await readSnapshot(turnEnvPath), { openai: false, transcription: false, other: "keep-me" });
+    assert.deepEqual(await readSnapshot(turnEnvPath), { openai: false, transcription: false, other: "keep-me", tmpdir: path.join(workspace, "tmp") });
     const invocation = JSON.parse(await readFile(turnInvocationPath, "utf8")) as { argv: string[]; cwd: string };
     assert.equal(invocation.cwd, await realpath(workspace));
     assert.ok(invocation.argv.includes("--cd"));
@@ -385,7 +386,7 @@ console.log(JSON.stringify({ method: "turn/completed", params: { turn: { id: "tu
     assert.equal(liveJson.details.setupStateUpdate.state.statuses.codexAuth.status, "verified");
     assert.equal(liveJson.details.setupStateUpdate.state.statuses.codexAuth.runAsUser, userInfo().username);
     assert.equal(liveJson.details.setupStateUpdate.state.statuses.telegramToken.configured, false);
-    assert.deepEqual(await readSnapshot(healthEnvPath), { openai: false, transcription: false, other: "keep-me" });
+    assert.deepEqual(await readSnapshot(healthEnvPath), { openai: false, transcription: false, other: "keep-me", tmpdir: path.join(workspace, "tmp") });
 
     const liveWithTelegram = spawnBrainctl(["validate", "live", "--config", config, "--workspace", "personal", "--codex-transport", "exec", "--telegram-token-env", "BRAIN_TELEGRAM_TOKEN", "--allow-live", "--run-safe"], {
       ...env,

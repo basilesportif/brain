@@ -1379,6 +1379,7 @@ function createCliProvider(selection: ResolvedSupervisorRuntime, options: Superv
     transport: (options.transport as CodexTransportKind | undefined) ?? "stub",
     binary: options.binary,
     cwd: options.cwd ?? selection.workspace.workspacePath ?? process.cwd(),
+    tmpDir: path.join(selection.workspace.workspacePath, "tmp"),
     sandbox: "workspace-write",
     approvalPolicy: "never",
     skipGitRepoCheck: true,
@@ -2267,6 +2268,7 @@ umask 077
 repo=${shellLiteral(input.repoRoot)}
 config=${shellLiteral(input.configPath)}
 workspace=${shellLiteral(input.workspace)}
+workspace_root=${shellLiteral(input.workspaceRoot)}
 codex_binary=${shellLiteral(input.codexBinary)}
 
 print_login_help() {
@@ -2301,6 +2303,19 @@ if ! "$codex_binary" login status >/dev/null; then
   print_login_help
   exit 1
 fi
+
+mkdir -p "$workspace_root/tmp"
+if ! tmp_probe="$(mktemp "$workspace_root/tmp/codex-tmp.XXXXXX" 2>/dev/null)"; then
+  cat >&2 <<HELP
+Codex auth is present, but the Brain workspace temp directory is not writable:
+  $workspace_root/tmp
+
+Run this exact command on the target host, then rerun this verification script:
+  install -d -o "$(id -un)" -g "$(id -gn)" -m 700 "$workspace_root/tmp"
+HELP
+  exit 1
+fi
+rm -f "$tmp_probe"
 
 pnpm run brainctl validate live \\
   --config "$config" \\
@@ -3054,7 +3069,7 @@ async function packValidateCommand(dir: string): Promise<CliResult> {
   };
 }
 
-async function configuredCodexContext(options: { config?: string; workspace: string; cwd?: string }): Promise<{ ok: true; transcriptionApiKeyRef?: string; cwd: string } | { ok: false; result: CliResult }> {
+async function configuredCodexContext(options: { config?: string; workspace: string; cwd?: string }): Promise<{ ok: true; transcriptionApiKeyRef?: string; cwd: string; tmpDir?: string } | { ok: false; result: CliResult }> {
   if (!options.config) return { ok: true, cwd: options.cwd ?? process.cwd() };
   const loaded = await loadValidConfig(options.config);
   if (!loaded.ok || !loaded.config) {
@@ -3064,15 +3079,15 @@ async function configuredCodexContext(options: { config?: string; workspace: str
   if (!workspace) {
       return { ok: false, result: { ok: false, summary: `workspace not found: ${options.workspace}`, details: { available: Object.keys(loaded.config.workspaces) } } };
   }
-  return { ok: true, transcriptionApiKeyRef: workspace.transcription?.apiKeyRef, cwd: options.cwd ?? workspace.workspacePath ?? process.cwd() };
+  return { ok: true, transcriptionApiKeyRef: workspace.transcription?.apiKeyRef, cwd: options.cwd ?? workspace.workspacePath ?? process.cwd(), tmpDir: path.join(workspace.workspacePath, "tmp") };
 }
 
 async function providerCheckCommand(providerId: string, options: { config?: string; workspace: string; transport?: string; binary?: string; cwd?: string; appServerUrl?: string; timeoutMs?: number }): Promise<CliResult> {
   const normalized = providerId.toLowerCase();
-  const codexContext = normalized === "codex" ? await configuredCodexContext(options) : { ok: true as const, transcriptionApiKeyRef: undefined, cwd: options.cwd ?? process.cwd() };
+  const codexContext = normalized === "codex" ? await configuredCodexContext(options) : { ok: true as const, transcriptionApiKeyRef: undefined, cwd: options.cwd ?? process.cwd(), tmpDir: undefined };
   if (!codexContext.ok) return codexContext.result;
   const adapter = normalized === "codex"
-    ? createCodexProvider({ transport: (options.transport as CodexTransportKind | undefined) ?? "stub", binary: options.binary, cwd: codexContext.cwd, sandbox: "workspace-write", approvalPolicy: "never", skipGitRepoCheck: true, appServerUrl: options.appServerUrl, timeoutMs: options.timeoutMs, appServerStartupTimeoutMs: options.timeoutMs, transcriptionApiKeyRef: codexContext.transcriptionApiKeyRef })
+    ? createCodexProvider({ transport: (options.transport as CodexTransportKind | undefined) ?? "stub", binary: options.binary, cwd: codexContext.cwd, tmpDir: codexContext.tmpDir, sandbox: "workspace-write", approvalPolicy: "never", skipGitRepoCheck: true, appServerUrl: options.appServerUrl, timeoutMs: options.timeoutMs, appServerStartupTimeoutMs: options.timeoutMs, transcriptionApiKeyRef: codexContext.transcriptionApiKeyRef })
     : normalized === "claude-code" || normalized === "claude"
       ? createClaudeCodeProvider({ transport: (options.transport as ClaudeCodeTransportKind | undefined) ?? "stub" })
       : undefined;
@@ -3107,10 +3122,10 @@ async function providerSmokeCommand(providerId: string, options: { config?: stri
     };
   }
   const normalized = providerId.toLowerCase();
-  const codexContext = normalized === "codex" ? await configuredCodexContext(options) : { ok: true as const, transcriptionApiKeyRef: undefined, cwd: options.cwd ?? process.cwd() };
+  const codexContext = normalized === "codex" ? await configuredCodexContext(options) : { ok: true as const, transcriptionApiKeyRef: undefined, cwd: options.cwd ?? process.cwd(), tmpDir: undefined };
   if (!codexContext.ok) return codexContext.result;
   const adapter = normalized === "codex"
-    ? createCodexProvider({ transport: transport as CodexTransportKind, binary: options.binary, cwd: codexContext.cwd, sandbox: "workspace-write", approvalPolicy: "never", skipGitRepoCheck: true, appServerUrl: options.appServerUrl, timeoutMs: options.timeoutMs, appServerStartupTimeoutMs: options.timeoutMs, transcriptionApiKeyRef: codexContext.transcriptionApiKeyRef })
+    ? createCodexProvider({ transport: transport as CodexTransportKind, binary: options.binary, cwd: codexContext.cwd, tmpDir: codexContext.tmpDir, sandbox: "workspace-write", approvalPolicy: "never", skipGitRepoCheck: true, appServerUrl: options.appServerUrl, timeoutMs: options.timeoutMs, appServerStartupTimeoutMs: options.timeoutMs, transcriptionApiKeyRef: codexContext.transcriptionApiKeyRef })
     : normalized === "claude-code" || normalized === "claude"
       ? createClaudeCodeProvider({ transport: transport as ClaudeCodeTransportKind })
       : undefined;
