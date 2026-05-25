@@ -43,6 +43,7 @@ program.command("setup")
   .option("--ssh-host <host>", "remote SSH IP/DNS host for setup defaults")
   .option("--ssh-user <user>", "remote SSH login user for setup defaults; defaults to root in remote mode")
   .option("--service-user <user>", "remote non-root service user for defaults", DEFAULT_SERVICE_USER)
+  .option("--service-name <name>", "systemd service name for setup status")
   .option("--path <path>", "private workspace path; setup defaults to ~/.brain/workspace for the default workspace, inspect defaults to config workspacePath")
   .option("--config <path>", "runtime YAML/TOML/JSON config to inspect before planning")
   .option("--repo <path>", "source checkout path to inspect", process.cwd())
@@ -1649,6 +1650,7 @@ interface SetupInspectOptions {
   sshHost?: string;
   sshUser?: string;
   serviceUser?: string;
+  serviceName?: string;
   dryRun?: boolean;
 }
 
@@ -2341,6 +2343,8 @@ async function setupInspectDetails(options: SetupInspectOptions) {
   const webPublishing = setupWebPublishingStatus(workspace);
   const composio = await setupComposioStatus(workspace);
   const transcription = setupTranscriptionStatus(workspace);
+  const serviceName = options.serviceName ?? `brain-${options.workspace}`;
+  const service = setupServiceStatus(serviceName);
   const plan = buildSetupPlan({
     config,
     workspace,
@@ -2377,6 +2381,7 @@ async function setupInspectDetails(options: SetupInspectOptions) {
     privateConfigCandidates,
     provider: workspace?.provider ?? "missing",
     serviceUser: options.serviceUser ?? DEFAULT_SERVICE_USER,
+    service,
     primaryEntrypointId: workspace?.primaryEntrypointId ?? "missing",
     entrypoints: workspace ? Object.entries(workspace.enabledEntrypoints).map(([entrypointId, entrypoint]) => ({
       entrypointId,
@@ -2621,6 +2626,7 @@ function buildSetupPlan(input: {
 function setupResumeWizard(details: {
   workspaceRoot: string;
   serviceUser?: string;
+  service?: ReturnType<typeof setupServiceStatus>;
   config: { present: boolean; valid: boolean };
   workspaceDirectory: Awaited<ReturnType<typeof fileMetadata>>;
   directories: Record<string, Awaited<ReturnType<typeof fileMetadata>>>;
@@ -2643,7 +2649,8 @@ function setupResumeWizard(details: {
   const state = details.setupState?.state;
   const codexAuthUser = state?.statuses.codexAuth.runAsUser;
   const codexAuthVerifiedByState = codexAuthMatchesServiceUser(state?.statuses.codexAuth, details.serviceUser);
-  const serviceStartedByState = state?.statuses.service.started === true;
+  const serviceStarted = details.service?.active === true || state?.statuses.service.started === true;
+  const serviceInstalled = details.service?.installed === true || state?.statuses.service.installed === true || serviceStarted;
   const steps = [
     {
       step: "telegram-connection",
@@ -2717,9 +2724,11 @@ function setupResumeWizard(details: {
     {
       step: "install-start-service",
       title: "Install and start the Brain service.",
-      complete: serviceStartedByState,
-      evidence: serviceStartedByState
-        ? ["Private setup state says the service was installed/started; verify with health/status before live Telegram traffic."]
+      complete: serviceStarted,
+      evidence: serviceStarted
+        ? [`Service ${details.service?.serviceName ?? "Brain"} is active by systemd metadata.`]
+        : serviceInstalled
+          ? [`Service ${details.service?.serviceName ?? "Brain"} is installed but not active; start it after Codex auth and token metadata are verified.`]
         : ["Service installation/start is never assumed by setup status; verify Codex auth first, then review the systemd plan and require explicit confirmation."],
       resumePrompt: "If the service is already installed and running, confirm with health/status output before accepting Telegram traffic.",
     },
@@ -2753,6 +2762,32 @@ function setupResumeWizard(details: {
     nextIncompleteStep,
     sequence: steps,
     note: "On rerun, setup inspects current state and resumes at the next incomplete step instead of restarting or overwriting defaults.",
+  };
+}
+
+function setupServiceStatus(serviceName: string): {
+  serviceName: string;
+  inspected: boolean;
+  installed: boolean;
+  enabled: boolean;
+  active: boolean;
+  source: string;
+} {
+  const runSystemctl = (args: string[]) => spawnSync("systemctl", args, { encoding: "utf8" });
+  const show = runSystemctl(["show", `${serviceName}.service`, "--property=LoadState", "--value"]);
+  if (show.error || (show.status ?? 1) !== 0) {
+    return { serviceName, inspected: false, installed: false, enabled: false, active: false, source: "systemctl-unavailable" };
+  }
+  const loadState = String(show.stdout ?? "").trim();
+  const enabled = runSystemctl(["is-enabled", `${serviceName}.service`]);
+  const active = runSystemctl(["is-active", `${serviceName}.service`]);
+  return {
+    serviceName,
+    inspected: true,
+    installed: loadState === "loaded",
+    enabled: (enabled.status ?? 1) === 0,
+    active: (active.status ?? 1) === 0,
+    source: "systemctl",
   };
 }
 
@@ -2803,7 +2838,12 @@ async function writeSetupProgress(details: Awaited<ReturnType<typeof setupInspec
       workspace: { configured: wizard.sequence.find((step) => step.step === "workspace-scaffold")?.complete === true },
       runtimeConfig: { valid: details.config.valid },
       codexAuth: prior?.statuses.codexAuth ?? { status: "pending", metadataOnly: true },
-      service: prior?.statuses.service ?? { installed: false, started: false, metadataOnly: true },
+      service: {
+        installed: details.service?.installed === true || prior?.statuses.service.installed === true,
+        started: details.service?.active === true || prior?.statuses.service.started === true,
+        metadataOnly: true,
+        checkedAt: new Date().toISOString(),
+      },
       telegramToken: {
         configured: Boolean(telegramSecretRef),
         metadataOnly: true,

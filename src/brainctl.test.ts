@@ -729,6 +729,65 @@ test("brainctl setup status requires Codex auth for the service user", async () 
   }
 });
 
+test("brainctl setup status uses systemd state for service resume", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-setup-systemd-status-"));
+  try {
+    const workspace = path.join(root, "workspace");
+    const backupRepo = path.join(root, "backup-repo");
+    const config = path.join(root, "runtime.yaml");
+    const bin = path.join(root, "bin");
+    await mkdir(bin, { recursive: true });
+    await writeFile(config, testRuntimeConfig(workspace, backupRepo));
+    const setup = spawnBrainctl(["setup", "--config", config, "--workspace", "personal", "--path", workspace]);
+    assert.equal(setup.status, 0, setup.stderr);
+    await writeFile(path.join(workspace, "config", "brain-personal.env"), `TELEGRAM_MAIN_CONFIG=${path.join(workspace, "secrets", "telegram-main.json")}\n`);
+    await writeFile(path.join(bin, "systemctl"), [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      "case \"$1\" in",
+      "  show) printf 'loaded\\n' ;;",
+      "  is-enabled) exit 0 ;;",
+      "  is-active) exit 0 ;;",
+      "  *) exit 1 ;;",
+      "esac",
+      "",
+    ].join("\n"));
+    await chmod(path.join(bin, "systemctl"), 0o700);
+
+    const progressPath = path.join(workspace, "state", "setup-progress.json");
+    const progress = {
+      version: 1,
+      workspace: "personal",
+      workspaceRoot: workspace,
+      updatedAt: new Date().toISOString(),
+      completedSteps: ["workspace-scaffold", "runtime-config", "telegram-connection", "configure-verify-codex-auth"],
+      statuses: {
+        workspace: { configured: true },
+        runtimeConfig: { valid: true },
+        codexAuth: { status: "verified", metadataOnly: true, checkedAt: new Date().toISOString(), runAsUser: "brain" },
+        service: { installed: false, started: false, metadataOnly: true },
+        telegramToken: { configured: true, metadataOnly: true, source: "file", checkedAt: new Date().toISOString() },
+      },
+      nextRecommendedStep: "install-start-service",
+      secretValuesStored: false,
+    };
+    await writeFile(progressPath, `${JSON.stringify(progress, null, 2)}\n`);
+
+    const status = spawnBrainctl(["setup", "status", "--config", config, "--workspace", "personal", "--path", workspace, "--service-user", "brain"], {
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+    });
+    assert.equal(status.status, 0, status.stderr);
+    const statusJson = JSON.parse(status.stdout) as { details: { service: { installed: boolean; enabled: boolean; active: boolean }; setupWizard: { nextIncompleteStep: { step: string }; completedSteps: Array<{ step: string }> } } };
+    assert.equal(statusJson.details.service.installed, true);
+    assert.equal(statusJson.details.service.enabled, true);
+    assert.equal(statusJson.details.service.active, true);
+    assert.ok(statusJson.details.setupWizard.completedSteps.some((step) => step.step === "install-start-service"));
+    assert.equal(statusJson.details.setupWizard.nextIncompleteStep.step, "optional-follow-ups");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("brainctl setup reset only removes setup progress metadata", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brainctl-setup-reset-"));
   try {
