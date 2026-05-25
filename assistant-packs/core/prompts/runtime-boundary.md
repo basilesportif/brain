@@ -10,5 +10,6 @@ Brain runtime prompts should use provider-neutral and entrypoint-neutral languag
   unsourced interactive shell environment alone.
 - When setup reaches provider auth, present concrete verification commands or
   the generated helper script path. For Codex, use the `brainctl setup
-  codex-auth-script` helper rather than vague "verify auth" instructions.
+  codex-auth-script` helper rather than vague "verify auth" instructions; for
+  remote setup, give the user an `ssh -t ... 'bash ...'` command they can run.
 - Outbound actions should route to the originating entrypoint unless explicit configuration says otherwise.

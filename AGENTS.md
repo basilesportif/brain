@@ -101,9 +101,11 @@ docs and skills remain referenced files.
    <workspace>/config/runtime.yaml` and inspect redacted metadata instead.
 12. When setup reaches Codex auth verification, give concrete commands. Prefer
    generating `pnpm run brainctl setup codex-auth-script --config
-   <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root>` on the
-   target host and running the returned command as the same user that will run
-   Brain; the helper prints login instructions when auth is missing.
+   <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root>
+   --ssh-host <host> --ssh-user <user>` on the target host or via SSH context,
+   then show the returned `ssh -t ... 'bash .../verify-brain-codex-auth.sh'`
+   command to the user. The helper prints login instructions when auth is
+   missing.
 13. Keep real workspace config, env files, tokens, Telegram IDs, logs, generated
    artifacts, hostnames, and repo-registry state outside git.
 14. Run `pnpm run check` after setup, documentation, or runtime changes.

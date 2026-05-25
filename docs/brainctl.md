@@ -225,10 +225,12 @@ chat, shell history, command output, or logs.
 When the wizard reaches Codex auth, generate a target-host verification helper:
 
 ```bash
-pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root>
+pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root> --ssh-host <host> --ssh-user <user>
 ```
 
-Run the returned `bash .../verify-brain-codex-auth.sh` command as the same user
+For remote setup, give the user the returned
+`ssh -t ... 'bash .../verify-brain-codex-auth.sh'` command. For local setup,
+run the returned `bash .../verify-brain-codex-auth.sh` command as the same user
 that will run Brain. The helper checks `codex login status`, prints concrete
 `codex login --device-auth` / `codex login` instructions when auth is missing,
 and records the verified setup state only through guarded

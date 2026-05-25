@@ -1705,6 +1705,8 @@ interface SetupTelegramTokenScriptOptions {
   path?: string;
   config?: string;
   repo?: string;
+  sshHost?: string;
+  sshUser?: string;
   output?: string;
   tokenFile?: string;
   adapterConfig?: string;
@@ -2101,6 +2103,9 @@ async function setupCodexAuthScriptCommand(options: SetupTelegramTokenScriptOpti
     details: {
       scriptPath,
       runCommand: `bash ${shellArg(scriptPath)}`,
+      sshRunCommand: options.sshHost
+        ? `ssh -t ${shellArg(remoteSshDestination(options.sshHost, options.sshUser))} ${shellArg(`bash ${shellArg(scriptPath)}`)}`
+        : undefined,
       workspace: options.workspace,
       workspaceRoot,
       repoRoot,

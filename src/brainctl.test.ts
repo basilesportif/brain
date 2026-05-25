@@ -494,13 +494,14 @@ test("brainctl setup codex-auth-script verifies login before marking provider au
     await chmod(path.join(bin, "codex"), 0o700);
     await chmod(path.join(bin, "pnpm"), 0o700);
 
-    const generated = spawnBrainctl(["setup", "codex-auth-script", "--workspace", "personal", "--path", workspace, "--config", config, "--repo", root, "--output", script]);
+    const generated = spawnBrainctl(["setup", "codex-auth-script", "--workspace", "personal", "--path", workspace, "--config", config, "--repo", root, "--output", script, "--ssh-host", "203.0.113.10", "--ssh-user", "brain"]);
     assert.equal(generated.status, 0, generated.stderr);
-    const generatedJson = JSON.parse(generated.stdout) as { ok: boolean; details: { scriptPath: string; validation: string; secretValuesPrinted: boolean } };
+    const generatedJson = JSON.parse(generated.stdout) as { ok: boolean; details: { scriptPath: string; validation: string; secretValuesPrinted: boolean; sshRunCommand: string } };
     assert.equal(generatedJson.ok, true);
     assert.equal(generatedJson.details.scriptPath, script);
     assert.equal(generatedJson.details.validation, "bash -n passed");
     assert.equal(generatedJson.details.secretValuesPrinted, false);
+    assert.equal(generatedJson.details.sshRunCommand, `ssh -t brain@203.0.113.10 'bash ${script}'`);
 
     const syntax = spawnSync("bash", ["-n", script], { encoding: "utf8" });
     assert.equal(syntax.status, 0, syntax.stderr);

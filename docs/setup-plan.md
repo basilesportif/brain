@@ -168,12 +168,13 @@ command lists unless the user asks for details or `brainctl setup defaults
 7. After the core choices are captured, configure or verify Codex auth before
    service start or live Telegram traffic:
    first generate a target-host helper with
-   `pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <workspace-name> --repo <repo-root>`.
-   Run the returned command as the same user that will run Brain. The helper
-   checks `codex login status`, prints `codex login --device-auth` / `codex
-   login` instructions if auth is missing, and updates setup progress only via
-   guarded `brainctl validate live --allow-live --run-safe` after login is
-   present;
+   `pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <workspace-name> --repo <repo-root> --ssh-host <host> --ssh-user <user>`.
+   For remote setup, show the returned
+   `ssh -t ... 'bash .../verify-brain-codex-auth.sh'` command to the user so
+   device-auth can happen in their terminal. The helper checks
+   `codex login status`, prints `codex login --device-auth` / `codex login`
+   instructions if auth is missing, and updates setup progress only via guarded
+   `brainctl validate live --allow-live --run-safe` after login is present;
    use the selected Codex transport, store any credential only in the private
    workspace/server env file or host secret store, and run only redacted
    metadata/health checks unless the user explicitly allows live provider

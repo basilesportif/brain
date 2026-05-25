@@ -59,10 +59,10 @@ Use this skill when a user asks to prepare a fresh Ubuntu host for Brain.
    Composio accounts if needed, then essential runtime choices.
 9. Configure/verify Codex auth before service start or live Telegram traffic.
    Generate `pnpm run brainctl setup codex-auth-script --config
-   <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root>` on the
-   target host and run the returned command as the same user that will run
-   Brain. Require explicit confirmation before writing credentials or running
-   live provider checks.
+   <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root>
+   --ssh-host <host> --ssh-user <user>` and give the user the returned
+   `ssh -t ... 'bash .../verify-brain-codex-auth.sh'` command. Require explicit
+   confirmation before writing credentials or running live provider checks.
 10. Prepare/install/start the service only after confirmation.
 11. Treat first-user pairing, OpenAI transcription, web publishing, and backup
    tuning as optional follow-ups unless explicitly requested.

@@ -69,10 +69,11 @@ deployment handoff.
   `pnpm run brainctl setup telegram-token-script --path <workspace>` and run the
   returned command. Do not hand-write that shell script in chat.
 - For Codex auth verification, generate the helper with
-  `pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root>`.
-  Run the returned command on the target host as the same user that will run
-  Brain. The helper checks `codex login status`, prints concrete `codex login`
-  / `codex login --device-auth` instructions if needed, and updates setup
+  `pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root> --ssh-host <host> --ssh-user <user>`.
+  Show the returned `ssh -t ... 'bash .../verify-brain-codex-auth.sh'` command
+  to the user so they can enter any device-auth flow in their terminal. The
+  helper checks `codex login status`, prints concrete `codex login` /
+  `codex login --device-auth` instructions if needed, and updates setup
   progress only through guarded `brainctl validate live --allow-live --run-safe`
   after login is present.
 - Setup/secret metadata should inspect private workspace env files such as
@@ -171,8 +172,10 @@ unless the user asks for details or `brainctl setup defaults --verbose` is used.
 7. Codex auth ready? Configure or verify this before service start and before
    accepting Telegram traffic:
    - generate a target-host helper with
-     `pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root>`,
-   - run the returned command as the same user that will run Brain,
+     `pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root> --ssh-host <host> --ssh-user <user>`,
+   - show the returned `ssh -t ... 'bash .../verify-brain-codex-auth.sh'`
+     command to the user for remote setup, or the returned local `bash ...`
+     command for local setup,
    - if it reports missing auth, follow its `codex login --device-auth` or
      `codex login` instructions and rerun it,
    - confirm the selected Codex transport/auth path,
