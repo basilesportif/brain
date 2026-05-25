@@ -18,10 +18,15 @@ Saved files and PDFs:
 
 - Store private file bytes under a configured private runtime directory such as `private/documents/files/`, not under assistant packs, docs, examples, apps, or packages.
 - Store only lightweight document metadata under the same private boundary, for example `private/documents/metadata.jsonl`.
-- Store project memory under the configured private workspace, typically
-  `projects/`, `notes/`, and `documents/metadata/`. These paths may be committed
-  only to the user's private workspace backup repo, never to the public source
-  checkout.
+- Store short-term assistant state under the configured private JSON workspace:
+  `data/todos.json`, `data/projects.json`, `data/crm.json`,
+  `data/reminders.json`, `instructions/**`, `tasks/**`, selected
+  `.claude/repo-registry/` files, and lightweight file-save metadata. These
+  paths may be committed only to the user's private workspace backup repo,
+  never to the public source checkout.
+- Treat `projects/`, `notes/`, and `documents/metadata/` as supporting
+  markdown/resource folders only. Do not migrate current markdown notes or
+  convert JSON state to markdown during the short-term parity phase.
 - Keep `private/`, `workspace/`, and `data/` ignored except for their README files.
 
 Setup and backup inspection:
@@ -34,8 +39,11 @@ Setup and backup inspection:
   template but does not add, commit, or push private workspace files.
 - The private workspace backup template is available at
   `examples/private-workspace.gitignore`; it excludes `secrets/**`, `logs/**`,
-  `tmp/**`, caches, `node_modules`, generated scratch artifacts, and `*.log` by
-  default.
+  `tmp/**`, caches, `node_modules`, private document bytes,
+  repo-registry runtime caches, generated scratch artifacts, and `*.log` by
+  default. It includes assistant JSON state, overlays, task metadata, selected
+  repo-registry state, and file-save metadata by policy/config rather than
+  broad source checkout commits.
 - Web publishing and Composio setup commands are optional metadata surfaces only:
   they do not change DNS, proxies, credentials, OAuth accounts, or provider
   state.

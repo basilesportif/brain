@@ -52,6 +52,16 @@ provider sessions, Telegram IDs, and logs do not belong in that file.
 Use `brainctl setup reset --workspace <name> --path <workspace-path> --dry-run`
 to inspect a reset, and add `--yes` to remove only that progress file.
 
+Short-term personal workspace parity is JSON-backed and reuses
+assistant-agent-logic rather than a Brain-native store port. Setup scaffolds
+`data/todos.json`, `data/projects.json`, `data/crm.json`,
+`data/reminders.json`, `private/documents/metadata.jsonl`,
+`instructions/`, `tasks/`, and selected repo-registry state. Use
+`brainctl workspace run --path <workspace> <assistant-script>.js -- <args>` to
+run the existing assistant-agent-logic scripts against that workspace. Markdown
+`projects/`, `notes/`, and `documents/metadata/` folders remain supporting
+resources only.
+
 ## Initial commands
 
 ```bash
@@ -71,6 +81,8 @@ pnpm run brainctl doctor --config examples/config/runtime.yaml --pack assistant-
 pnpm run brainctl runtime smoke --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl operations plan --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl validate live --config examples/config/runtime.yaml --workspace personal --run-safe
+pnpm run brainctl workspace status --path ~/.brain/workspace
+pnpm run brainctl workspace run --path ~/.brain/workspace todo-list.js
 ```
 
 ## Design goals

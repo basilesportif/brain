@@ -45,10 +45,14 @@ test("buildPrompt exposes private workspace project memory paths", () => {
     promptContext: { includeActiveEntrypointMetadata: true, exposeChannelSecrets: false },
   });
 
-  assert.match(prompt, /projects\/index\.md/);
-  assert.match(prompt, /documents\/metadata/);
-  assert.match(prompt, /inspect the private workspace paths/);
-  assert.match(prompt, /do not claim no project list exists from runtime metadata alone/);
+  assert.match(prompt, /data\/projects\.json/);
+  assert.match(prompt, /data\/todos\.json/);
+  assert.match(prompt, /data\/crm\.json/);
+  assert.match(prompt, /data\/reminders\.json/);
+  assert.match(prompt, /private\/documents\/metadata\.jsonl/);
+  assert.match(prompt, /assistant-agent-logic scripts/);
+  assert.match(prompt, /Markdown project\/notes\/documents directories are supporting resources only/);
+  assert.match(prompt, /do not claim no project\/todo\/CRM\/reminder list exists/);
 });
 
 test("BrainRuntime consumes dispatch_subagent actions through lifecycle port", async () => {

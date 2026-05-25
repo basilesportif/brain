@@ -17,3 +17,17 @@ The first runtime port should model today's Telegram behavior as a `single-prima
 - Do not enable a second active web/iOS entrypoint during migration; require a later `multi-explicit` config mode with validation and tests.
 
 See `docs/runtime-configuration.md` for the draft config examples and validation rules.
+
+## Short-term workspace state parity
+
+Brain currently reuses assistant-agent-logic's JSON workspace behavior for
+personal state instead of porting stores into TypeScript. The authoritative
+state files are `data/todos.json`, `data/projects.json`, `data/crm.json`,
+`data/reminders.json`, plus `private/documents/metadata.jsonl` for file-save
+metadata and `instructions/**`/`tasks/**`/selected repo-registry state for
+overlays and automation metadata.
+
+Use `brainctl workspace scaffold/status/run` or direct assistant-agent-logic
+commands with `ASSISTANT_WORKSPACE=<workspace>`. Do not migrate existing
+markdown notes; `projects/`, `notes/`, and `documents/metadata/` are resource
+folders only in this phase.

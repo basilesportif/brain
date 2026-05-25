@@ -38,6 +38,14 @@ pnpm run brainctl backup init --config examples/config/runtime.yaml --workspace 
 pnpm run brainctl backup init --config examples/config/runtime.yaml --workspace personal --apply
 pnpm run brainctl backup check --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl backup status --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl workspace scaffold --path ~/.brain/workspace
+pnpm run brainctl workspace status --path ~/.brain/workspace
+pnpm run brainctl workspace commands --path ~/.brain/workspace
+pnpm run brainctl workspace run --path ~/.brain/workspace todo-list.js
+pnpm run brainctl workspace run --path ~/.brain/workspace project-list.js
+pnpm run brainctl workspace run --path ~/.brain/workspace crm-list-people.js
+pnpm run brainctl workspace run --path ~/.brain/workspace reminder-list.js
+pnpm run brainctl workspace run --path ~/.brain/workspace file-list.js
 pnpm run brainctl pack validate assistant-packs/core
 pnpm run brainctl provider check codex --transport stub
 pnpm run brainctl provider smoke codex --transport stub --prompt ping
@@ -156,6 +164,48 @@ is supplied. `private-git` uses a private repo path/remote/branch and safe
 include/exclude rules; the template excludes `secrets/**`, `logs/**`, `tmp/**`,
 caches, `node_modules`, and `*.log` by default. `backup status` summarizes Git
 presence, remotes, branch, and status counts without printing private filenames.
+
+The default include policy now covers the assistant-agent-logic JSON workspace
+state needed for short-term parity:
+
+- `data/**` for todos, projects, CRM, reminders, and related JSON stores;
+- `instructions/**` for skill/prompt overlays;
+- `tasks/**` for scheduled task metadata;
+- `private/documents/metadata.jsonl` for file-save metadata (not file bytes);
+- selected `.claude/repo-registry/` state files; and
+- legacy markdown resource folders (`projects/**`, `notes/**`,
+  `documents/metadata/**`) as supporting resources only.
+
+Bulky/private document bytes under `private/documents/files/**`, secrets, logs,
+tmp/cache paths, setup progress metadata, and repo-registry runtime caches are
+excluded by default.
+
+## Assistant JSON workspace parity
+
+Brain does not yet port assistant-agent-logic's todo/project/CRM/reminder/file
+stores. Instead, setup creates a compatible workspace and `brainctl workspace
+run` executes the existing scripts with:
+
+```bash
+ASSISTANT_WORKSPACE=<workspace>
+BRAIN_PRIVATE_DIR=<workspace>/private
+```
+
+Use:
+
+```bash
+pnpm run brainctl workspace scaffold --path ~/.brain/workspace
+pnpm run brainctl workspace status --path ~/.brain/workspace
+pnpm run brainctl workspace run --path ~/.brain/workspace todo-add.js -- --title "Buy coffee"
+pnpm run brainctl workspace run --path ~/.brain/workspace project-list.js
+pnpm run brainctl workspace run --path ~/.brain/workspace crm-list-people.js
+pnpm run brainctl workspace run --path ~/.brain/workspace reminder-list.js
+pnpm run brainctl workspace run --path ~/.brain/workspace file-save.js -- --source /path/to/file.pdf
+```
+
+The wrapper requires an assistant-agent-logic checkout (default:
+`../assistant-agent-logic`, override with `--assistant-repo` or
+`BRAIN_ASSISTANT_LOGIC_REPO`). It does not parse or rewrite those stores itself.
 
 ## Optional web publishing and Composio setup
 

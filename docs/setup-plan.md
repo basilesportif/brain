@@ -8,13 +8,14 @@ hosts.
 Status: guided setup documentation. `brainctl`, runtime packages, provider
 adapters, Telegram entrypoint seams, and non-mutating operations planning exist.
 Setup should prepare and validate a local or remote workspace, then guide the
-user through a concise core flow: Telegram connection, private data/backup repo
-pull or initialization, Composio account connection if needed, and other
-essential runtime choices. Codex auth is verified before service start or live
-Telegram traffic. First-user pairing, OpenAI transcription, web publishing, and
-backup policy tuning are follow-up steps unless the user explicitly asks to do
-them during initial setup. Setup still stops before credentials, privileged
-service changes, or live deployment unless the user explicitly confirms.
+user through a concise core flow: assistant-agent-logic JSON workspace scaffold,
+Telegram connection, private data/backup repo pull or initialization, Composio
+account connection if needed, and other essential runtime choices. Codex auth
+is verified before service start or live Telegram traffic. First-user pairing,
+OpenAI transcription, web publishing, and backup policy tuning are follow-up
+steps unless the user explicitly asks to do them during initial setup. Setup
+still stops before credentials, privileged service changes, or live deployment
+unless the user explicitly confirms.
 
 Setup is intentionally re-runnable. At any time, `brainctl setup inspect` or
 `brainctl setup status` should show configured, missing required, missing
@@ -56,16 +57,24 @@ or "start the service" unless the complete command is included immediately.
 Ask confirmation questions in plain English and accept ordinary yes/no answers;
 do not require exact reply text unless the user must run a command verbatim.
 
-Initial setup must create an inspectable personal workspace before live traffic:
-`projects/`, `notes/`, `documents/`, and `documents/metadata/` under the private
-workspace path. Codex should run from that private workspace path for live Brain
-turns, with non-interactive approval behavior, `TMPDIR` pointed at
+Initial setup must create an inspectable JSON-backed assistant workspace before
+live traffic. The short-term Brain source of truth reuses assistant-agent-logic
+stores and scripts rather than porting them into TypeScript:
+`data/todos.json`, `data/projects.json`, `data/crm.json`,
+`data/reminders.json`, `private/documents/metadata.jsonl`,
+`instructions/skills/`, `instructions/prompts/`, `tasks/`, and selected
+`.claude/repo-registry/` state. `projects/`, `notes/`, `documents/`, and
+`documents/metadata/` are still created, but only as markdown/resource folders;
+do not migrate existing markdown notes or convert JSON state to markdown.
+Codex should run from that private workspace path for live Brain turns, with
+non-interactive approval behavior, `TMPDIR` pointed at
 `<workspace>/tmp`, and self-host service sandbox mode set to
 `danger-full-access`. Telegram has no interactive approval channel, and common
 Ubuntu server sandboxes can fail before shell commands start; the safety
 boundary is the dedicated service user plus private workspace path, not a
 per-turn approval prompt. This lets questions like "do I have projects?" inspect
-project memory files instead of answering from active entrypoint metadata alone.
+the JSON stores through assistant-agent-logic scripts instead of answering from
+active entrypoint metadata or markdown folders alone.
 Ask whether the user wants to initialize or connect a private Git backup for
 this personal workspace memory; never commit secrets, logs, Telegram IDs,
 transcripts, or provider session material.
@@ -172,10 +181,14 @@ command lists unless the user asks for details or `brainctl setup defaults
    - store only a private token ref, not the token value;
    - do not start polling/webhooks yet.
 2. Create personal workspace memory:
-   - create `projects/`, `notes/`, `documents/`, and `documents/metadata/`;
-   - tell the user these are the files Brain can inspect for project memory;
+   - run or rely on `brainctl setup` / `brainctl workspace scaffold` to create
+     `data/*.json`, `instructions/**`, `tasks/**`,
+     `private/documents/metadata.jsonl`, selected `.claude/repo-registry/`
+     state paths, and markdown resource folders;
+   - tell the user todos/projects/CRM/reminders are JSON-backed and accessed by
+     assistant-agent-logic scripts via `brainctl workspace run`;
    - ask whether to initialize or connect a private Git backup so non-secret
-     project memory can be committed privately.
+     workspace state can be committed privately.
 3. Pull or initialize the private data/backup repo:
    - prefer an existing private-git remote when supplied;
    - otherwise initialize a private local repo/path and add a remote later;
@@ -305,8 +318,19 @@ on private workspace knowledge.
 - Repo clone path, branch/ref, and remote URL are known.
 - Private workspace path is outside the source checkout and outside git.
 - Workspace directories exist for `config/`, `secrets/`, `logs/`, `artifacts/`,
-  `state/`, `backups/`, `tmp/`, `projects/`, `notes/`, `documents/`, and
-  `documents/metadata/` with restrictive ownership/permissions.
+  `state/`, `backups/`, `tmp/`, `data/`, `instructions/`, `tasks/`,
+  `.claude/repo-registry/`, `private/documents/`, `projects/`, `notes/`,
+  `documents/`, and `documents/metadata/` with restrictive
+  ownership/permissions.
+- JSON stores exist and validate for assistant-agent-logic parity:
+  `data/todos.json`, `data/projects.json`, `data/crm.json`, and
+  `data/reminders.json`.
+- An assistant-agent-logic checkout is available to the service user, normally
+  as a sibling checkout (`../assistant-agent-logic`) or via
+  `BRAIN_ASSISTANT_LOGIC_REPO` / `--assistant-repo`; validate with
+  `pnpm run brainctl workspace status --path <workspace>`.
+- File-save metadata is `private/documents/metadata.jsonl`; private file bytes
+  stay under `private/documents/files/` and are excluded from default backups.
 - Runtime config starts from `examples/config/runtime.yaml` or TOML and contains
   one `primaryEntrypointId` in `single-primary` mode.
 
@@ -397,10 +421,12 @@ on private workspace knowledge.
 - Health: `brainctl doctor --config <path> --pack assistant-packs/core`,
   `brainctl config validate <path>`, and `brainctl operations validate` are the
   current safe checks.
-- Backup: config metadata, private workspace state, and secrets backup path are
-  documented without checking data into git. `private-git` backups use a private
-  repo path/remote/branch and the `examples/private-workspace.gitignore`
-  template; `backup init` is dry-run unless `--apply` is explicit.
+- Backup: config metadata, assistant JSON workspace state, instruction overlays,
+  task metadata, file-save metadata, selected repo-registry state, and secrets
+  backup path are documented without checking data into public git.
+  `private-git` backups use a private repo path/remote/branch and the
+  `examples/private-workspace.gitignore` template; `backup init` is dry-run
+  unless `--apply` is explicit.
 - Update: pull/fetch target ref, reinstall dependencies, run checks, restart,
   and rollback command are documented.
 

@@ -96,15 +96,26 @@ deployment handoff.
   `<workspace>/config/brain-<workspace>.env` and
   `<workspace>/secrets/secrets.env`. Do not mark a step incomplete just because
   the current ad hoc shell or SSH command has not sourced those env vars.
-- The initial private workspace scaffold must include project memory paths:
-  `projects/`, `notes/`, `documents/`, and `documents/metadata/`. Before the
-  first live provider turn, make sure Codex is launched from the private
+- The initial private workspace scaffold must include the assistant-agent-logic
+  JSON state model: `data/todos.json`, `data/projects.json`, `data/crm.json`,
+  `data/reminders.json`, `private/documents/metadata.jsonl`,
+  `instructions/**`, `tasks/**`, and selected `.claude/repo-registry/` state.
+  `projects/`, `notes/`, `documents/`, and `documents/metadata/` remain
+  supporting markdown/resource paths only; do not migrate current markdown notes
+  or convert JSON state to markdown. Before the first live provider turn, make
+  sure Codex is launched from the private
   workspace path with `TMPDIR=<workspace>/tmp`, `approval_policy=never`, and
   self-host service sandbox mode `danger-full-access`. Telegram cannot service
   interactive approval prompts, and server sandboxes can fail before shell
   commands start; isolate Brain with the dedicated service user and private
-  workspace path instead. Project questions should be answered by inspecting
-  those files, not from active entrypoint metadata alone.
+  workspace path instead. Todos/projects/CRM/reminders and file-save questions
+  should be answered by reusing assistant-agent-logic scripts through
+  `brainctl workspace run` or compatible `ASSISTANT_WORKSPACE=<path>` commands,
+  not from active entrypoint metadata or markdown folders alone.
+- Ensure an assistant-agent-logic checkout is available to the Brain service
+  user, normally at a sibling path (`../assistant-agent-logic`) or explicitly via
+  `BRAIN_ASSISTANT_LOGIC_REPO` / `--assistant-repo`. Validate it with
+  `pnpm run brainctl workspace status --path <workspace>`.
 
 ## Canonical user flow
 
@@ -180,11 +191,13 @@ unless the user asks for details or `brainctl setup defaults --verbose` is used.
 1. Telegram connection? Default entrypoint is Telegram as `telegram-main`.
    Create/choose the BotFather bot, store only a private token ref, and do not
    start polling/webhooks yet.
-2. Personal workspace memory? Create the private `projects/`, `notes/`,
-   `documents/`, and `documents/metadata/` paths. Ask whether the user wants to
-   initialize or connect a private Git backup so project memory can be committed
-   privately; do not commit secrets, logs, Telegram IDs, transcripts, or raw
-   provider state.
+2. Personal workspace memory? Create the assistant-agent-logic-compatible
+   JSON workspace (`data/*.json` for todos/projects/CRM/reminders),
+   instruction overlays, task metadata, file-save metadata, selected
+   repo-registry state paths, and markdown resource folders. Ask whether the
+   user wants to initialize or connect a private Git backup so non-secret
+   workspace state can be committed privately; do not commit secrets, logs,
+   Telegram IDs, transcripts, private document bytes, or raw provider state.
 3. Private data/backup repo? Pull an existing private repo or initialize one in
    the private workspace. Safe defaults exclude secrets, logs, tmp, and caches.
 4. Composio accounts? Connect Google Calendar/chat refs only if this workspace
@@ -275,6 +288,14 @@ BotFather token creation guidance:
    - `state/`
    - `backups/`
    - `tmp/`
+   - `data/`
+   - `instructions/`
+   - `instructions/skills/`
+   - `instructions/prompts/`
+   - `tasks/`
+   - `.claude/repo-registry/`
+   - `private/documents/`
+   - `private/documents/files/`
    - `projects/`
    - `notes/`
    - `documents/`

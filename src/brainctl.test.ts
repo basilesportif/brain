@@ -7,6 +7,7 @@ import path from "node:path";
 
 const brainctl = new URL("./brainctl.js", import.meta.url);
 const repoRoot = path.resolve(new URL("..", import.meta.url).pathname);
+const assistantLogicRepo = path.resolve(repoRoot, "../assistant-agent-logic");
 
 test("brainctl runtime smoke exercises no-network entrypoint/provider path", () => {
   const result = spawnBrainctl(["runtime", "smoke", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--text", "ping"]);
@@ -475,7 +476,8 @@ test("brainctl setup telegram-token-script writes a syntax-checked one-use secre
     assert.doesNotMatch(await readFile(secretsEnv, "utf8"), new RegExp(token));
     assert.match(await readFile(serviceEnv, "utf8"), new RegExp(`TELEGRAM_BOT_TOKEN_FILE=${escapeRegExp(tokenFile)}`));
     assert.match(await readFile(secretsEnv, "utf8"), new RegExp(`TELEGRAM_MAIN_CONFIG=${escapeRegExp(adapterConfig)}`));
-    for (const dir of ["logs", "artifacts", "backups", "tmp", "projects", "notes", "documents", path.join("documents", "metadata")]) await mkdir(path.join(workspace, dir), { recursive: true });
+    const scaffold = spawnBrainctl(["workspace", "scaffold", "--path", workspace, "--assistant-repo", assistantLogicRepo]);
+    assert.equal(scaffold.status, 0, scaffold.stderr);
 
     const status = spawnBrainctl(["setup", "status", "--config", config, "--workspace", "personal", "--path", workspace]);
     assert.equal(status.status, 0, status.stderr);
@@ -692,6 +694,90 @@ test("brainctl setup inspect is idempotent and redacts secret values", async () 
   }
 });
 
+test("brainctl scaffolds and reuses assistant-agent-logic JSON workspace stores", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-assistant-workspace-"));
+  try {
+    const workspace = path.join(root, "workspace");
+    const config = path.join(root, "runtime.yaml");
+    const backupRepo = path.join(root, "backup-repo");
+    await writeFile(config, testRuntimeConfig(workspace, backupRepo));
+
+    const setup = spawnBrainctl(["setup", "--config", config, "--workspace", "personal", "--path", workspace]);
+    assert.equal(setup.status, 0, setup.stderr);
+    const setupJson = JSON.parse(setup.stdout) as { details: { plan: { configured: string[] }; assistantWorkspaceScaffold: { writtenFiles: string[] } } };
+    assert.ok(setupJson.details.plan.configured.some((item) => /assistant JSON store ready: todos/.test(item)));
+    assert.ok(setupJson.details.plan.configured.some((item) => /assistant-agent-logic scripts available/.test(item)));
+    assert.ok(setupJson.details.assistantWorkspaceScaffold.writtenFiles.includes(path.join("data", "todos.json")));
+    assert.ok(setupJson.details.assistantWorkspaceScaffold.writtenFiles.includes(path.join("instructions", "skills", "projects.md")));
+    assert.ok(setupJson.details.assistantWorkspaceScaffold.writtenFiles.includes(path.join("private", "documents", "metadata.jsonl")));
+
+    for (const [file, rootKey] of [
+      ["todos.json", "todos"],
+      ["projects.json", "projects"],
+      ["reminders.json", "reminders"],
+    ] as const) {
+      const parsed = JSON.parse(await readFile(path.join(workspace, "data", file), "utf8")) as Record<string, unknown>;
+      assert.equal(parsed.version, 1);
+      assert.deepEqual(parsed[rootKey], []);
+    }
+    const crm = JSON.parse(await readFile(path.join(workspace, "data", "crm.json"), "utf8")) as { people: unknown[]; businesses: unknown[]; correspondence: unknown[] };
+    assert.deepEqual(crm.people, []);
+    assert.deepEqual(crm.businesses, []);
+    assert.deepEqual(crm.correspondence, []);
+
+    const addTodo = spawnBrainctl(["workspace", "run", "--path", workspace, "--assistant-repo", assistantLogicRepo, "todo-add.js", "--", "--title", "Buy coffee"]);
+    assert.equal(addTodo.status, 0, addTodo.stderr);
+    const todoList = spawnBrainctl(["workspace", "run", "--path", workspace, "--assistant-repo", assistantLogicRepo, "todo-list.js"]);
+    assert.equal(todoList.status, 0, todoList.stderr);
+    const todoListJson = JSON.parse(todoList.stdout) as { details: { stdout: { todos: Array<{ title: string }> } } };
+    assert.equal(todoListJson.details.stdout.todos[0]?.title, "Buy coffee");
+
+    const addProject = spawnBrainctl(["workspace", "run", "--path", workspace, "--assistant-repo", assistantLogicRepo, "project-add.js", "--", "--name", "Parity Project"]);
+    assert.equal(addProject.status, 0, addProject.stderr);
+    const projectList = spawnBrainctl(["workspace", "run", "--path", workspace, "--assistant-repo", assistantLogicRepo, "project-list.js"]);
+    assert.equal(projectList.status, 0, projectList.stderr);
+    const projectListJson = JSON.parse(projectList.stdout) as { details: { stdout: { projects: Array<{ name: string }> } } };
+    assert.equal(projectListJson.details.stdout.projects[0]?.name, "Parity Project");
+
+    const addPerson = spawnBrainctl(["workspace", "run", "--path", workspace, "--assistant-repo", assistantLogicRepo, "crm-add-person.js", "--", "--name", "Jane Smith"]);
+    assert.equal(addPerson.status, 0, addPerson.stderr);
+    const people = spawnBrainctl(["workspace", "run", "--path", workspace, "--assistant-repo", assistantLogicRepo, "crm-list-people.js"]);
+    assert.equal(people.status, 0, people.stderr);
+    const peopleJson = JSON.parse(people.stdout) as { details: { stdout: { people: Array<{ name: string }> } } };
+    assert.equal(peopleJson.details.stdout.people[0]?.name, "Jane Smith");
+
+    const addReminder = spawnBrainctl(["workspace", "run", "--path", workspace, "--assistant-repo", assistantLogicRepo, "reminder-add.js", "--", "--title", "Weekly review", "--weekly", "friday", "--time", "17:00"]);
+    assert.equal(addReminder.status, 0, addReminder.stderr);
+    const reminderList = spawnBrainctl(["workspace", "run", "--path", workspace, "--assistant-repo", assistantLogicRepo, "reminder-list.js"]);
+    assert.equal(reminderList.status, 0, reminderList.stderr);
+    const reminderListJson = JSON.parse(reminderList.stdout) as { details: { stdout: { reminders: Array<{ title: string }> } } };
+    assert.equal(reminderListJson.details.stdout.reminders[0]?.title, "Weekly review");
+
+    const sourceFile = path.join(root, "source.txt");
+    await writeFile(sourceFile, "private source bytes\n");
+    const saveFile = spawnBrainctl(["workspace", "run", "--path", workspace, "--assistant-repo", assistantLogicRepo, "file-save.js", "--", "--source", sourceFile, "--title", "Source note", "--project", "Parity Project"]);
+    assert.equal(saveFile.status, 0, saveFile.stderr);
+    const fileList = spawnBrainctl(["workspace", "run", "--path", workspace, "--assistant-repo", assistantLogicRepo, "file-list.js"]);
+    assert.equal(fileList.status, 0, fileList.stderr);
+    const fileListJson = JSON.parse(fileList.stdout) as { details: { stdout: { metadataPath: string; documents: Array<{ title: string; project: string }> } } };
+    assert.equal(fileListJson.details.stdout.metadataPath, path.join(workspace, "private", "documents", "metadata.jsonl"));
+    assert.equal(fileListJson.details.stdout.documents[0]?.title, "Source note");
+    assert.equal(fileListJson.details.stdout.documents[0]?.project, "Parity Project");
+
+    const status = spawnBrainctl(["workspace", "status", "--path", workspace, "--assistant-repo", assistantLogicRepo]);
+    assert.equal(status.status, 0, status.stderr);
+    const statusJson = JSON.parse(status.stdout) as { ok: boolean; details: { status: { ready: boolean; stateStores: Array<{ key: string; valid: boolean }>; fileSave: { ready: boolean; metadataPath: string }; commands: Array<{ area: string }> } } };
+    assert.equal(statusJson.ok, true);
+    assert.equal(statusJson.details.status.ready, true);
+    assert.ok(statusJson.details.status.stateStores.every((store) => store.valid));
+    assert.equal(statusJson.details.status.fileSave.ready, true);
+    assert.equal(statusJson.details.status.fileSave.metadataPath, path.join(workspace, "private", "documents", "metadata.jsonl"));
+    assert.deepEqual(statusJson.details.status.commands.map((command) => command.area), ["todos", "projects", "crm", "reminders", "file-save"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("brainctl setup status requires Codex auth for the service user", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brainctl-setup-service-user-auth-"));
   try {
@@ -887,7 +973,7 @@ test("brainctl setup defaults renders concise remote choices and persists ignore
     assert.deepEqual(parsed.details.setupFlow.coreSteps.map((item) => item.step), ["essential-runtime-choices", "configure-verify-codex-auth", "telegram-connection", "personal-workspace", "private-data-repo", "composio-accounts"]);
     assert.ok(parsed.details.setupFlow.orderingNotes.some((item) => /provider is Codex/.test(item)));
     assert.ok(parsed.details.setupFlow.orderingNotes.some((item) => /Codex auth before starting the service/.test(item)));
-    assert.ok(parsed.details.setupFlow.orderingNotes.some((item) => /project questions/.test(item)));
+    assert.ok(parsed.details.setupFlow.orderingNotes.some((item) => /todos\/projects\/CRM\/reminders/.test(item)));
     assert.ok(parsed.details.safety.some((item) => /outside git/.test(item)));
     assert.equal(parsed.details.localSetupContext.wrote, true);
     assert.equal(parsed.details.localSetupContext.mode, "0600");
@@ -986,11 +1072,17 @@ test("brainctl backup, web setup, and Composio status are safe and metadata-only
 
     const plan = spawnBrainctl(["backup", "plan", "--config", config, "--workspace", "personal"]);
     assert.equal(plan.status, 0, plan.stderr);
-    const planJson = JSON.parse(plan.stdout) as { ok: boolean; details: { plan: { config: { strategy: string; privateGit: { exclude: string[] } }; dryRunDefault: boolean } } };
+    const planJson = JSON.parse(plan.stdout) as { ok: boolean; details: { plan: { config: { strategy: string; privateGit: { include: string[]; exclude: string[] } }; dryRunDefault: boolean } } };
     assert.equal(planJson.ok, true);
     assert.equal(planJson.details.plan.config.strategy, "private-git");
     assert.equal(planJson.details.plan.dryRunDefault, true);
+    assert.ok(planJson.details.plan.config.privateGit.include.includes("data/**"));
+    assert.ok(planJson.details.plan.config.privateGit.include.includes("instructions/**"));
+    assert.ok(planJson.details.plan.config.privateGit.include.includes("tasks/**"));
+    assert.ok(planJson.details.plan.config.privateGit.include.includes("private/documents/metadata.jsonl"));
+    assert.ok(planJson.details.plan.config.privateGit.include.includes(".claude/repo-registry/index.yaml"));
     assert.ok(planJson.details.plan.config.privateGit.exclude.includes("secrets/**"));
+    assert.ok(planJson.details.plan.config.privateGit.exclude.includes("private/documents/files/**"));
 
     const init = spawnBrainctl(["backup", "init", "--config", config, "--workspace", "personal", "--apply"]);
     assert.equal(init.status, 0, init.stderr);

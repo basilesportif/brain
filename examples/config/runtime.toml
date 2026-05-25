@@ -39,8 +39,8 @@ strategy = "private-git"
 repoPath = "/home/brain/.brain/workspace/backups/private-git"
 remote = "git@github.com:example/private-brain-backup.git"
 branch = "main"
-include = ["config/**", "state/**", "projects/**", "notes/**", "documents/metadata/**", "artifacts/metadata/**"]
-exclude = ["secrets/**", "logs/**", "tmp/**", "cache/**", "caches/**", "state/setup-progress.json", "**/.cache/**", "**/node_modules/**", "**/*.log"]
+include = ["config/**", "state/**", "data/**", "instructions/**", "tasks/**", "projects/**", "notes/**", "documents/metadata/**", "private/documents/metadata.jsonl", "artifacts/metadata/**", ".claude/repo-registry/index.yaml", ".claude/repo-registry/config.yaml", ".claude/repo-registry/repos/**/state.yaml", ".claude/repo-registry/repos/**/guidance.md", ".claude/repo-registry/repos/**/guidance.json", ".claude/repo-registry/repos/**/notes.md"]
+exclude = ["secrets/**", "logs/**", "tmp/**", "cache/**", "caches/**", "state/setup-progress.json", "private/documents/files/**", ".claude/repo-registry/runtime/node_modules/**", ".claude/repo-registry/runtime/dist/**", ".claude/repo-registry/runtime/.turbo/**", "**/.cache/**", "**/node_modules/**", "**/*.log"]
 
 [workspaces.personal.webPublishing]
 enabled = false

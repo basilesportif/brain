@@ -6,6 +6,10 @@ tmp/**
 cache/**
 caches/**
 state/setup-progress.json
+private/documents/files/**
+.claude/repo-registry/runtime/node_modules/**
+.claude/repo-registry/runtime/dist/**
+.claude/repo-registry/runtime/.turbo/**
 **/.cache/**
 **/node_modules/**
 **/*.log

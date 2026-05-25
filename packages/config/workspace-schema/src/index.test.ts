@@ -78,7 +78,13 @@ test("accepts private workspace backup, web publishing, and optional Composio su
   const result = validateWorkspaceConfig(input);
   assert.equal(result.ok, true, JSON.stringify(result.issues));
   assert.equal(result.config?.workspaces.personal.backup?.privateGit?.branch, "main");
+  assert.ok(result.config?.workspaces.personal.backup?.privateGit?.include.includes("data/**"));
+  assert.ok(result.config?.workspaces.personal.backup?.privateGit?.include.includes("instructions/**"));
+  assert.ok(result.config?.workspaces.personal.backup?.privateGit?.include.includes("tasks/**"));
+  assert.ok(result.config?.workspaces.personal.backup?.privateGit?.include.includes("private/documents/metadata.jsonl"));
+  assert.ok(result.config?.workspaces.personal.backup?.privateGit?.include.includes(".claude/repo-registry/index.yaml"));
   assert.ok(result.config?.workspaces.personal.backup?.privateGit?.exclude.includes("secrets/**"));
+  assert.ok(result.config?.workspaces.personal.backup?.privateGit?.exclude.includes("private/documents/files/**"));
 });
 
 test("requires backup destinations and web base URL when optional surfaces are enabled", () => {

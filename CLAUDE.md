@@ -26,6 +26,12 @@ Claude Code should follow the same repository instructions as Codex:
 - Keep private workspace data, env files, credentials, generated artifacts,
   logs, chat transcripts, Telegram IDs, hostnames, and repo-registry state out
   of source control.
+- For short-term workspace parity, use the assistant-agent-logic JSON workspace
+  (`data/todos.json`, `data/projects.json`, `data/crm.json`,
+  `data/reminders.json`, file-save metadata, overlays, tasks, and selected
+  repo-registry state) through `brainctl workspace run` or compatible
+  `ASSISTANT_WORKSPACE=<path>` commands. Do not treat markdown notes as the
+  source of truth or migrate them unless explicitly requested.
 - Provide secret-entry copy/paste commands only as one-use private temporary
   scripts that prompt with hidden input, write to the private server
   env/secret store, and delete themselves. Never echo tokens in shell history,

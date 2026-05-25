@@ -27,7 +27,24 @@ export const promptContextSchema = z.object({
 export const backupStrategySchema = z.enum(["none", "local-snapshot", "private-git"]);
 export type BackupStrategy = z.infer<typeof backupStrategySchema>;
 
-export const defaultBackupInclude = ["config/**", "state/**", "projects/**", "notes/**", "documents/metadata/**", "artifacts/metadata/**"];
+export const defaultBackupInclude = [
+  "config/**",
+  "state/**",
+  "data/**",
+  "instructions/**",
+  "tasks/**",
+  "projects/**",
+  "notes/**",
+  "documents/metadata/**",
+  "private/documents/metadata.jsonl",
+  "artifacts/metadata/**",
+  ".claude/repo-registry/index.yaml",
+  ".claude/repo-registry/config.yaml",
+  ".claude/repo-registry/repos/**/state.yaml",
+  ".claude/repo-registry/repos/**/guidance.md",
+  ".claude/repo-registry/repos/**/guidance.json",
+  ".claude/repo-registry/repos/**/notes.md",
+];
 export const defaultBackupExclude = [
   "secrets/**",
   "logs/**",
@@ -35,6 +52,10 @@ export const defaultBackupExclude = [
   "cache/**",
   "caches/**",
   "state/setup-progress.json",
+  "private/documents/files/**",
+  ".claude/repo-registry/runtime/node_modules/**",
+  ".claude/repo-registry/runtime/dist/**",
+  ".claude/repo-registry/runtime/.turbo/**",
   "**/.cache/**",
   "**/node_modules/**",
   "**/*.log",

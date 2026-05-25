@@ -15,6 +15,15 @@ inspectable.
 - Treat `workspace/`, `private/`, and `data/` as user-owned/private boundaries.
   Only the checked-in README files in those folders should exist unless a task
   explicitly changes the private-boundary policy.
+- Short-term personal workspace parity uses assistant-agent-logic JSON stores
+  and scripts, not a Brain-native markdown model. Setup/runtime guidance should
+  treat `data/todos.json`, `data/projects.json`, `data/crm.json`,
+  `data/reminders.json`, `private/documents/metadata.jsonl`,
+  `instructions/**`, `tasks/**`, and selected `.claude/repo-registry/` state as
+  the active private workspace model. Use `brainctl workspace run` or
+  `ASSISTANT_WORKSPACE=<path> node scripts/<name>.js` against an
+  assistant-agent-logic checkout; do not port stores or migrate current markdown
+  notes unless explicitly requested.
 
 ## Entrypoint and provider direction
 
