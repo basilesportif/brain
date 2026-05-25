@@ -12,6 +12,10 @@ Use this skill when a user asks to prepare a fresh Ubuntu host for Brain.
 - Ask before contacting a host, changing SSH config, creating users, installing packages, writing env files, or enabling services.
 - Use a dedicated non-root service user for Brain.
 - Keep provider auth, entrypoint tokens, admin identifiers, webhook secrets, and workspace data outside the repository checkout.
+- Keep user instructions direct-action first. If the user must do something,
+  provide the full copy-paste command or the exact UI action. Do not say "SSH
+  into the server", "run this on the host", "configure auth", "check logs", or
+  "start the service" unless the exact command follows immediately.
 - Print only metadata about secret files: existence, owner, permissions, size, and required-key presence.
 - Provide copy-paste commands that input or store secrets only as one-use
   private temporary scripts. Use a temp directory outside version control

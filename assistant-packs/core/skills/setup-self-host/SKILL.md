@@ -16,6 +16,13 @@ deployment handoff.
 
 - Start from the repo root after the user says `setup`; do not `cd` into a
   separate setup directory.
+- Treat setup as a guided operator flow. The user should not need to know SSH
+  syntax, server paths, env-file names, systemd unit names, validation flags, or
+  Brain CLI sequencing. Whenever user action is needed, give one exact
+  copy-paste command or one concrete UI action; if a value is missing, ask for
+  only that value so you can produce the command. Do not say only "SSH into the
+  server", "run this remotely", "configure auth", "verify it", "check logs", or
+  "start the service" without the exact command immediately attached.
 - Read `AGENTS.md`, `CLAUDE.md` if running under Claude Code, and
   `docs/setup-plan.md` before changing anything.
 - First inspect for existing setup progress/context before asking first-run
@@ -70,12 +77,13 @@ deployment handoff.
   returned command. Do not hand-write that shell script in chat.
 - For Codex auth verification, generate the helper with
   `pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root> --ssh-host <host> --ssh-user <user>`.
-  Show the returned `ssh -t ... 'bash .../verify-brain-codex-auth.sh'` command
-  to the user so they can enter any device-auth flow in their terminal. The
-  helper checks `codex login status`, prints concrete `codex login` /
-  `codex login --device-auth` instructions if needed, and updates setup
-  progress only through guarded `brainctl validate live --allow-live --run-safe`
-  after login is present.
+  Show the exact returned `sshRunCommand` as a copy-paste command, for example
+  `ssh -t user@host 'bash /tmp/verify-brain-codex-auth.sh'`, so the user can
+  enter any device-auth flow in their terminal. Do not say only "SSH into the
+  server" or "run this on the server." The helper checks `codex login status`,
+  prints concrete `codex login` / `codex login --device-auth` instructions if
+  needed, and updates setup progress only through guarded `brainctl validate
+  live --allow-live --run-safe` after login is present.
 - Setup/secret metadata should inspect private workspace env files such as
   `<workspace>/config/brain-<workspace>.env` and
   `<workspace>/secrets/secrets.env`. Do not mark a step incomplete just because
@@ -173,9 +181,9 @@ unless the user asks for details or `brainctl setup defaults --verbose` is used.
    accepting Telegram traffic:
    - generate a target-host helper with
      `pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root> --ssh-host <host> --ssh-user <user>`,
-   - show the returned `ssh -t ... 'bash .../verify-brain-codex-auth.sh'`
-     command to the user for remote setup, or the returned local `bash ...`
-     command for local setup,
+   - for remote setup, show the exact returned `sshRunCommand` as a copy-paste
+     command including user, host, and remote script path; for local setup,
+     show the exact returned `runCommand`,
    - if it reports missing auth, follow its `codex login --device-auth` or
      `codex login` instructions and rerun it,
    - confirm the selected Codex transport/auth path,
@@ -272,8 +280,12 @@ BotFather token creation guidance:
    - then pull or initialize the private data/backup repo,
    - then connect Composio accounts if needed,
    - then confirm essential runtime choices,
-   - then configure/verify Codex auth before service start,
-   - then review/install/start the service after explicit confirmation,
+   - then print the generated Codex auth helper command and, for remote setup,
+     the full `ssh -t user@host 'bash /path/script.sh'` command before service
+     start,
+   - then show the exact operations/systemd command(s) needed to review,
+     install, or start the service, and require explicit confirmation before
+     privileged changes,
    - finally optional follow-ups such as first-user pairing, OpenAI
      transcription, web publishing, or backup tuning.
 9. If the user reruns setup after closing a Codex/Claude session, inspect

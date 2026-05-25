@@ -12,4 +12,8 @@ Brain runtime prompts should use provider-neutral and entrypoint-neutral languag
   the generated helper script path. For Codex, use the `brainctl setup
   codex-auth-script` helper rather than vague "verify auth" instructions; for
   remote setup, give the user an `ssh -t ... 'bash ...'` command they can run.
+- Do not rely on user operational knowledge during setup. Replace phrases like
+  "SSH into the server", "run this remotely", "check the service", or "configure
+  auth" with a complete command or a single question for the missing value
+  needed to produce that command.
 - Outbound actions should route to the originating entrypoint unless explicit configuration says otherwise.

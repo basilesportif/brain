@@ -45,6 +45,15 @@ before guessing, forcing commands, or applying destructive flags. After reset,
 rerun `setup inspect`, `setup status`, and any guarded live/status checks needed
 to rebuild the picture from current state.
 
+Setup guidance must be direct-action first. The user should not have to know
+SSH syntax, which host/user/path to use, which env file matters, which systemd
+unit is implied, or which `brainctl` flags are safe. For every user-facing setup
+step, output either one exact copy-paste command, one exact Telegram/BotFather
+message to send, or one short question for a missing value needed to construct
+that command. Avoid bare conceptual instructions such as "SSH into the server",
+"run this on the server", "configure auth", "verify Codex", "check the logs",
+or "start the service" unless the complete command is included immediately.
+
 If the wizard needs a clean resume state, run:
 
 ```bash
@@ -169,12 +178,14 @@ command lists unless the user asks for details or `brainctl setup defaults
    service start or live Telegram traffic:
    first generate a target-host helper with
    `pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <workspace-name> --repo <repo-root> --ssh-host <host> --ssh-user <user>`.
-   For remote setup, show the returned
-   `ssh -t ... 'bash .../verify-brain-codex-auth.sh'` command to the user so
-   device-auth can happen in their terminal. The helper checks
-   `codex login status`, prints `codex login --device-auth` / `codex login`
-   instructions if auth is missing, and updates setup progress only via guarded
-   `brainctl validate live --allow-live --run-safe` after login is present;
+   For remote setup, show the exact returned `sshRunCommand` as a copy-paste
+   command, for example `ssh -t user@host 'bash
+   /tmp/verify-brain-codex-auth.sh'`, so device-auth can happen in the user's
+   terminal. Do not say only "SSH into the server" or "run this on the server."
+   The helper checks `codex login status`, prints `codex login --device-auth` /
+   `codex login` instructions if auth is missing, and updates setup progress
+   only via guarded `brainctl validate live --allow-live --run-safe` after login
+   is present;
    use the selected Codex transport, store any credential only in the private
    workspace/server env file or host secret store, and run only redacted
    metadata/health checks unless the user explicitly allows live provider
@@ -417,13 +428,16 @@ on private workspace knowledge.
    - completed checks;
    - not live yet;
    - confirm essential runtime choices;
-   - configure/verify Codex auth when the provider is Codex, before service
-     start or live Telegram traffic;
+   - when the provider is Codex, print the generated Codex auth helper command
+     and, for remote setup, the full `ssh -t user@host 'bash /path/script.sh'`
+     command before service start or live Telegram traffic;
    - connect Telegram with BotFather steps and private-secret-only token
      storage guidance, but do not start polling/webhooks yet;
    - then pull or initialize the private data/backup repo;
    - then connect Composio accounts if needed;
-   - then review/install/start the service with explicit confirmation;
+   - then show the exact operations/systemd command(s) needed to review,
+     install, or start the service, and require explicit confirmation before
+     privileged changes;
    - finally optional follow-ups such as first-user pairing, OpenAI
      transcription, web publishing, or backup tuning.
 10. On rerun, read `<workspace>/state/setup-progress.json`, inspect the current

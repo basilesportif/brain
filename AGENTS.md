@@ -38,6 +38,15 @@ agent at the repository root and say `setup`. Do not `cd` into a separate setup
 directory. This top-level file is the shared agent entrypoint; detailed setup
 docs and skills remain referenced files.
 
+Setup is a guided operator flow. Do not require the user to infer hostnames,
+paths, SSH syntax, env-file sourcing, service names, or follow-up commands from
+conceptual descriptions. Whenever the next step requires user action, provide
+one exact action: a copy-paste command, a short BotFather message to send, or a
+single concise question for the missing value needed to build the command.
+Avoid vague instructions such as "SSH into the server", "run this remotely",
+"configure auth", "verify it", or "check the service" unless the exact command
+or UI action is included immediately next to it.
+
 1. Read `docs/setup-plan.md`.
 2. Read `assistant-packs/core/skills/setup-self-host/SKILL.md`. This is the
    discoverable setup skill for both Codex and Claude Code.
@@ -103,9 +112,11 @@ docs and skills remain referenced files.
    generating `pnpm run brainctl setup codex-auth-script --config
    <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root>
    --ssh-host <host> --ssh-user <user>` on the target host or via SSH context,
-   then show the returned `ssh -t ... 'bash .../verify-brain-codex-auth.sh'`
-   command to the user. The helper prints login instructions when auth is
-   missing.
+   then print the exact `sshRunCommand` value as a copy-paste command for the
+   user, for example `ssh -t user@host 'bash /tmp/verify-brain-codex-auth.sh'`.
+   Do not say only "SSH into the server" or "run it on the server"; always give
+   the complete command including user, host, and remote script path. The helper
+   prints login instructions when auth is missing.
 13. Keep real workspace config, env files, tokens, Telegram IDs, logs, generated
    artifacts, hostnames, and repo-registry state outside git.
 14. Run `pnpm run check` after setup, documentation, or runtime changes.

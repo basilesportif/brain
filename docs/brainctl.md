@@ -2,6 +2,12 @@
 
 `brainctl` is the operator CLI for Brain. It remains validation-first and safe by default: it prepares private workspace directories, checks config/assistant-pack hygiene, resolves supervisor provider/entrypoint defaults from runtime config, keeps explicit fake/no-network smoke flags for tests, and renders deployment plans without installing services, contacting Telegram, deploying, or writing secrets unless explicit live flags are supplied.
 
+Setup output should be direct-action first. When a setup step requires the user
+to do something, print the exact copy-paste command or the exact UI message to
+send, not a conceptual instruction. For remote work, this means a full command
+such as `ssh -t user@host 'bash /tmp/verify-brain-codex-auth.sh'`, not "SSH into
+the server."
+
 For interrupted setup reruns, start with `setup status` before asking first-run
 questions. It reports the current private `state/setup-progress.json` and, when
 present, the ignored local `private/setup-context.json` pointer for a prior
@@ -87,15 +93,18 @@ copyable commands. In remote mode it also writes the ignored local
 
 The normal core setup flow is:
 
-1. Confirm essential runtime choices: workspace path, provider, primary
-   entrypoint, and service target.
-2. If the provider is Codex, configure and verify Codex auth explicitly before
-   service start or live Telegram traffic.
-3. Connect Telegram: create or choose the bot and store its token as a private
-   secret ref; do not start polling/webhooks yet.
+1. Confirm essential runtime choices by printing the resolved workspace path,
+   provider, primary entrypoint, and service target.
+2. If the provider is Codex, print the generated Codex auth helper command and,
+   for remote setup, the full `ssh -t user@host 'bash /path/script.sh'` command
+   before service start or live Telegram traffic.
+3. Connect Telegram with exact BotFather messages or the generated token helper
+   command; do not start polling/webhooks yet.
 4. Pull or initialize the private data/backup repo.
 5. Connect Composio accounts only if this workspace needs calendar/chat data
    sources.
+6. Show exact operations/systemd command(s) for review/install/start, then wait
+   for explicit confirmation before privileged changes.
 
 OpenAI transcription, web publishing, backup policy tuning, and first-user
 pairing are follow-up steps unless explicitly requested during initial setup.
