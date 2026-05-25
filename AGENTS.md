@@ -92,6 +92,18 @@ docs and skills remain referenced files.
    write only to the private server env/secret store, and delete the script
    after success. Never echo tokens in chat, shell history, logs, command
    output, or repo files.
-11. Keep real workspace config, env files, tokens, Telegram IDs, logs, generated
+11. Treat private workspace env files as the setup source of truth for env refs.
+   `env:TELEGRAM_MAIN_CONFIG` and similar refs should be present in
+   `<workspace>/config/brain-<workspace>.env` or `<workspace>/secrets/secrets.env`
+   for services and setup metadata checks. Do not decide a setup step is
+   incomplete only because a one-off SSH command's process environment lacks
+   the variable; rerun `brainctl setup status --path <workspace> --config
+   <workspace>/config/runtime.yaml` and inspect redacted metadata instead.
+12. When setup reaches Codex auth verification, give concrete commands. Prefer
+   generating `pnpm run brainctl setup codex-auth-script --config
+   <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root>` on the
+   target host and running the returned command as the same user that will run
+   Brain; the helper prints login instructions when auth is missing.
+13. Keep real workspace config, env files, tokens, Telegram IDs, logs, generated
    artifacts, hostnames, and repo-registry state outside git.
-12. Run `pnpm run check` after setup, documentation, or runtime changes.
+14. Run `pnpm run check` after setup, documentation, or runtime changes.

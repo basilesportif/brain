@@ -68,6 +68,17 @@ deployment handoff.
 - For Telegram bot tokens, generate the helper with
   `pnpm run brainctl setup telegram-token-script --path <workspace>` and run the
   returned command. Do not hand-write that shell script in chat.
+- For Codex auth verification, generate the helper with
+  `pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root>`.
+  Run the returned command on the target host as the same user that will run
+  Brain. The helper checks `codex login status`, prints concrete `codex login`
+  / `codex login --device-auth` instructions if needed, and updates setup
+  progress only through guarded `brainctl validate live --allow-live --run-safe`
+  after login is present.
+- Setup/secret metadata should inspect private workspace env files such as
+  `<workspace>/config/brain-<workspace>.env` and
+  `<workspace>/secrets/secrets.env`. Do not mark a step incomplete just because
+  the current ad hoc shell or SSH command has not sourced those env vars.
 
 ## Canonical user flow
 
@@ -159,6 +170,11 @@ unless the user asks for details or `brainctl setup defaults --verbose` is used.
    - Not ready; create placeholders and report pending auth.
 7. Codex auth ready? Configure or verify this before service start and before
    accepting Telegram traffic:
+   - generate a target-host helper with
+     `pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root>`,
+   - run the returned command as the same user that will run Brain,
+   - if it reports missing auth, follow its `codex login --device-auth` or
+     `codex login` instructions and rerun it,
    - confirm the selected Codex transport/auth path,
    - store any credential only in the private workspace/server env file or host
      secret store,

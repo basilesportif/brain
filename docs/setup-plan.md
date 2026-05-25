@@ -167,6 +167,13 @@ command lists unless the user asks for details or `brainctl setup defaults
    - Not ready yet; create placeholders and report unauthenticated state.
 7. After the core choices are captured, configure or verify Codex auth before
    service start or live Telegram traffic:
+   first generate a target-host helper with
+   `pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <workspace-name> --repo <repo-root>`.
+   Run the returned command as the same user that will run Brain. The helper
+   checks `codex login status`, prints `codex login --device-auth` / `codex
+   login` instructions if auth is missing, and updates setup progress only via
+   guarded `brainctl validate live --allow-live --run-safe` after login is
+   present;
    use the selected Codex transport, store any credential only in the private
    workspace/server env file or host secret store, and run only redacted
    metadata/health checks unless the user explicitly allows live provider
@@ -277,6 +284,12 @@ on private workspace knowledge.
 
 - Secret files live only in the private workspace or host secret store, never in
   this repo.
+- Private workspace env files are authoritative setup metadata sources for
+  `env:` refs. `setup status` and `secrets check` should inspect
+  `<workspace>/config/brain-<workspace>.env` and
+  `<workspace>/secrets/secrets.env` by metadata/key presence. Do not mark a
+  secret missing merely because a one-off shell or SSH command has not sourced
+  those files into its process environment.
 - Secret-entry commands shown to users must be temporary script commands.
   Prefer generating the Telegram token helper with
   `pnpm run brainctl setup telegram-token-script --path <workspace>`, then tell

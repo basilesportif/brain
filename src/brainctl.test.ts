@@ -465,6 +465,56 @@ test("brainctl setup telegram-token-script writes a syntax-checked one-use secre
   }
 });
 
+test("brainctl setup codex-auth-script verifies login before marking provider auth", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-codex-auth-script-"));
+  try {
+    const workspace = path.join(root, "workspace");
+    const backupRepo = path.join(root, "backup-repo");
+    const config = path.join(root, "runtime.yaml");
+    const script = path.join(root, "verify-brain-codex-auth.sh");
+    const bin = path.join(root, "bin");
+    const log = path.join(root, "pnpm-args.json");
+    await mkdir(bin, { recursive: true });
+    await mkdir(workspace, { recursive: true });
+    await writeFile(config, testRuntimeConfig(workspace, backupRepo));
+    await writeFile(path.join(bin, "codex"), [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      "if [ \"${1:-}\" = \"--version\" ]; then echo codex-test; exit 0; fi",
+      "if [ \"${1:-}\" = \"login\" ] && [ \"${2:-}\" = \"status\" ]; then echo 'Logged in using ChatGPT'; exit 0; fi",
+      "exit 2",
+      "",
+    ].join("\n"), { mode: 0o700 });
+    await writeFile(path.join(bin, "pnpm"), [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      `printf '%s\\n' "$*" > ${shellTestLiteral(log)}`,
+      "",
+    ].join("\n"), { mode: 0o700 });
+    await chmod(path.join(bin, "codex"), 0o700);
+    await chmod(path.join(bin, "pnpm"), 0o700);
+
+    const generated = spawnBrainctl(["setup", "codex-auth-script", "--workspace", "personal", "--path", workspace, "--config", config, "--repo", root, "--output", script]);
+    assert.equal(generated.status, 0, generated.stderr);
+    const generatedJson = JSON.parse(generated.stdout) as { ok: boolean; details: { scriptPath: string; validation: string; secretValuesPrinted: boolean } };
+    assert.equal(generatedJson.ok, true);
+    assert.equal(generatedJson.details.scriptPath, script);
+    assert.equal(generatedJson.details.validation, "bash -n passed");
+    assert.equal(generatedJson.details.secretValuesPrinted, false);
+
+    const syntax = spawnSync("bash", ["-n", script], { encoding: "utf8" });
+    assert.equal(syntax.status, 0, syntax.stderr);
+    const verified = spawnSync("bash", [script], { encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` } });
+    assert.equal(verified.status, 0, verified.stderr);
+    assert.match(await readFile(log, "utf8"), /run brainctl validate live/);
+    assert.match(await readFile(log, "utf8"), /--codex-transport exec/);
+    assert.match(await readFile(log, "utf8"), /--allow-live/);
+    assert.match(await readFile(log, "utf8"), /--run-safe/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("brainctl status, provider smoke, automation monitor, and web wrappers are safe and testable", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brainctl-parity-"));
   try {
@@ -901,6 +951,10 @@ function spawnBrainctl(args: string[], env: Record<string, string> = {}) {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function shellTestLiteral(value: string): string {
+  return `'${value.replaceAll("'", "'\"'\"'")}'`;
 }
 
 async function initRepoWithPrivateIgnore(root: string): Promise<void> {

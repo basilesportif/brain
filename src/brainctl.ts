@@ -37,7 +37,7 @@ program
 
 program.command("setup")
   .description("Create a private workspace directory scaffold without writing secrets.")
-  .argument("[mode]", "optional mode: defaults, inspect, status, reset, or telegram-token-script")
+  .argument("[mode]", "optional mode: defaults, inspect, status, reset, telegram-token-script, or codex-auth-script")
   .option("--workspace <name>", "workspace id", DEFAULT_WORKSPACE_ID)
   .option("--target <target>", "defaults target: local or remote")
   .option("--ssh-host <host>", "remote SSH IP/DNS host for setup defaults")
@@ -51,6 +51,7 @@ program.command("setup")
   .option("--adapter-config <path>", "private Telegram adapter config file for generated token storage script")
   .option("--service-env <path>", "private service env file for generated token storage script")
   .option("--secrets-env <path>", "private secrets env file for generated token storage script")
+  .option("--binary <path>", "provider binary for generated setup helper scripts")
   .option("--verbose", "include derived config, secrets, state, log, and command details in setup defaults")
   .option("--force", "allow explicitly requested non-destructive rewrites in future setup flows")
   .option("--replace", "allow explicitly requested destructive replacement in future setup flows")
@@ -69,7 +70,10 @@ program.command("setup")
     if (mode === "telegram-token-script") {
       return exitWith(await setupTelegramTokenScriptCommand(options));
     }
-    if (mode) return exitWith({ ok: false, summary: `unknown setup mode: ${mode}`, details: { supported: ["defaults", "inspect", "status", "reset", "telegram-token-script"] } });
+    if (mode === "codex-auth-script") {
+      return exitWith(await setupCodexAuthScriptCommand(options));
+    }
+    if (mode) return exitWith({ ok: false, summary: `unknown setup mode: ${mode}`, details: { supported: ["defaults", "inspect", "status", "reset", "telegram-token-script", "codex-auth-script"] } });
     return exitWith(await setupCommand(options));
   });
 
@@ -1200,6 +1204,8 @@ function liveValidationWizard(
       title: "Verify Codex auth before service start.",
       actions: [
         "Confirm the selected Codex transport and auth path for this machine or server.",
+        `Generate a guarded helper with: pnpm run brainctl setup codex-auth-script --config ${shellArg(options.config)} --workspace ${shellArg(options.workspace)} --repo <repo-root>`,
+        "Run the returned bash command on the target host; it checks `codex login status`, prints login instructions if needed, and updates setup progress only after a live health check succeeds.",
         "If a credential is needed, store it only in a private server env file or secret store, then verify by metadata/health check without printing the value.",
         `Run a guarded provider check for the chosen transport before accepting live user traffic.`,
       ],
@@ -1697,11 +1703,14 @@ interface SetupDefaultsOptions {
 interface SetupTelegramTokenScriptOptions {
   workspace: string;
   path?: string;
+  config?: string;
+  repo?: string;
   output?: string;
   tokenFile?: string;
   adapterConfig?: string;
   serviceEnv?: string;
   secretsEnv?: string;
+  binary?: string;
 }
 
 interface ConfigRef {
@@ -2059,6 +2068,51 @@ async function setupTelegramTokenScriptCommand(options: SetupTelegramTokenScript
   };
 }
 
+async function setupCodexAuthScriptCommand(options: SetupTelegramTokenScriptOptions): Promise<CliResult> {
+  const workspaceRoot = path.resolve(options.path ?? defaultWorkspaceRoot(options.workspace));
+  const repoRoot = path.resolve(options.repo ?? process.cwd());
+  const configPath = path.resolve(options.config ?? path.join(workspaceRoot, "config", "runtime.yaml"));
+  const scriptDir = options.output ? path.dirname(path.resolve(options.output)) : await mkdtemp(path.join(os.tmpdir(), "brain-codex-auth-"));
+  const scriptPath = path.resolve(options.output ?? path.join(scriptDir, "verify-brain-codex-auth.sh"));
+  const codexBinary = options.binary ?? "codex";
+  const script = renderCodexAuthVerificationScript({ workspace: options.workspace, workspaceRoot, repoRoot, configPath, codexBinary });
+
+  await mkdir(scriptDir, { recursive: true, mode: 0o700 });
+  await chmod(scriptDir, 0o700).catch(() => undefined);
+  await writeFile(scriptPath, script, { mode: 0o700 });
+  await chmod(scriptPath, 0o700);
+  const syntax = spawnSync("bash", ["-n", scriptPath], { encoding: "utf8" });
+  if ((syntax.status ?? 0) !== 0) {
+    return {
+      ok: false,
+      summary: "Codex auth verification script was written but failed bash syntax validation",
+      details: {
+        scriptPath,
+        stderr: redactSecrets(String(syntax.stderr ?? "")),
+        sideEffects: "wrote script only; no credential values read or stored",
+        secretValuesPrinted: false,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    summary: "Codex auth verification script written and syntax checked",
+    details: {
+      scriptPath,
+      runCommand: `bash ${shellArg(scriptPath)}`,
+      workspace: options.workspace,
+      workspaceRoot,
+      repoRoot,
+      configPath,
+      codexBinary,
+      validation: "bash -n passed",
+      sideEffects: "wrote private temporary verification script only; no credential values read or stored",
+      secretValuesPrinted: false,
+    },
+  };
+}
+
 function renderTelegramTokenStorageScript(input: { workspaceRoot: string; tokenFile: string; adapterConfig: string; serviceEnv: string; secretsEnv: string }): string {
   return `#!/usr/bin/env bash
 set -euo pipefail
@@ -2141,6 +2195,60 @@ update_env_file "$secrets_env" TELEGRAM_BOT_TOKEN_FILE "$token_file"
 
 unset token
 printf "Stored Telegram token in private Brain secret files. Token value was not printed.\\n" >&2
+`;
+}
+
+function renderCodexAuthVerificationScript(input: { workspace: string; workspaceRoot: string; repoRoot: string; configPath: string; codexBinary: string }): string {
+  return `#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+repo=${shellLiteral(input.repoRoot)}
+config=${shellLiteral(input.configPath)}
+workspace=${shellLiteral(input.workspace)}
+codex_binary=${shellLiteral(input.codexBinary)}
+
+print_login_help() {
+  cat >&2 <<'HELP'
+Codex auth is not verified yet.
+
+Run one of these on the target host as the same user that will run Brain:
+  codex login --device-auth
+  codex login
+
+If you must use an API key or access token, use a one-use private script that
+reads hidden input and pipes it to:
+  codex login --with-api-key
+or:
+  codex login --with-access-token
+
+Do not paste provider credentials into chat, shell history, repo files, logs, or
+setup summaries. After login succeeds, rerun this verification script.
+HELP
+}
+
+cd "$repo"
+
+if ! command -v "$codex_binary" >/dev/null 2>&1; then
+  printf "Codex CLI not found: %s\\n" "$codex_binary" >&2
+  printf "Install Codex CLI on the target host, then rerun this script.\\n" >&2
+  exit 1
+fi
+
+"$codex_binary" --version >/dev/null
+if ! "$codex_binary" login status >/dev/null; then
+  print_login_help
+  exit 1
+fi
+
+pnpm run brainctl validate live \\
+  --config "$config" \\
+  --workspace "$workspace" \\
+  --codex-transport exec \\
+  --allow-live \\
+  --run-safe
+
+printf "Codex auth metadata verified for Brain setup. No user task was sent.\\n" >&2
 `;
 }
 
@@ -2543,6 +2651,11 @@ function setupResumeWizard(details: {
         : details.provider === "codex"
           ? ["Codex is selected; credential/session verification needs an explicit private check and is not inferred from repo files."]
           : [`Selected provider is ${String(details.provider)}; verify provider auth before service start.`],
+      actions: [
+        "Generate a guarded helper on the target host with: pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root>",
+        "Run the returned bash command as the same user that will run Brain.",
+        "If login is missing, the helper prints `codex login --device-auth` / `codex login` instructions and exits without marking auth verified.",
+      ],
       resumePrompt: "If you already verified Codex auth in the previous session, confirm or recheck it and continue to service install/start.",
     },
     {

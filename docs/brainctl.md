@@ -222,6 +222,18 @@ is syntax-checked, prompts with hidden input, writes private token/config/env
 files, and deletes itself after success. Never paste tokens into the repo, setup
 chat, shell history, command output, or logs.
 
+When the wizard reaches Codex auth, generate a target-host verification helper:
+
+```bash
+pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root>
+```
+
+Run the returned `bash .../verify-brain-codex-auth.sh` command as the same user
+that will run Brain. The helper checks `codex login status`, prints concrete
+`codex login --device-auth` / `codex login` instructions when auth is missing,
+and records the verified setup state only through guarded
+`validate live --codex-transport exec --allow-live --run-safe`.
+
 When `validate live --run-safe` runs against an existing private workspace, it
 may update `state/setup-progress.json` with metadata-only results such as Codex
 auth verified by a guarded provider check or Telegram token ref presence. That
