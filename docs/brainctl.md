@@ -248,8 +248,10 @@ will run Brain. A root Codex login is not enough for a `User=brain` systemd
 service. The helper checks `codex login status`, prints concrete
 `codex login --device-auth` / `codex login` instructions when auth is missing,
 and the JSON output includes `sshLoginCommand` for the exact remote
-device-auth command to run when login is missing. It records the verified setup
-state only through guarded
+device-auth command to run when login is missing. It records the verified OS
+user in setup progress, so `setup status --service-user brain` will not accept a
+Codex session that was verified as `root`. It records verified setup state only
+through guarded
 `validate live --codex-transport exec --allow-live --run-safe`.
 
 When `validate live --run-safe` runs against an existing private workspace, it

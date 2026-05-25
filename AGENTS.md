@@ -119,6 +119,8 @@ an exact phrase unless they must run a command verbatim.
    `ssh -t root@host 'sudo -iu brain bash /tmp/verify-brain-codex-auth.sh'`.
    Verify auth as the same non-root service user that will run Brain; root's
    Codex session is not sufficient for a `User=brain` systemd service.
+   Setup progress must record which OS user verified Codex auth and must not
+   treat auth verified as one user as sufficient for a different service user.
    Do not say only "SSH into the server" or "run it on the server"; always give
    the complete command including user, host, and remote script path. The helper
    prints login instructions when auth is missing.

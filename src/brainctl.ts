@@ -2376,6 +2376,7 @@ async function setupInspectDetails(options: SetupInspectOptions) {
     directories,
     privateConfigCandidates,
     provider: workspace?.provider ?? "missing",
+    serviceUser: options.serviceUser ?? DEFAULT_SERVICE_USER,
     primaryEntrypointId: workspace?.primaryEntrypointId ?? "missing",
     entrypoints: workspace ? Object.entries(workspace.enabledEntrypoints).map(([entrypointId, entrypoint]) => ({
       entrypointId,
@@ -2619,6 +2620,7 @@ function buildSetupPlan(input: {
 
 function setupResumeWizard(details: {
   workspaceRoot: string;
+  serviceUser?: string;
   config: { present: boolean; valid: boolean };
   workspaceDirectory: Awaited<ReturnType<typeof fileMetadata>>;
   directories: Record<string, Awaited<ReturnType<typeof fileMetadata>>>;
@@ -2639,7 +2641,8 @@ function setupResumeWizard(details: {
   const backupConfigured = Boolean(details.backup && details.backup.strategy !== "none");
   const composioConnected = Boolean(details.composio?.enabled && details.composio.missing.length === 0);
   const state = details.setupState?.state;
-  const codexAuthVerifiedByState = state?.statuses.codexAuth.status === "verified";
+  const codexAuthUser = state?.statuses.codexAuth.runAsUser;
+  const codexAuthVerifiedByState = codexAuthMatchesServiceUser(state?.statuses.codexAuth, details.serviceUser);
   const serviceStartedByState = state?.statuses.service.started === true;
   const steps = [
     {
@@ -2698,9 +2701,11 @@ function setupResumeWizard(details: {
       title: "Verify Codex auth before service start.",
       complete: codexAuthVerifiedByState,
       evidence: codexAuthVerifiedByState
-        ? ["Private setup state says Codex auth was verified; rerun a provider health check if the session may have changed."]
+        ? [`Private setup state says Codex auth was verified as ${codexAuthUser}; rerun a provider health check if the session may have changed.`]
         : details.provider === "codex"
-          ? ["Codex is selected; credential/session verification needs an explicit private check and is not inferred from repo files."]
+          ? [codexAuthUser
+              ? `Codex auth was verified as ${codexAuthUser}, but the service user is ${details.serviceUser ?? "unknown"}; verify auth as the service user before service start.`
+              : "Codex is selected; credential/session verification needs an explicit private check as the service user and is not inferred from repo files."]
           : [`Selected provider is ${String(details.provider)}; verify provider auth before service start.`],
       actions: [
         "Generate a guarded helper on the target host with: pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root> --service-user <brain-service-user>",
@@ -2760,7 +2765,7 @@ interface SetupProgressState {
   statuses: {
     workspace: { configured: boolean };
     runtimeConfig: { valid: boolean };
-    codexAuth: { status: "unknown" | "pending" | "verified"; metadataOnly: true; checkedAt?: string };
+    codexAuth: { status: "unknown" | "pending" | "verified"; metadataOnly: true; checkedAt?: string; runAsUser?: string };
     service: { installed: boolean; started: boolean; metadataOnly: true; checkedAt?: string };
     telegramToken: { configured: boolean; metadataOnly: true; source?: string; checkedAt?: string };
   };
@@ -2828,13 +2833,14 @@ async function updateSetupProgressFromLiveValidation(
   const now = new Date().toISOString();
   const resultOk = (id: string) => results.find((result) => result.id === id)?.ok === true;
   const codexVerified = resultOk("codex-provider") && Boolean(options.allowLive) && options.codexTransport !== "stub";
+  const runAsUser = os.userInfo().username;
   const telegramConfigured = resultOk("telegram-entrypoint") && telegramTokenPresent(results.find((result) => result.id === "telegram-entrypoint"));
   const priorState = prior.state;
   const statuses: SetupProgressState["statuses"] = {
     workspace: { configured: true },
     runtimeConfig: { valid: resultOk("config") },
     codexAuth: codexVerified
-      ? { status: "verified", metadataOnly: true, checkedAt: now }
+      ? { status: "verified", metadataOnly: true, checkedAt: now, runAsUser }
       : priorState?.statuses.codexAuth ?? { status: "pending", metadataOnly: true, checkedAt: now },
     service: priorState?.statuses.service ?? { installed: false, started: false, metadataOnly: true },
     telegramToken: telegramConfigured
@@ -2878,6 +2884,15 @@ function telegramTokenPresent(result: SafeValidationResult | undefined): boolean
   return Boolean(token && typeof token === "object" && "present" in token && (token as { present?: unknown }).present === true);
 }
 
+function codexAuthMatchesServiceUser(
+  codexAuth: SetupProgressState["statuses"]["codexAuth"] | undefined,
+  serviceUser: string | undefined,
+): boolean {
+  if (codexAuth?.status !== "verified") return false;
+  if (!serviceUser) return Boolean(codexAuth.runAsUser);
+  return codexAuth.runAsUser === serviceUser;
+}
+
 function redactSetupProgress(state: SetupProgressState): SetupProgressState {
   return {
     ...state,
@@ -2894,6 +2909,7 @@ function redactSetupProgress(state: SetupProgressState): SetupProgressState {
         status: state.statuses.codexAuth.status,
         metadataOnly: true,
         checkedAt: state.statuses.codexAuth.checkedAt,
+        runAsUser: state.statuses.codexAuth.runAsUser,
       },
     },
   };

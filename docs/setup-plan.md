@@ -184,8 +184,10 @@ command lists unless the user asks for details or `brainctl setup defaults
    command, for example `ssh -t root@host 'sudo -iu brain bash
    /tmp/verify-brain-codex-auth.sh'`, so device-auth can happen in the user's
    terminal. Verify auth as the same service user that systemd will run; root's
-   Codex login is not enough for `User=brain`. Do not say only "SSH into the
-   server" or "run this on the server."
+   Codex login is not enough for `User=brain`. Record the verified OS user in
+   setup progress and resume from Codex auth if the recorded user differs from
+   the service user. Do not say only "SSH into the server" or "run this on the
+   server."
    The helper checks `codex login status`, prints `codex login --device-auth` /
    `codex login` instructions if auth is missing, and updates setup progress
    only via guarded `brainctl validate live --allow-live --run-safe` after login

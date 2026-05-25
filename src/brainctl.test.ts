@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import path from "node:path";
 
 const brainctl = new URL("./brainctl.js", import.meta.url);
@@ -361,7 +361,7 @@ console.log(JSON.stringify({ method: "turn/completed", params: { turn: { id: "tu
         completedChecks: string[];
         nextStep: { step: string };
         guidedSequence: Array<{ step: string; requiresConfirmation?: string; privateStorage?: string[] }>;
-        setupStateUpdate: { wrote: boolean; metadata: { mode: string }; state: { secretValuesStored: boolean; nextRecommendedStep: string; statuses: { codexAuth: { status: string }; telegramToken: { configured: boolean } } } };
+        setupStateUpdate: { wrote: boolean; metadata: { mode: string }; state: { secretValuesStored: boolean; nextRecommendedStep: string; statuses: { codexAuth: { status: string; runAsUser?: string }; telegramToken: { configured: boolean } } } };
       };
     };
     assert.match(liveJson.summary, /Pre-live checks passed/);
@@ -373,6 +373,7 @@ console.log(JSON.stringify({ method: "turn/completed", params: { turn: { id: "tu
     assert.equal(liveJson.details.setupStateUpdate.metadata.mode, "0600");
     assert.equal(liveJson.details.setupStateUpdate.state.secretValuesStored, false);
     assert.equal(liveJson.details.setupStateUpdate.state.statuses.codexAuth.status, "verified");
+    assert.equal(liveJson.details.setupStateUpdate.state.statuses.codexAuth.runAsUser, userInfo().username);
     assert.equal(liveJson.details.setupStateUpdate.state.statuses.telegramToken.configured, false);
     assert.deepEqual(await readSnapshot(healthEnvPath), { openai: false, transcription: false, other: "keep-me" });
 
@@ -675,6 +676,54 @@ test("brainctl setup inspect is idempotent and redacts secret values", async () 
     assert.equal(secondJson.details.setupWizard.idempotent, true);
     assert.match(secondJson.details.setupWizard.stateTrust, /resume aid only/);
     assert.equal(secondJson.details.setupWizard.nextIncompleteStep.step, "telegram-connection");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brainctl setup status requires Codex auth for the service user", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-setup-service-user-auth-"));
+  try {
+    const workspace = path.join(root, "workspace");
+    const backupRepo = path.join(root, "backup-repo");
+    const config = path.join(root, "runtime.yaml");
+    await writeFile(config, testRuntimeConfig(workspace, backupRepo));
+
+    const setup = spawnBrainctl(["setup", "--config", config, "--workspace", "personal", "--path", workspace]);
+    assert.equal(setup.status, 0, setup.stderr);
+    await writeFile(path.join(workspace, "config", "brain-personal.env"), `TELEGRAM_MAIN_CONFIG=${path.join(workspace, "secrets", "telegram-main.json")}\n`);
+
+    const progressPath = path.join(workspace, "state", "setup-progress.json");
+    const progress = {
+      version: 1,
+      workspace: "personal",
+      workspaceRoot: workspace,
+      updatedAt: new Date().toISOString(),
+      completedSteps: ["workspace-scaffold", "runtime-config", "telegram-connection", "configure-verify-codex-auth"],
+      statuses: {
+        workspace: { configured: true },
+        runtimeConfig: { valid: true },
+        codexAuth: { status: "verified", metadataOnly: true, checkedAt: new Date().toISOString(), runAsUser: "root" },
+        service: { installed: false, started: false, metadataOnly: true },
+        telegramToken: { configured: true, metadataOnly: true, source: "file", checkedAt: new Date().toISOString() },
+      },
+      nextRecommendedStep: "install-start-service",
+      secretValuesStored: false,
+    };
+    await writeFile(progressPath, `${JSON.stringify(progress, null, 2)}\n`);
+
+    const statusAsBrain = spawnBrainctl(["setup", "status", "--config", config, "--workspace", "personal", "--path", workspace, "--service-user", "brain"]);
+    assert.equal(statusAsBrain.status, 0, statusAsBrain.stderr);
+    const statusAsBrainJson = JSON.parse(statusAsBrain.stdout) as { details: { setupWizard: { nextIncompleteStep: { step: string; evidence: string[] } } } };
+    assert.equal(statusAsBrainJson.details.setupWizard.nextIncompleteStep.step, "configure-verify-codex-auth");
+    assert.ok(statusAsBrainJson.details.setupWizard.nextIncompleteStep.evidence.some((item) => /verified as root/.test(item) && /service user is brain/.test(item)));
+
+    progress.statuses.codexAuth.runAsUser = "brain";
+    await writeFile(progressPath, `${JSON.stringify(progress, null, 2)}\n`);
+    const statusAfterBrainAuth = spawnBrainctl(["setup", "status", "--config", config, "--workspace", "personal", "--path", workspace, "--service-user", "brain"]);
+    assert.equal(statusAfterBrainAuth.status, 0, statusAfterBrainAuth.stderr);
+    const statusAfterBrainAuthJson = JSON.parse(statusAfterBrainAuth.stdout) as { details: { setupWizard: { nextIncompleteStep: { step: string } } } };
+    assert.equal(statusAfterBrainAuthJson.details.setupWizard.nextIncompleteStep.step, "install-start-service");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

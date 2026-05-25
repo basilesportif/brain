@@ -84,12 +84,14 @@ deployment handoff.
   `ssh -t root@host 'sudo -iu brain bash /tmp/verify-brain-codex-auth.sh'`, so
   the user can enter any device-auth flow in their terminal. Verify auth as the
   same non-root service user that systemd will use; a root Codex login does not
-  make `User=brain` ready. Do not say only "SSH into the server" or "run this on
-  the server." The helper checks `codex login status`, prints concrete `codex
-  login` / `codex login --device-auth` instructions if needed, returns
-  `sshLoginCommand` for the exact remote device-auth command, and updates setup
-  progress only through guarded `brainctl validate live --allow-live --run-safe`
-  after login is present.
+  make `User=brain` ready. Setup progress records the verified OS user and must
+  not treat auth verified as one user as sufficient for a different service
+  user. Do not say only "SSH into the server" or "run this on the server." The
+  helper checks `codex login status`, prints concrete `codex login` / `codex
+  login --device-auth` instructions if needed, returns `sshLoginCommand` for the
+  exact remote device-auth command, and updates setup progress only through
+  guarded `brainctl validate live --allow-live --run-safe` after login is
+  present.
 - Setup/secret metadata should inspect private workspace env files such as
   `<workspace>/config/brain-<workspace>.env` and
   `<workspace>/secrets/secrets.env`. Do not mark a step incomplete just because
