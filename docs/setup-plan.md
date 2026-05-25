@@ -59,11 +59,15 @@ do not require exact reply text unless the user must run a command verbatim.
 Initial setup must create an inspectable personal workspace before live traffic:
 `projects/`, `notes/`, `documents/`, and `documents/metadata/` under the private
 workspace path. Codex should run from that private workspace path for live Brain
-turns, with non-interactive approval behavior and `TMPDIR` pointed at
-`<workspace>/tmp`, so questions like "do I have projects?" can inspect project
-memory files instead of answering from active entrypoint metadata alone. Ask
-whether the user wants to initialize or connect a private Git backup for this
-personal workspace memory; never commit secrets, logs, Telegram IDs,
+turns, with non-interactive approval behavior, `TMPDIR` pointed at
+`<workspace>/tmp`, and self-host service sandbox mode set to
+`danger-full-access`. Telegram has no interactive approval channel, and common
+Ubuntu server sandboxes can fail before shell commands start; the safety
+boundary is the dedicated service user plus private workspace path, not a
+per-turn approval prompt. This lets questions like "do I have projects?" inspect
+project memory files instead of answering from active entrypoint metadata alone.
+Ask whether the user wants to initialize or connect a private Git backup for
+this personal workspace memory; never commit secrets, logs, Telegram IDs,
 transcripts, or provider session material.
 
 If the wizard needs a clean resume state, run:

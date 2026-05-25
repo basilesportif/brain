@@ -356,7 +356,7 @@ console.log(JSON.stringify({ method: "turn/completed", params: { turn: { id: "tu
     assert.ok(invocation.argv.includes("--cd"));
     assert.equal(invocation.argv[invocation.argv.indexOf("--cd") + 1], workspace);
     assert.ok(invocation.argv.includes("--sandbox"));
-    assert.equal(invocation.argv[invocation.argv.indexOf("--sandbox") + 1], "workspace-write");
+    assert.equal(invocation.argv[invocation.argv.indexOf("--sandbox") + 1], "danger-full-access");
     assert.ok(invocation.argv.includes("--config"));
     assert.ok(invocation.argv.includes("approval_policy=\"never\""));
 

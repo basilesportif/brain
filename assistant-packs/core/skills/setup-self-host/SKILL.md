@@ -99,8 +99,12 @@ deployment handoff.
 - The initial private workspace scaffold must include project memory paths:
   `projects/`, `notes/`, `documents/`, and `documents/metadata/`. Before the
   first live provider turn, make sure Codex is launched from the private
-  workspace path with `TMPDIR=<workspace>/tmp` so project questions can be
-  answered by inspecting those files, not from active entrypoint metadata alone.
+  workspace path with `TMPDIR=<workspace>/tmp`, `approval_policy=never`, and
+  self-host service sandbox mode `danger-full-access`. Telegram cannot service
+  interactive approval prompts, and server sandboxes can fail before shell
+  commands start; isolate Brain with the dedicated service user and private
+  workspace path instead. Project questions should be answered by inspecting
+  those files, not from active entrypoint metadata alone.
 
 ## Canonical user flow
 
