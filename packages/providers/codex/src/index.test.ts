@@ -346,6 +346,35 @@ console.log(JSON.stringify({ method: "turn/completed", params: { turn: { id: "tu
   assert.equal((await session.resumeHandle?.())?.sessionId, "thread_123");
 });
 
+test("Codex exec transport maps item.completed agent messages to final text", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "brain-codex-item-completed-"));
+  const fakeCodex = path.join(dir, "fake-codex.mjs");
+  await writeFile(fakeCodex, `#!/usr/bin/env node
+console.log(JSON.stringify({ type: "thread.started", thread_id: "thread_123" }));
+console.log(JSON.stringify({ type: "turn.started" }));
+console.log(JSON.stringify({ type: "item.completed", item: { id: "item_0", type: "agent_message", text: "brain provider smoke ok" } }));
+console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }));
+`);
+  await chmod(fakeCodex, 0o755);
+  const session = await createCodexTransport({ transport: "exec", binary: fakeCodex, cwd: dir }).createSession({ workspaceId: "personal" });
+  const events = [];
+  for await (const event of session.sendTurn({
+    id: "turn_item_completed",
+    sessionId: session.id,
+    inboundEvent: {
+      id: "evt_1",
+      kind: "message",
+      workspaceId: "personal",
+      entrypoint: { entrypointId: "cli", channelKind: "cli" },
+      text: "hello",
+      receivedAt: "2026-05-21T00:00:00.000Z",
+    },
+    prompt: "hello",
+  })) events.push(event);
+
+  assert.deepEqual(events.find((event) => event.type === "final"), { type: "final", text: "brain provider smoke ok" });
+});
+
 test("Codex exec transport cancels active turns on abort", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "brain-codex-cancel-"));
   const fakeCodex = path.join(dir, "fake-codex.mjs");

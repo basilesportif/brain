@@ -917,6 +917,9 @@ function extractFinalText(record: Record<string, unknown>): string | undefined {
   const params = asRecord(record.params);
   const paramsText = stringValue(params.final) ?? stringValue(params.text) ?? stringValue(params.message);
   if (paramsText) return paramsText;
+  const item = optionalRecord(record.item) ?? optionalRecord(params.item);
+  const itemText = item ? extractItemText(item).join("\n") : "";
+  if (itemText) return itemText;
   const turn = asRecord(params.turn);
   const items = Array.isArray(turn.items) ? turn.items : undefined;
   const itemTexts = items?.flatMap((item) => extractItemText(item)).filter(Boolean) ?? [];
@@ -925,7 +928,7 @@ function extractFinalText(record: Record<string, unknown>): string | undefined {
 
 function extractItemText(item: unknown): string[] {
   const record = asRecord(item);
-  if (record.type === "agentMessage" && stringValue(record.text)) return [stringValue(record.text) ?? ""];
+  if ((record.type === "agentMessage" || record.type === "agent_message") && stringValue(record.text)) return [stringValue(record.text) ?? ""];
   if (record.type === "reasoning") return [];
   const content = Array.isArray(record.content) ? record.content : [];
   return content.map((entry) => stringValue(asRecord(entry).text)).filter((text): text is string => Boolean(text));
