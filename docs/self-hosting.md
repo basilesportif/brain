@@ -14,8 +14,8 @@ The setup docs and skills should be readable by Codex or Claude Code itself so a
      smoke testing only.
 2. **Remote Ubuntu server over SSH**
    - Add or reuse a local SSH config host alias.
-   - Prepare the server with its own non-root Brain service user using
-     `/home/tim/pkg/tim/assistant-agent-logic/config/skills/setup-server.md`.
+   - Prepare the server with its own non-root Brain service user using the
+     Brain-owned deployment/self-hosting docs in this repository.
    - Clone Brain, create a private workspace outside the checkout, install
      prerequisites, and prepare service metadata.
    - Assume a server-side SSH key for Git/provider access already exists; if it

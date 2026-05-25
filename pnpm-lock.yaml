@@ -65,6 +65,8 @@ importers:
         specifier: ^6.39.0
         version: 6.39.0(zod@4.4.3)
 
+  packages/assistant-logic: {}
+
   packages/assistant-pack-schema:
     dependencies:
       zod:

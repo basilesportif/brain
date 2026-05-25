@@ -7,7 +7,7 @@ import path from "node:path";
 
 const brainctl = new URL("./brainctl.js", import.meta.url);
 const repoRoot = path.resolve(new URL("..", import.meta.url).pathname);
-const assistantLogicRepo = path.resolve(repoRoot, "../assistant-agent-logic");
+const assistantLogicPackage = path.join(repoRoot, "packages", "assistant-logic");
 
 test("brainctl runtime smoke exercises no-network entrypoint/provider path", () => {
   const result = spawnBrainctl(["runtime", "smoke", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--text", "ping"]);
@@ -476,7 +476,7 @@ test("brainctl setup telegram-token-script writes a syntax-checked one-use secre
     assert.doesNotMatch(await readFile(secretsEnv, "utf8"), new RegExp(token));
     assert.match(await readFile(serviceEnv, "utf8"), new RegExp(`TELEGRAM_BOT_TOKEN_FILE=${escapeRegExp(tokenFile)}`));
     assert.match(await readFile(secretsEnv, "utf8"), new RegExp(`TELEGRAM_MAIN_CONFIG=${escapeRegExp(adapterConfig)}`));
-    const scaffold = spawnBrainctl(["workspace", "scaffold", "--path", workspace, "--assistant-repo", assistantLogicRepo]);
+    const scaffold = spawnBrainctl(["workspace", "scaffold", "--path", workspace]);
     assert.equal(scaffold.status, 0, scaffold.stderr);
 
     const status = spawnBrainctl(["setup", "status", "--config", config, "--workspace", "personal", "--path", workspace]);
@@ -694,7 +694,7 @@ test("brainctl setup inspect is idempotent and redacts secret values", async () 
   }
 });
 
-test("brainctl scaffolds and reuses assistant-agent-logic JSON workspace stores", async () => {
+test("brainctl scaffolds and reuses in-repo assistant-logic JSON workspace stores", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brainctl-assistant-workspace-"));
   try {
     const workspace = path.join(root, "workspace");
@@ -706,7 +706,7 @@ test("brainctl scaffolds and reuses assistant-agent-logic JSON workspace stores"
     assert.equal(setup.status, 0, setup.stderr);
     const setupJson = JSON.parse(setup.stdout) as { details: { plan: { configured: string[] }; assistantWorkspaceScaffold: { writtenFiles: string[] } } };
     assert.ok(setupJson.details.plan.configured.some((item) => /assistant JSON store ready: todos/.test(item)));
-    assert.ok(setupJson.details.plan.configured.some((item) => /assistant-agent-logic scripts available/.test(item)));
+    assert.ok(setupJson.details.plan.configured.some((item) => /in-repo assistant-logic scripts available/.test(item)));
     assert.ok(setupJson.details.assistantWorkspaceScaffold.writtenFiles.includes(path.join("data", "todos.json")));
     assert.ok(setupJson.details.assistantWorkspaceScaffold.writtenFiles.includes(path.join("instructions", "skills", "projects.md")));
     assert.ok(setupJson.details.assistantWorkspaceScaffold.writtenFiles.includes(path.join("private", "documents", "metadata.jsonl")));
@@ -725,54 +725,80 @@ test("brainctl scaffolds and reuses assistant-agent-logic JSON workspace stores"
     assert.deepEqual(crm.businesses, []);
     assert.deepEqual(crm.correspondence, []);
 
-    const addTodo = spawnBrainctl(["workspace", "run", "--path", workspace, "--assistant-repo", assistantLogicRepo, "todo-add.js", "--", "--title", "Buy coffee"]);
+    const addTodo = spawnBrainctl(["workspace", "run", "--path", workspace, "todo-add.js", "--", "--title", "Buy coffee"]);
     assert.equal(addTodo.status, 0, addTodo.stderr);
-    const todoList = spawnBrainctl(["workspace", "run", "--path", workspace, "--assistant-repo", assistantLogicRepo, "todo-list.js"]);
+    const todoList = spawnBrainctl(["workspace", "run", "--path", workspace, "todo-list.js"]);
     assert.equal(todoList.status, 0, todoList.stderr);
     const todoListJson = JSON.parse(todoList.stdout) as { details: { stdout: { todos: Array<{ title: string }> } } };
     assert.equal(todoListJson.details.stdout.todos[0]?.title, "Buy coffee");
 
-    const addProject = spawnBrainctl(["workspace", "run", "--path", workspace, "--assistant-repo", assistantLogicRepo, "project-add.js", "--", "--name", "Parity Project"]);
+    const addProject = spawnBrainctl(["workspace", "run", "--path", workspace, "project-add.js", "--", "--name", "Parity Project"]);
     assert.equal(addProject.status, 0, addProject.stderr);
-    const projectList = spawnBrainctl(["workspace", "run", "--path", workspace, "--assistant-repo", assistantLogicRepo, "project-list.js"]);
+    const projectList = spawnBrainctl(["workspace", "run", "--path", workspace, "project-list.js"]);
     assert.equal(projectList.status, 0, projectList.stderr);
     const projectListJson = JSON.parse(projectList.stdout) as { details: { stdout: { projects: Array<{ name: string }> } } };
     assert.equal(projectListJson.details.stdout.projects[0]?.name, "Parity Project");
 
-    const addPerson = spawnBrainctl(["workspace", "run", "--path", workspace, "--assistant-repo", assistantLogicRepo, "crm-add-person.js", "--", "--name", "Jane Smith"]);
+    const addPerson = spawnBrainctl(["workspace", "run", "--path", workspace, "crm-add-person.js", "--", "--name", "Jane Smith"]);
     assert.equal(addPerson.status, 0, addPerson.stderr);
-    const people = spawnBrainctl(["workspace", "run", "--path", workspace, "--assistant-repo", assistantLogicRepo, "crm-list-people.js"]);
+    const people = spawnBrainctl(["workspace", "run", "--path", workspace, "crm-list-people.js"]);
     assert.equal(people.status, 0, people.stderr);
     const peopleJson = JSON.parse(people.stdout) as { details: { stdout: { people: Array<{ name: string }> } } };
     assert.equal(peopleJson.details.stdout.people[0]?.name, "Jane Smith");
 
-    const addReminder = spawnBrainctl(["workspace", "run", "--path", workspace, "--assistant-repo", assistantLogicRepo, "reminder-add.js", "--", "--title", "Weekly review", "--weekly", "friday", "--time", "17:00"]);
+    const addReminder = spawnBrainctl(["workspace", "run", "--path", workspace, "reminder-add.js", "--", "--title", "Weekly review", "--weekly", "friday", "--time", "17:00"]);
     assert.equal(addReminder.status, 0, addReminder.stderr);
-    const reminderList = spawnBrainctl(["workspace", "run", "--path", workspace, "--assistant-repo", assistantLogicRepo, "reminder-list.js"]);
+    const reminderList = spawnBrainctl(["workspace", "run", "--path", workspace, "reminder-list.js"]);
     assert.equal(reminderList.status, 0, reminderList.stderr);
     const reminderListJson = JSON.parse(reminderList.stdout) as { details: { stdout: { reminders: Array<{ title: string }> } } };
     assert.equal(reminderListJson.details.stdout.reminders[0]?.title, "Weekly review");
 
     const sourceFile = path.join(root, "source.txt");
     await writeFile(sourceFile, "private source bytes\n");
-    const saveFile = spawnBrainctl(["workspace", "run", "--path", workspace, "--assistant-repo", assistantLogicRepo, "file-save.js", "--", "--source", sourceFile, "--title", "Source note", "--project", "Parity Project"]);
+    const saveFile = spawnBrainctl(["workspace", "run", "--path", workspace, "file-save.js", "--", "--source", sourceFile, "--title", "Source note", "--project", "Parity Project"]);
     assert.equal(saveFile.status, 0, saveFile.stderr);
-    const fileList = spawnBrainctl(["workspace", "run", "--path", workspace, "--assistant-repo", assistantLogicRepo, "file-list.js"]);
+    const fileList = spawnBrainctl(["workspace", "run", "--path", workspace, "file-list.js"]);
     assert.equal(fileList.status, 0, fileList.stderr);
     const fileListJson = JSON.parse(fileList.stdout) as { details: { stdout: { metadataPath: string; documents: Array<{ title: string; project: string }> } } };
     assert.equal(fileListJson.details.stdout.metadataPath, path.join(workspace, "private", "documents", "metadata.jsonl"));
     assert.equal(fileListJson.details.stdout.documents[0]?.title, "Source note");
     assert.equal(fileListJson.details.stdout.documents[0]?.project, "Parity Project");
 
-    const status = spawnBrainctl(["workspace", "status", "--path", workspace, "--assistant-repo", assistantLogicRepo]);
+    const status = spawnBrainctl(["workspace", "status", "--path", workspace]);
     assert.equal(status.status, 0, status.stderr);
-    const statusJson = JSON.parse(status.stdout) as { ok: boolean; details: { status: { ready: boolean; stateStores: Array<{ key: string; valid: boolean }>; fileSave: { ready: boolean; metadataPath: string }; commands: Array<{ area: string }> } } };
+    const statusJson = JSON.parse(status.stdout) as {
+      ok: boolean;
+      details: {
+        status: {
+          ready: boolean;
+          assistantLogicRoot: string;
+          assistantLogicSource: string;
+          deprecatedAssistantRepoIgnored: boolean;
+          stateStores: Array<{ key: string; valid: boolean }>;
+          fileSave: { ready: boolean; metadataPath: string };
+          commands: Array<{ area: string; examples: string[] }>;
+          scripts: Array<{ path: string; present: boolean }>;
+        };
+      };
+    };
     assert.equal(statusJson.ok, true);
     assert.equal(statusJson.details.status.ready, true);
+    assert.equal(statusJson.details.status.assistantLogicRoot, assistantLogicPackage);
+    assert.equal(statusJson.details.status.assistantLogicSource, "in-repo:packages/assistant-logic");
+    assert.equal(statusJson.details.status.deprecatedAssistantRepoIgnored, false);
+    assert.ok(statusJson.details.status.scripts.every((script) => script.present && script.path.startsWith(assistantLogicPackage)));
     assert.ok(statusJson.details.status.stateStores.every((store) => store.valid));
     assert.equal(statusJson.details.status.fileSave.ready, true);
     assert.equal(statusJson.details.status.fileSave.metadataPath, path.join(workspace, "private", "documents", "metadata.jsonl"));
     assert.deepEqual(statusJson.details.status.commands.map((command) => command.area), ["todos", "projects", "crm", "reminders", "file-save"]);
+    assert.ok(statusJson.details.status.commands.every((command) => command.examples.every((example) => !example.includes("--assistant-repo"))));
+
+    const deprecatedOptionStatus = spawnBrainctl(["workspace", "status", "--path", workspace, "--assistant-repo", path.join(root, "missing-assistant-agent-logic")]);
+    assert.equal(deprecatedOptionStatus.status, 0, deprecatedOptionStatus.stderr);
+    const deprecatedOptionJson = JSON.parse(deprecatedOptionStatus.stdout) as { details: { status: { ready: boolean; assistantLogicRoot: string; deprecatedAssistantRepoIgnored: boolean } } };
+    assert.equal(deprecatedOptionJson.details.status.ready, true);
+    assert.equal(deprecatedOptionJson.details.status.assistantLogicRoot, assistantLogicPackage);
+    assert.equal(deprecatedOptionJson.details.status.deprecatedAssistantRepoIgnored, true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

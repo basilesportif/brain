@@ -15,15 +15,14 @@ inspectable.
 - Treat `workspace/`, `private/`, and `data/` as user-owned/private boundaries.
   Only the checked-in README files in those folders should exist unless a task
   explicitly changes the private-boundary policy.
-- Short-term personal workspace parity uses assistant-agent-logic JSON stores
-  and scripts, not a Brain-native markdown model. Setup/runtime guidance should
+- Personal workspace parity uses the in-repo `packages/assistant-logic` JSON
+  stores and scripts, not a Brain-native markdown model yet. Setup/runtime guidance should
   treat `data/todos.json`, `data/projects.json`, `data/crm.json`,
   `data/reminders.json`, `private/documents/metadata.jsonl`,
   `instructions/**`, `tasks/**`, and selected `.claude/repo-registry/` state as
-  the active private workspace model. Use `brainctl workspace run` or
-  `ASSISTANT_WORKSPACE=<path> node scripts/<name>.js` against an
-  assistant-agent-logic checkout; do not port stores or migrate current markdown
-  notes unless explicitly requested.
+  the active private workspace model. Use `brainctl workspace run` from the
+  Brain checkout; do not require a sibling assistant-agent-logic checkout, port
+  stores, or migrate current markdown notes unless explicitly requested.
 
 ## Entrypoint and provider direction
 
@@ -72,9 +71,9 @@ an exact phrase unless they must run a command verbatim.
 4. If no progress/context exists, ask the first setup question: local private
    directory or remote Ubuntu server over SSH?
 5. For remote setup, ask before editing local `~/.ssh/config` or contacting a
-   host. Use the assistant-agent-logic setup-server skill at
-   `/home/tim/pkg/tim/assistant-agent-logic/config/skills/setup-server.md` to
-   prepare the server with its own non-root Brain service user.
+   host. Use the Brain-owned deployment/self-hosting docs in this repository to
+   prepare the server with its own non-root Brain service user. Do not require a
+   separate assistant-agent-logic checkout for setup.
    As soon as the user confirms the remote target, run
    `brainctl setup defaults --target remote` or
    `brainctl setup --target remote` with the known host/path fields so the CLI

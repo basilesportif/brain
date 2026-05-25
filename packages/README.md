@@ -9,5 +9,6 @@ Planned package placeholders:
 - `providers/codex/` — adapter for Codex; Codex app-server integration is an implementation detail here.
 - `providers/claude-code/` — adapter for Claude Code SDK/subagent execution.
 - `assistant-pack-schema/` — validation for prompts, skills, workflows, and setup packs.
+- `assistant-logic/` — vendored/in-repo JSON workspace scripts and resources for todos, projects, CRM, reminders, and file-save.
 
 - `config/workspace-schema` validates workspace runtime configuration, active entrypoint policy, and prompt-context safety.

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { parse as parseToml } from "smol-toml";
 import YAML from "yaml";
@@ -278,33 +279,33 @@ backup.command("status")
   .option("--path <path>", "private workspace path override")
   .action(async (options) => exitWith(await backupCommand("status", options)));
 
-const workspaceCommands = program.command("workspace").description("Assistant JSON-backed workspace parity helpers");
+const workspaceCommands = program.command("workspace").description("Brain assistant-logic JSON-backed workspace parity helpers");
 workspaceCommands.command("scaffold")
-  .description("Create the assistant-agent-logic-compatible JSON workspace scaffold without overwriting stores.")
+  .description("Create the in-repo assistant-logic-compatible JSON workspace scaffold without overwriting stores.")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--path <path>", "private workspace path")
-  .option("--assistant-repo <path>", "assistant-agent-logic checkout to validate/reuse", defaultAssistantLogicRepo())
+  .option("--assistant-repo <path>", "deprecated; ignored because Brain uses packages/assistant-logic")
   .option("--dry-run", "show planned scaffold paths without writing files")
   .action(async (options) => exitWith(await workspaceScaffoldCommand(options)));
 workspaceCommands.command("status")
-  .description("Inspect assistant-agent-logic JSON workspace parity metadata.")
+  .description("Inspect in-repo assistant-logic JSON workspace parity metadata.")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--path <path>", "private workspace path")
-  .option("--assistant-repo <path>", "assistant-agent-logic checkout to validate/reuse", defaultAssistantLogicRepo())
+  .option("--assistant-repo <path>", "deprecated; ignored because Brain uses packages/assistant-logic")
   .action(async (options) => exitWith(await workspaceStatusCommand(options)));
 workspaceCommands.command("commands")
-  .description("List Brain wrapper commands and assistant-agent-logic scripts for todos/projects/CRM/reminders/file-save.")
+  .description("List Brain wrapper commands and in-repo assistant-logic scripts for todos/projects/CRM/reminders/file-save.")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--path <path>", "private workspace path")
-  .option("--assistant-repo <path>", "assistant-agent-logic checkout to validate/reuse", defaultAssistantLogicRepo())
+  .option("--assistant-repo <path>", "deprecated; ignored because Brain uses packages/assistant-logic")
   .action(async (options) => exitWith(await workspaceCommandsCommand(options)));
 workspaceCommands.command("run")
-  .description("Run an assistant-agent-logic script with ASSISTANT_WORKSPACE and BRAIN_PRIVATE_DIR set.")
+  .description("Run an in-repo assistant-logic script with ASSISTANT_WORKSPACE and private document roots set.")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--path <path>", "private workspace path")
-  .option("--assistant-repo <path>", "assistant-agent-logic checkout to reuse", defaultAssistantLogicRepo())
+  .option("--assistant-repo <path>", "deprecated; ignored because Brain uses packages/assistant-logic")
   .argument("<script>", "script basename or scripts/<name>.js")
-  .argument("[scriptArgs...]", "arguments for the assistant-agent-logic script; use -- before script flags")
+  .argument("[scriptArgs...]", "arguments for the assistant-logic script; use -- before script flags")
   .allowUnknownOption(true)
   .action(async (script: string, scriptArgs: string[], options) => exitWith(await workspaceRunCommand(script, scriptArgs, options)));
 
@@ -1051,12 +1052,12 @@ async function backupStatusFor(plan: ReturnType<typeof backupPlanFor>): Promise<
   return { ok: metadata.present && Boolean(git.present), metadata, git };
 }
 
-async function workspaceScaffoldCommand(options: { workspace: string; path?: string; assistantRepo: string; dryRun?: boolean }): Promise<CliResult> {
+async function workspaceScaffoldCommand(options: { workspace: string; path?: string; assistantRepo?: string; dryRun?: boolean }): Promise<CliResult> {
   const workspaceRoot = path.resolve(options.path ?? defaultWorkspaceRoot(options.workspace));
   const scaffold = options.dryRun
     ? assistantWorkspaceScaffoldPlan(workspaceRoot)
     : await ensureAssistantWorkspaceScaffold(workspaceRoot);
-  const status = await assistantWorkspaceParityStatus({ workspaceRoot, workspaceId: options.workspace, assistantRepo: options.assistantRepo });
+  const status = await assistantWorkspaceParityStatus({ workspaceRoot, workspaceId: options.workspace, deprecatedAssistantRepo: options.assistantRepo });
   return {
     ok: options.dryRun ? true : status.ready,
     summary: options.dryRun
@@ -1072,34 +1073,36 @@ async function workspaceScaffoldCommand(options: { workspace: string; path?: str
   };
 }
 
-async function workspaceStatusCommand(options: { workspace: string; path?: string; assistantRepo: string }): Promise<CliResult> {
+async function workspaceStatusCommand(options: { workspace: string; path?: string; assistantRepo?: string }): Promise<CliResult> {
   const workspaceRoot = path.resolve(options.path ?? defaultWorkspaceRoot(options.workspace));
-  const status = await assistantWorkspaceParityStatus({ workspaceRoot, workspaceId: options.workspace, assistantRepo: options.assistantRepo });
+  const status = await assistantWorkspaceParityStatus({ workspaceRoot, workspaceId: options.workspace, deprecatedAssistantRepo: options.assistantRepo });
   return {
     ok: status.ready,
     summary: status.ready
-      ? "assistant-agent-logic JSON workspace parity paths are ready"
-      : "assistant-agent-logic JSON workspace parity paths are missing or invalid",
+      ? "in-repo assistant-logic JSON workspace parity paths are ready"
+      : "in-repo assistant-logic JSON workspace parity paths are missing or invalid",
     details: { workspace: options.workspace, workspaceRoot, status, sideEffects: "none" },
   };
 }
 
-async function workspaceCommandsCommand(options: { workspace: string; path?: string; assistantRepo: string }): Promise<CliResult> {
+async function workspaceCommandsCommand(options: { workspace: string; path?: string; assistantRepo?: string }): Promise<CliResult> {
   const workspaceRoot = path.resolve(options.path ?? defaultWorkspaceRoot(options.workspace));
-  const assistantRepo = resolveAssistantRepo(options.assistantRepo);
-  const commands = assistantWorkspaceCommandCatalog(workspaceRoot, assistantRepo);
+  const assistantLogicRoot = assistantLogicPackageRoot();
+  const commands = assistantWorkspaceCommandCatalog(workspaceRoot, assistantLogicRoot);
   const scriptMetadata = await Promise.all(commands.flatMap((group) => group.scripts).map(async (script) => ({
     script,
-    path: assistantScriptPath(assistantRepo, script),
-    metadata: await fileMetadata(assistantScriptPath(assistantRepo, script)),
+    path: assistantScriptPath(assistantLogicRoot, script),
+    metadata: await fileMetadata(assistantScriptPath(assistantLogicRoot, script)),
   })));
   return {
     ok: scriptMetadata.every((item) => item.metadata.present),
-    summary: "assistant-agent-logic JSON workspace command catalog rendered",
+    summary: "in-repo assistant-logic JSON workspace command catalog rendered",
     details: {
       workspace: options.workspace,
       workspaceRoot,
-      assistantRepo,
+      assistantLogicRoot,
+      assistantLogicSource: "in-repo:packages/assistant-logic",
+      deprecatedAssistantRepoIgnored: Boolean(options.assistantRepo),
       env: assistantWorkspaceEnv(workspaceRoot),
       commands,
       scripts: scriptMetadata,
@@ -1108,27 +1111,26 @@ async function workspaceCommandsCommand(options: { workspace: string; path?: str
   };
 }
 
-async function workspaceRunCommand(script: string, scriptArgs: string[], options: { workspace: string; path?: string; assistantRepo: string }): Promise<CliResult> {
+async function workspaceRunCommand(script: string, scriptArgs: string[], options: { workspace: string; path?: string; assistantRepo?: string }): Promise<CliResult> {
   const workspaceRoot = path.resolve(options.path ?? defaultWorkspaceRoot(options.workspace));
-  const assistantRepo = resolveAssistantRepo(options.assistantRepo);
-  const resolved = resolveAssistantScript(assistantRepo, script);
+  const assistantLogicRoot = assistantLogicPackageRoot();
+  const resolved = resolveAssistantScript(assistantLogicRoot, script);
   if (!resolved.ok) return resolved.result;
   const forwardedArgs = scriptArgs[0] === "--" ? scriptArgs.slice(1) : scriptArgs;
   const scriptMetadata = await fileMetadata(resolved.path);
   if (!scriptMetadata.present) {
     return {
       ok: false,
-      summary: "assistant-agent-logic script is missing",
-      details: { script, scriptPath: resolved.path, assistantRepo, scriptMetadata, sideEffects: "none" },
+      summary: "in-repo assistant-logic script is missing",
+      details: { script, scriptPath: resolved.path, assistantLogicRoot, scriptMetadata, sideEffects: "none" },
     };
   }
   const env = {
     ...process.env,
-    ASSISTANT_WORKSPACE: workspaceRoot,
-    BRAIN_PRIVATE_DIR: assistantWorkspacePrivateRoot(workspaceRoot),
+    ...assistantWorkspaceEnv(workspaceRoot),
   };
   const result = spawnSync(process.execPath, [resolved.path, ...forwardedArgs], {
-    cwd: assistantRepo,
+    cwd: assistantLogicRoot,
     encoding: "utf8",
     env,
     maxBuffer: 10 * 1024 * 1024,
@@ -1139,12 +1141,14 @@ async function workspaceRunCommand(script: string, scriptArgs: string[], options
   return {
     ok: (result.status ?? 1) === 0,
     summary: (result.status ?? 1) === 0
-      ? `assistant-agent-logic script completed: ${resolved.script}`
-      : `assistant-agent-logic script failed: ${resolved.script}`,
+      ? `in-repo assistant-logic script completed: ${resolved.script}`
+      : `in-repo assistant-logic script failed: ${resolved.script}`,
     details: {
       workspace: options.workspace,
       workspaceRoot,
-      assistantRepo,
+      assistantLogicRoot,
+      assistantLogicSource: "in-repo:packages/assistant-logic",
+      deprecatedAssistantRepoIgnored: Boolean(options.assistantRepo),
       script: resolved.script,
       scriptPath: resolved.path,
       args: forwardedArgs,
@@ -1152,7 +1156,7 @@ async function workspaceRunCommand(script: string, scriptArgs: string[], options
       exitCode: result.status,
       stdout: parsedStdout,
       stderr: String(redactSecrets(stderr)),
-      sideEffects: "assistant-agent-logic script controlled the JSON workspace state; Brain did not port or reinterpret the store",
+      sideEffects: "in-repo assistant-logic script controlled the JSON workspace state",
     },
   };
 }
@@ -1258,14 +1262,14 @@ async function writeTextIfMissing(filePath: string, value: string): Promise<{ wr
   return { wrote: true };
 }
 
-async function assistantWorkspaceParityStatus(input: { workspaceRoot: string; workspaceId: string; assistantRepo: string }) {
+async function assistantWorkspaceParityStatus(input: { workspaceRoot: string; workspaceId: string; deprecatedAssistantRepo?: string }) {
   const workspaceRoot = path.resolve(input.workspaceRoot);
-  const assistantRepo = resolveAssistantRepo(input.assistantRepo);
-  const assistantRepoMetadata = await fileMetadata(assistantRepo);
+  const assistantLogicRoot = assistantLogicPackageRoot();
+  const assistantRepoMetadata = await fileMetadata(assistantLogicRoot);
   const scriptMetadata = await Promise.all(ASSISTANT_PARITY_SCRIPTS.map(async (script) => ({
     script,
-    path: assistantScriptPath(assistantRepo, script),
-    present: (await fileMetadata(assistantScriptPath(assistantRepo, script))).present,
+    path: assistantScriptPath(assistantLogicRoot, script),
+    present: (await fileMetadata(assistantScriptPath(assistantLogicRoot, script))).present,
   })));
   const stateStores = await Promise.all(ASSISTANT_STATE_STORES.map(async (store) => {
     const filePath = path.join(workspaceRoot, store.relativePath);
@@ -1302,7 +1306,7 @@ async function assistantWorkspaceParityStatus(input: { workspaceRoot: string; wo
     "documents",
     path.join("documents", "metadata"),
   ].map(async (dir) => ({ relativePath: dir, metadata: await fileMetadata(path.join(workspaceRoot, dir)) })));
-  const commands = assistantWorkspaceCommandCatalog(workspaceRoot, assistantRepo);
+  const commands = assistantWorkspaceCommandCatalog(workspaceRoot, assistantLogicRoot);
   const instructionsReady = instructionMetadata.every((item) => item.metadata.present);
   const tasksReady = (await fileMetadata(tasksReadme)).present;
   const repoRegistryReady = (await fileMetadata(repoRegistryReadme)).present || (await fileMetadata(path.join(workspaceRoot, ".claude", "repo-registry", "index.yaml"))).present;
@@ -1318,9 +1322,12 @@ async function assistantWorkspaceParityStatus(input: { workspaceRoot: string; wo
     ready,
     workspaceId: input.workspaceId,
     workspaceRoot,
-    assistantRepo,
+    assistantRepo: assistantLogicRoot,
+    assistantLogicRoot,
     assistantRepoMetadata,
-    assistantRepoSource: "option/env/default",
+    assistantRepoSource: "in-repo:packages/assistant-logic",
+    assistantLogicSource: "in-repo:packages/assistant-logic",
+    deprecatedAssistantRepoIgnored: Boolean(input.deprecatedAssistantRepo),
     env: assistantWorkspaceEnv(workspaceRoot),
     directories,
     stateStores,
@@ -1366,25 +1373,25 @@ function assistantWorkspaceDocumentMetadataPath(workspaceRoot: string): string {
 }
 
 function assistantWorkspaceEnv(workspaceRoot: string): Record<string, string> {
+  const privateRoot = assistantWorkspacePrivateRoot(workspaceRoot);
   return {
     ASSISTANT_WORKSPACE: workspaceRoot,
-    BRAIN_PRIVATE_DIR: assistantWorkspacePrivateRoot(workspaceRoot),
+    ASSISTANT_PRIVATE_DIR: privateRoot,
+    BRAIN_PRIVATE_DIR: privateRoot,
   };
 }
 
-function defaultAssistantLogicRepo(): string {
-  return process.env.BRAIN_ASSISTANT_LOGIC_REPO
-    ?? process.env.ASSISTANT_AGENT_LOGIC_REPO
-    ?? path.resolve(process.cwd(), "../assistant-agent-logic");
+function brainRepoRoot(): string {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 }
 
-function resolveAssistantRepo(input: string | undefined): string {
-  return path.resolve(input ?? defaultAssistantLogicRepo());
+function assistantLogicPackageRoot(): string {
+  return path.join(brainRepoRoot(), "packages", "assistant-logic");
 }
 
-function assistantScriptPath(assistantRepo: string, script: string): string {
+function assistantScriptPath(assistantLogicRoot: string, script: string): string {
   const scriptName = normalizeAssistantScriptName(script);
-  return path.join(assistantRepo, "scripts", scriptName);
+  return path.join(assistantLogicRoot, "scripts", scriptName);
 }
 
 function normalizeAssistantScriptName(script: string): string {
@@ -1396,17 +1403,17 @@ function normalizeAssistantScriptName(script: string): string {
   return withExtension;
 }
 
-function resolveAssistantScript(assistantRepo: string, script: string): { ok: true; script: string; path: string } | { ok: false; result: CliResult } {
+function resolveAssistantScript(assistantLogicRoot: string, script: string): { ok: true; script: string; path: string } | { ok: false; result: CliResult } {
   try {
     const normalized = normalizeAssistantScriptName(script);
-    return { ok: true, script: normalized, path: path.join(assistantRepo, "scripts", normalized) };
+    return { ok: true, script: normalized, path: path.join(assistantLogicRoot, "scripts", normalized) };
   } catch (error) {
-    return { ok: false, result: { ok: false, summary: "assistant-agent-logic script name is invalid", details: { script, error: errorMessage(error), sideEffects: "none" } } };
+    return { ok: false, result: { ok: false, summary: "assistant-logic script name is invalid", details: { script, error: errorMessage(error), sideEffects: "none" } } };
   }
 }
 
-function assistantWorkspaceCommandCatalog(workspaceRoot: string, assistantRepo: string) {
-  const runner = (script: string, args = "<args>") => `pnpm run brainctl workspace run --path ${shellQuote(workspaceRoot)} --assistant-repo ${shellQuote(assistantRepo)} ${script}${args ? ` -- ${args}` : ""}`;
+function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogicRoot: string) {
+  const runner = (script: string, args = "<args>") => `pnpm run brainctl workspace run --path ${shellQuote(workspaceRoot)} ${script}${args ? ` -- ${args}` : ""}`;
   return [
     {
       area: "todos",
@@ -1429,7 +1436,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, assistantRepo: 
     {
       area: "crm",
       state: path.join(workspaceRoot, "data", "crm.json"),
-      scripts: ["crm-add-person.js", "crm-list-people.js", "crm-view.js", "crm-add-business.js", "crm-list-businesses.js", "crm-log.js", "crm-follow-ups.js", "crm-resolve.js", "crm-link.js", "crm-unlink.js"],
+      scripts: ["crm-add-person.js", "crm-add-notes.js", "crm-list-people.js", "crm-view.js", "crm-add-business.js", "crm-list-businesses.js", "crm-log.js", "crm-history.js", "crm-follow-ups.js", "crm-resolve.js", "crm-link.js", "crm-unlink.js", "crm-update-person.js", "crm-update-business.js", "crm-missing-fields.js", "crm-pipeline.js", "crm-stale.js", "crm-delete.js"],
       examples: [
         runner("crm-add-person.js", '--name "Jane Smith"'),
         runner("crm-list-people.js", ""),
@@ -1461,17 +1468,17 @@ function renderInstructionsReadme(): string {
     "# Workspace Instruction Overlays",
     "",
     "These files are the workspace-owned layer for user-specific preferences.",
-    "They are additive overlays on top of assistant-agent-logic `config/skills/*.md` and `config/prompts/*.md`.",
+    "They are additive overlays on top of Brain's in-repo `packages/assistant-logic/config/skills/*.md` and `packages/assistant-logic/config/prompts/*.md` resources.",
     "",
     "Do not use overlays to redefine commands, storage paths, JSON formats, approval requirements, or safety rules.",
     "",
     "Important mappings for Brain parity:",
-    "- `instructions/skills/todo.md` overlays `assistant-agent-logic/config/skills/todo.md`",
-    "- `instructions/skills/projects.md` overlays `assistant-agent-logic/config/skills/projects.md`",
-    "- `instructions/skills/crm.md` overlays `assistant-agent-logic/config/skills/crm.md`",
-    "- `instructions/skills/reminders.md` overlays `assistant-agent-logic/config/skills/reminders.md`",
-    "- `instructions/skills/file-save.md` overlays `assistant-agent-logic/config/skills/file-save.md`",
-    "- `instructions/skills/repo-registry.md` overlays `assistant-agent-logic/config/skills/repo-registry/SKILL.md`",
+    "- `instructions/skills/todo.md` overlays `packages/assistant-logic/config/skills/todo.md`",
+    "- `instructions/skills/projects.md` overlays `packages/assistant-logic/config/skills/projects.md`",
+    "- `instructions/skills/crm.md` overlays `packages/assistant-logic/config/skills/crm.md`",
+    "- `instructions/skills/reminders.md` overlays `packages/assistant-logic/config/skills/reminders.md`",
+    "- `instructions/skills/file-save.md` overlays `packages/assistant-logic/config/skills/file-save.md`",
+    "- `instructions/skills/repo-registry.md` overlays `packages/assistant-logic/config/skills/repo-registry/SKILL.md`",
     "",
   ].join("\n");
 }
@@ -1481,7 +1488,7 @@ function renderSkillOverlayPlaceholder(skill: string): string {
     `# Workspace Overlay: ${titleCase(skill)}`,
     "",
     "Add only user-specific preferences here.",
-    `This file is layered on top of assistant-agent-logic \`config/skills/${skill === "repo-registry" ? "repo-registry/SKILL" : skill}.md\`.`,
+    `This file is layered on top of Brain's in-repo \`packages/assistant-logic/config/skills/${skill === "repo-registry" ? "repo-registry/SKILL" : skill}.md\` resource.`,
     "",
     "Do not restate or override shared commands, storage paths, JSON formats, approval requirements, or safety rules.",
     "",
@@ -1493,7 +1500,7 @@ function renderPromptOverlayPlaceholder(prompt: string): string {
     `# Workspace Overlay: ${titleCase(prompt)}`,
     "",
     "Add only user-specific prompt preferences here.",
-    `This file is layered on top of assistant-agent-logic \`config/prompts/${prompt}.md\`.`,
+    `This file is layered on top of Brain's in-repo \`packages/assistant-logic/config/prompts/${prompt}.md\` resource.`,
     "",
   ].join("\n");
 }
@@ -1502,15 +1509,15 @@ function renderTasksReadme(workspaceRoot: string): string {
   return [
     "# Scheduled Tasks",
     "",
-    "Scheduled tasks must target both the assistant-agent-logic repo clone and this workspace explicitly.",
+    "Scheduled tasks should target the Brain checkout and this workspace explicitly.",
     "",
     "Preferred command shape:",
     "",
     "```bash",
-    `cd /abs/path/to/assistant-agent-logic && ASSISTANT_WORKSPACE=${shellQuote(workspaceRoot)} node scripts/reminder-check.js`,
+    `cd /abs/path/to/brain && pnpm run brainctl workspace run --path ${shellQuote(workspaceRoot)} reminder-check.js`,
     "```",
     "",
-    "Do not install task commands that omit `ASSISTANT_WORKSPACE=<path>`.",
+    "Do not install task commands that omit the explicit workspace path.",
     "",
   ].join("\n");
 }
@@ -1519,7 +1526,7 @@ function renderRepoRegistryReadme(): string {
   return [
     "# Repo Registry State",
     "",
-    "This directory may hold user-specific repo-registry controller state compatible with assistant-agent-logic.",
+    "This directory may hold user-specific repo-registry controller state compatible with Brain's assistant-logic resources.",
     "Back up selected state files only; do not commit private hosts, paths, credentials, or runtime caches to a public source checkout.",
     "",
   ].join("\n");
@@ -2186,17 +2193,22 @@ const ASSISTANT_PARITY_SCRIPTS = [
   "project-task.js",
   "project-delete.js",
   "crm-add-person.js",
+  "crm-add-notes.js",
   "crm-list-people.js",
   "crm-view.js",
   "crm-add-business.js",
   "crm-list-businesses.js",
   "crm-log.js",
+  "crm-history.js",
   "crm-follow-ups.js",
   "crm-resolve.js",
   "crm-link.js",
   "crm-unlink.js",
   "crm-update-person.js",
   "crm-update-business.js",
+  "crm-missing-fields.js",
+  "crm-pipeline.js",
+  "crm-stale.js",
   "crm-delete.js",
   "reminder-add.js",
   "reminder-list.js",
@@ -2956,7 +2968,7 @@ async function setupInspectDetails(options: SetupInspectOptions) {
   const webPublishing = setupWebPublishingStatus(workspace);
   const composio = await setupComposioStatus(workspace);
   const transcription = setupTranscriptionStatus(workspace);
-  const assistantWorkspace = await assistantWorkspaceParityStatus({ workspaceRoot, workspaceId: options.workspace, assistantRepo: defaultAssistantLogicRepo() });
+  const assistantWorkspace = await assistantWorkspaceParityStatus({ workspaceRoot, workspaceId: options.workspace });
   const serviceName = options.serviceName ?? `brain-${options.workspace}`;
   const service = setupServiceStatus(serviceName);
   const plan = buildSetupPlan({
@@ -3215,9 +3227,9 @@ function buildSetupPlan(input: {
   }
 
   if (input.assistantWorkspace.assistantRepoMetadata.present && input.assistantWorkspace.scripts.every((script) => script.present)) {
-    configured.push("assistant-agent-logic scripts available for JSON workspace parity");
+    configured.push("in-repo assistant-logic scripts available for JSON workspace parity");
   } else {
-    missing_required.push("assistant-agent-logic checkout/scripts missing for JSON workspace parity");
+    missing_required.push("in-repo assistant-logic package/scripts missing for JSON workspace parity");
   }
 
   for (const store of input.assistantWorkspace.stateStores) {

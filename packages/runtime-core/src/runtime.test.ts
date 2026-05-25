@@ -50,7 +50,8 @@ test("buildPrompt exposes private workspace project memory paths", () => {
   assert.match(prompt, /data\/crm\.json/);
   assert.match(prompt, /data\/reminders\.json/);
   assert.match(prompt, /private\/documents\/metadata\.jsonl/);
-  assert.match(prompt, /assistant-agent-logic scripts/);
+  assert.match(prompt, /in-repo assistant-logic scripts/);
+  assert.match(prompt, /packages\/assistant-logic/);
   assert.match(prompt, /Markdown project\/notes\/documents directories are supporting resources only/);
   assert.match(prompt, /do not claim no project\/todo\/CRM\/reminder list exists/);
 });

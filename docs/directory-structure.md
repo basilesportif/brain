@@ -18,7 +18,7 @@ brain/
   docs/                 # Architecture, runtime config, migration, and self-host documentation.
   examples/config/      # Public-safe runtime config examples.
   plans/                # Migration plans and decision logs.
-  workspace/            # Ignored user-owned workspace boundary; runtime scaffold mirrors assistant-agent-logic JSON state.
+  workspace/            # Ignored user-owned workspace boundary; runtime scaffold mirrors Brain assistant-logic JSON state.
   private/              # Ignored local-only/private boundary.
   data/                 # Ignored generated/user data boundary.
 ```
@@ -32,8 +32,9 @@ Ownership rules:
 
 Configuration examples live under `examples/config/` and are public-safe. Real workspace config, adapter secrets, bot tokens, allowlists, and host-specific paths belong in the private workspace or host secret store, not in source control.
 
-The short-term Brain workspace state model intentionally reuses
-assistant-agent-logic instead of porting its stores. Setup creates/recognizes:
+The Brain workspace state model intentionally reuses the in-repo
+`packages/assistant-logic` JSON stores while a native TypeScript port remains
+future work. Setup creates/recognizes:
 
 - `data/todos.json`, `data/projects.json`, `data/crm.json`, and
   `data/reminders.json`;

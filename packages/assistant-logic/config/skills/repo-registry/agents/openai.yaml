@@ -1,0 +1,7 @@
+interface:
+  display_name: "Repo Registry"
+  short_description: "Orchestrate multi-repo planning and handoffs"
+  default_prompt: "Use $repo-registry to register a repo by alias, run a Codex planning loop with clear decision points, and then prepare or execute the next handoff."
+
+policy:
+  allow_implicit_invocation: true

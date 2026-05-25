@@ -189,7 +189,8 @@ export function buildPrompt(event: EntryPointInboundEvent, workspace: WorkspaceC
         reminders: `${workspacePath}/data/reminders.json`,
       },
       assistantScripts: {
-        commandShape: `cd /abs/path/to/assistant-agent-logic && ASSISTANT_WORKSPACE=${workspacePath} BRAIN_PRIVATE_DIR=${workspacePath}/private node scripts/<script>.js`,
+        package: "packages/assistant-logic",
+        commandShape: `cd /abs/path/to/brain && pnpm run brainctl workspace run --path ${workspacePath} <script>.js -- <args>`,
         brainctlWrapper: `pnpm run brainctl workspace run --path ${workspacePath} <script>.js -- <args>`,
         examples: [
           "todo-list.js",
@@ -222,7 +223,7 @@ export function buildPrompt(event: EntryPointInboundEvent, workspace: WorkspaceC
     "Use generic entrypoint, inbound event, outbound action, and artifact language.",
     "Do not expose channel secrets or raw adapter credentials.",
     "Todos, projects, CRM, reminders, saved-file metadata, instruction overlays, scheduled tasks, and repo-registry state are JSON-backed assistant workspace state, not markdown notes.",
-    "Use assistant-agent-logic scripts with ASSISTANT_WORKSPACE set to the active workspace (or the brainctl workspace run wrapper) for todos/projects/CRM/reminders/file-save; do not port or reinterpret those stores ad hoc.",
+    "Use Brain's in-repo assistant-logic scripts through the brainctl workspace run wrapper for todos/projects/CRM/reminders/file-save; do not port or reinterpret those stores ad hoc.",
     "Markdown project/notes/documents directories are supporting resources only. Do not convert JSON state to markdown or claim markdown is the source of truth.",
     "When asked about personal workspace state, inspect the private JSON paths and overlays in Active runtime context before answering.",
     "If filesystem or script inspection fails, report the exact command or path failure; do not claim no project/todo/CRM/reminder list exists from runtime metadata alone.",

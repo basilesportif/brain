@@ -8,7 +8,7 @@ hosts.
 Status: guided setup documentation. `brainctl`, runtime packages, provider
 adapters, Telegram entrypoint seams, and non-mutating operations planning exist.
 Setup should prepare and validate a local or remote workspace, then guide the
-user through a concise core flow: assistant-agent-logic JSON workspace scaffold,
+user through a concise core flow: Brain assistant-logic JSON workspace scaffold,
 Telegram connection, private data/backup repo pull or initialization, Composio
 account connection if needed, and other essential runtime choices. Codex auth
 is verified before service start or live Telegram traffic. First-user pairing,
@@ -58,8 +58,9 @@ Ask confirmation questions in plain English and accept ordinary yes/no answers;
 do not require exact reply text unless the user must run a command verbatim.
 
 Initial setup must create an inspectable JSON-backed assistant workspace before
-live traffic. The short-term Brain source of truth reuses assistant-agent-logic
-stores and scripts rather than porting them into TypeScript:
+live traffic. The Brain source of truth uses the in-repo
+`packages/assistant-logic` stores and scripts while a native TypeScript port
+remains future work:
 `data/todos.json`, `data/projects.json`, `data/crm.json`,
 `data/reminders.json`, `private/documents/metadata.jsonl`,
 `instructions/skills/`, `instructions/prompts/`, `tasks/`, and selected
@@ -73,7 +74,7 @@ non-interactive approval behavior, `TMPDIR` pointed at
 Ubuntu server sandboxes can fail before shell commands start; the safety
 boundary is the dedicated service user plus private workspace path, not a
 per-turn approval prompt. This lets questions like "do I have projects?" inspect
-the JSON stores through assistant-agent-logic scripts instead of answering from
+the JSON stores through integrated assistant-logic scripts instead of answering from
 active entrypoint metadata or markdown folders alone.
 Ask whether the user wants to initialize or connect a private Git backup for
 this personal workspace memory; never commit secrets, logs, Telegram IDs,
@@ -107,9 +108,8 @@ change directories into `setup/`.
    `private/setup-context.json` pointer. If it points to a remote host, ask only
    for permission or missing SSH details needed to run the reported remote
    metadata check, then resume from the next incomplete step.
-5. For remote Ubuntu preparation, read the upstream helper skill at
-   `/home/tim/pkg/tim/assistant-agent-logic/config/skills/setup-server.md` and
-   adapt only its public-safe, user-owned steps.
+5. For remote Ubuntu preparation, use the Brain-owned deployment/self-hosting
+   docs in this repo. Do not require an external assistant-agent-logic checkout.
 6. Run `pnpm run check` before and after setup or documentation changes.
 7. Ask before touching any real remote host, local SSH config, systemd unit,
    secret file, or credential.
@@ -186,7 +186,7 @@ command lists unless the user asks for details or `brainctl setup defaults
      `private/documents/metadata.jsonl`, selected `.claude/repo-registry/`
      state paths, and markdown resource folders;
    - tell the user todos/projects/CRM/reminders are JSON-backed and accessed by
-     assistant-agent-logic scripts via `brainctl workspace run`;
+     integrated assistant-logic scripts via `brainctl workspace run`;
    - ask whether to initialize or connect a private Git backup so non-secret
      workspace state can be committed privately.
 3. Pull or initialize the private data/backup repo:
@@ -322,13 +322,12 @@ on private workspace knowledge.
   `.claude/repo-registry/`, `private/documents/`, `projects/`, `notes/`,
   `documents/`, and `documents/metadata/` with restrictive
   ownership/permissions.
-- JSON stores exist and validate for assistant-agent-logic parity:
+- JSON stores exist and validate for Brain assistant-logic parity:
   `data/todos.json`, `data/projects.json`, `data/crm.json`, and
   `data/reminders.json`.
-- An assistant-agent-logic checkout is available to the service user, normally
-  as a sibling checkout (`../assistant-agent-logic`) or via
-  `BRAIN_ASSISTANT_LOGIC_REPO` / `--assistant-repo`; validate with
-  `pnpm run brainctl workspace status --path <workspace>`.
+- The in-repo `packages/assistant-logic` package is present; validate with
+  `pnpm run brainctl workspace status --path <workspace>`. No sibling
+  assistant-agent-logic checkout is required.
 - File-save metadata is `private/documents/metadata.jsonl`; private file bytes
   stay under `private/documents/files/` and are excluded from default backups.
 - Runtime config starts from `examples/config/runtime.yaml` or TOML and contains
@@ -531,9 +530,8 @@ explicitly requested.
    If the first connection must use `root`, use the root address only for the
    bootstrap phase, then switch the alias to the service user.
 
-3. Prepare the Ubuntu server using the setup-server skill from
-   `assistant-agent-logic`:
-   `/home/tim/pkg/tim/assistant-agent-logic/config/skills/setup-server.md`.
+3. Prepare the Ubuntu server using the Brain-owned deployment/self-hosting docs
+   in this repository.
    Required adaptations for Brain:
    - create/use the dedicated Brain service user,
    - install only needed base packages and runtimes,

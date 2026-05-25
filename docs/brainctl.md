@@ -165,8 +165,8 @@ include/exclude rules; the template excludes `secrets/**`, `logs/**`, `tmp/**`,
 caches, `node_modules`, and `*.log` by default. `backup status` summarizes Git
 presence, remotes, branch, and status counts without printing private filenames.
 
-The default include policy now covers the assistant-agent-logic JSON workspace
-state needed for short-term parity:
+The default include policy now covers the Brain assistant-logic JSON workspace
+state:
 
 - `data/**` for todos, projects, CRM, reminders, and related JSON stores;
 - `instructions/**` for skill/prompt overlays;
@@ -182,12 +182,13 @@ excluded by default.
 
 ## Assistant JSON workspace parity
 
-Brain does not yet port assistant-agent-logic's todo/project/CRM/reminder/file
-stores. Instead, setup creates a compatible workspace and `brainctl workspace
-run` executes the existing scripts with:
+Brain carries the todo/project/CRM/reminder/file-save JSON stores in the
+in-repo `packages/assistant-logic` package. Setup creates a compatible
+workspace and `brainctl workspace run` executes those integrated scripts with:
 
 ```bash
 ASSISTANT_WORKSPACE=<workspace>
+ASSISTANT_PRIVATE_DIR=<workspace>/private
 BRAIN_PRIVATE_DIR=<workspace>/private
 ```
 
@@ -203,9 +204,9 @@ pnpm run brainctl workspace run --path ~/.brain/workspace reminder-list.js
 pnpm run brainctl workspace run --path ~/.brain/workspace file-save.js -- --source /path/to/file.pdf
 ```
 
-The wrapper requires an assistant-agent-logic checkout (default:
-`../assistant-agent-logic`, override with `--assistant-repo` or
-`BRAIN_ASSISTANT_LOGIC_REPO`). It does not parse or rewrite those stores itself.
+No external `assistant-agent-logic` checkout is required. The legacy
+`--assistant-repo` flag is accepted only as a deprecated no-op while the wrapper
+always resolves `packages/assistant-logic` in the Brain checkout.
 
 ## Optional web publishing and Composio setup
 
