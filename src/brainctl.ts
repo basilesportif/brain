@@ -1378,7 +1378,7 @@ function createCliProvider(selection: ResolvedSupervisorRuntime, options: Superv
   if (provider === "codex") return createCodexProvider({
     transport: (options.transport as CodexTransportKind | undefined) ?? "stub",
     binary: options.binary,
-    cwd: options.cwd,
+    cwd: options.cwd ?? process.cwd(),
     skipGitRepoCheck: true,
     appServerUrl: options.appServerUrl,
     transcriptionApiKeyRef: selection.workspace.transcription?.apiKeyRef,
@@ -3055,7 +3055,7 @@ async function providerCheckCommand(providerId: string, options: { config?: stri
   const transcription = normalized === "codex" ? await configuredTranscriptionApiKeyRef(options) : { ok: true as const, transcriptionApiKeyRef: undefined };
   if (!transcription.ok) return transcription.result;
   const adapter = normalized === "codex"
-    ? createCodexProvider({ transport: (options.transport as CodexTransportKind | undefined) ?? "stub", binary: options.binary, cwd: options.cwd, appServerUrl: options.appServerUrl, timeoutMs: options.timeoutMs, appServerStartupTimeoutMs: options.timeoutMs, transcriptionApiKeyRef: transcription.transcriptionApiKeyRef })
+    ? createCodexProvider({ transport: (options.transport as CodexTransportKind | undefined) ?? "stub", binary: options.binary, cwd: options.cwd ?? process.cwd(), skipGitRepoCheck: true, appServerUrl: options.appServerUrl, timeoutMs: options.timeoutMs, appServerStartupTimeoutMs: options.timeoutMs, transcriptionApiKeyRef: transcription.transcriptionApiKeyRef })
     : normalized === "claude-code" || normalized === "claude"
       ? createClaudeCodeProvider({ transport: (options.transport as ClaudeCodeTransportKind | undefined) ?? "stub" })
       : undefined;
@@ -3093,7 +3093,7 @@ async function providerSmokeCommand(providerId: string, options: { config?: stri
   const transcription = normalized === "codex" ? await configuredTranscriptionApiKeyRef(options) : { ok: true as const, transcriptionApiKeyRef: undefined };
   if (!transcription.ok) return transcription.result;
   const adapter = normalized === "codex"
-    ? createCodexProvider({ transport: transport as CodexTransportKind, binary: options.binary, cwd: options.cwd, appServerUrl: options.appServerUrl, timeoutMs: options.timeoutMs, appServerStartupTimeoutMs: options.timeoutMs, transcriptionApiKeyRef: transcription.transcriptionApiKeyRef })
+    ? createCodexProvider({ transport: transport as CodexTransportKind, binary: options.binary, cwd: options.cwd ?? process.cwd(), skipGitRepoCheck: true, appServerUrl: options.appServerUrl, timeoutMs: options.timeoutMs, appServerStartupTimeoutMs: options.timeoutMs, transcriptionApiKeyRef: transcription.transcriptionApiKeyRef })
     : normalized === "claude-code" || normalized === "claude"
       ? createClaudeCodeProvider({ transport: transport as ClaudeCodeTransportKind })
       : undefined;
