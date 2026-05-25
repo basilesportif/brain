@@ -324,6 +324,7 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
   private started = false;
   private lastEventId?: string;
   private pollingController?: AbortController;
+  private readonly sentReactionKeys = new Set<string>();
 
   constructor(private readonly options: TelegramEntrypointAdapterOptions) {
     this.id = options.entrypointId ?? "telegram-main";
@@ -375,6 +376,7 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
       if (!event) continue;
       await this.pairFirstUserIfNeeded(event);
       if (!(await this.isEventAllowed(event))) continue;
+      this.sendInboundReceiptReaction(update, event);
       const prepared = await this.prepareInboundEvent(event);
       if (!prepared) continue;
       this.lastEventId = prepared.id;
@@ -383,6 +385,9 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
   }
 
   async dispatch(action: BrainOutboundAction): Promise<OutboundDispatchResult> {
+    if (this.isDuplicateReaction(action)) {
+      return { action, status: "skipped", error: "Telegram reaction already sent" };
+    }
     const intent = outboundActionToTelegramIntent(action);
     if (!intent) return actionDispatchResult(action, intent);
     if (this.options.dispatchIntent) return this.options.dispatchIntent(intent, action);
@@ -562,6 +567,34 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
       text,
       reply_to_message_id: telegramMessageId,
     })).catch(() => undefined);
+  }
+
+  private sendInboundReceiptReaction(update: TelegramUpdateLike, event: EntryPointInboundEvent): void {
+    const message = update.message;
+    if (!this.options.apiClient || !message || message.from?.is_bot) return;
+    if (!["message", "command", "attachment"].includes(event.kind)) return;
+    const key = reactionKey(message.chat.id, message.message_id, "👀");
+    if (this.sentReactionKeys.has(key)) return;
+    this.sentReactionKeys.add(key);
+    const apiClient = this.options.apiClient;
+    void (async () => {
+      try {
+        await apiClient.call("setMessageReaction", {
+          chat_id: String(message.chat.id),
+          message_id: message.message_id,
+          reaction: [{ type: "emoji", emoji: "👀" }],
+        });
+      } catch {
+        this.sentReactionKeys.delete(key);
+      }
+    })();
+  }
+
+  private isDuplicateReaction(action: BrainOutboundAction): boolean {
+    if (action.type !== "react") return false;
+    const chatId = action.target?.conversationId;
+    const messageId = action.target?.replyToExternalMessageId;
+    return chatId !== undefined && messageId !== undefined && this.sentReactionKeys.has(reactionKey(chatId, messageId, action.emoji));
   }
 }
 
@@ -992,6 +1025,9 @@ function safeTelegramFileName(filePath: string): string {
   return path.basename(filePath).replace(/[^A-Za-z0-9._-]/g, "_") || "telegram-file";
 }
 
+function reactionKey(chatId: string | number, messageId: string | number, emoji: string): string {
+  return `${String(chatId)}:${String(messageId)}:${emoji}`;
+}
 
 function telegramPairCommand(update: TelegramUpdateLike): { code: string; userId: string; chatId: string; messageId: number } | undefined {
   const message = update.message;

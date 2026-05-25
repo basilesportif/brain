@@ -66,6 +66,67 @@ test("TelegramEntrypointAdapter exposes no-network inbound and outbound protocol
   assert.equal(intents[0]?.method, "sendMessage");
 });
 
+test("Telegram adapter sends an immediate receipt reaction before attachment preparation", async () => {
+  const calls: Array<{ method: string; payload?: Record<string, unknown> }> = [];
+  const api: TelegramBotApi = {
+    async call(method, payload) {
+      calls.push({ method, payload });
+      if (method === "setMessageReaction") return { ok: true, result: true };
+      if (method === "getFile") return { ok: true, result: { file_id: payload?.file_id, file_path: "docs/file.txt", file_size: 4 } };
+      throw new Error(`unexpected method ${method}`);
+    },
+    async downloadFile(filePath) {
+      return { localPath: `/tmp/${path.basename(filePath)}`, filePath, bytes: new TextEncoder().encode("data") };
+    },
+  };
+  const adapter = new TelegramEntrypointAdapter({
+    workspaceId: "personal",
+    apiClient: api,
+    attachmentHandling: { download: true },
+    updates: [
+      { update_id: 104, message: { message_id: 46, text: "see attached", chat: { id: 123 }, from: { id: 7 }, document: { file_id: "doc_file", file_unique_id: "doc_unique" } } },
+    ],
+  });
+
+  await adapter.start();
+  const events = [];
+  for await (const event of adapter.inboundEvents()) events.push(event);
+
+  assert.equal(events.length, 1);
+  assert.deepEqual(calls.map((call) => call.method), ["setMessageReaction", "getFile"]);
+  assert.deepEqual(calls[0]?.payload, {
+    chat_id: "123",
+    message_id: 46,
+    reaction: [{ type: "emoji", emoji: "👀" }],
+  });
+});
+
+test("Telegram adapter does not duplicate an immediate receipt reaction through later react dispatch", async () => {
+  const calls: Array<{ method: string; payload?: Record<string, unknown> }> = [];
+  const api: TelegramBotApi = {
+    async call(method, payload) {
+      calls.push({ method, payload });
+      return { ok: true, result: true };
+    },
+  };
+  const adapter = new TelegramEntrypointAdapter({
+    workspaceId: "personal",
+    apiClient: api,
+    updates: [
+      { update_id: 105, message: { message_id: 47, text: "hello", chat: { id: 123 }, from: { id: 7 } } },
+    ],
+  });
+
+  await adapter.start();
+  const events = [];
+  for await (const event of adapter.inboundEvents()) events.push(event);
+  assert.equal(events.length, 1);
+
+  const duplicate = await adapter.dispatch({ type: "react", emoji: "👀", target: { conversationId: "123", replyToExternalMessageId: "47" } });
+  assert.equal(duplicate.status, "skipped");
+  assert.deepEqual(calls.map((call) => call.method), ["setMessageReaction"]);
+});
+
 test("Telegram admin allowlist filters unauthorized updates", () => {
   const blocked = telegramUpdateToInboundEvent({
     update_id: 102,
@@ -336,9 +397,8 @@ test("Telegram adapter matches codex-chat disabled transcription parity for voic
   assert.equal(events.length, 1);
   assert.equal(events[0]?.attachments?.[0]?.kind, "audio");
   assert.equal(events[0]?.text, "");
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0]?.method, "sendMessage");
-  assert.deepEqual(calls[0]?.payload, {
+  assert.deepEqual(calls.map((call) => call.method), ["setMessageReaction", "sendMessage", "setMessageReaction"]);
+  assert.deepEqual(calls[1]?.payload, {
     chat_id: "123",
     text: "Voice transcription is not enabled.",
     reply_to_message_id: 3,
@@ -381,7 +441,7 @@ test("Telegram adapter drops voice events when OpenAI transcription key is missi
     for await (const event of adapter.inboundEvents()) events.push(event);
 
     assert.equal(events.length, 0);
-    assert.deepEqual(calls.map((call) => call.method), ["getFile"]);
+    assert.deepEqual(calls.map((call) => call.method), ["setMessageReaction", "getFile"]);
   } finally {
     if (oldKey === undefined) delete process.env.BRAIN_TEST_MISSING_OPENAI_KEY;
     else process.env.BRAIN_TEST_MISSING_OPENAI_KEY = oldKey;

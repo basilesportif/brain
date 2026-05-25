@@ -31,6 +31,11 @@ Current implementation includes:
   admin state when no explicit allowlist exists;
 - optional advanced one-time `/pair <code>` bootstrap state for paired user/chat
   identities before allowlist filtering;
+- immediate best-effort `👀` receipt reactions for authorized user-originated
+  Telegram messages at ingress, before attachment download/transcription or
+  provider work starts. The adapter tracks message/emoji reactions already sent
+  during ingress so later `react` outbound actions for the same Telegram
+  message do not duplicate the receipt reaction;
 - opt-in attachment download plus configurable voice/audio transcription from
   runtime config (`transcription.provider: openai` with a private `apiKeyRef`,
   model, optional language, and optional prompt file) or an injectable command
