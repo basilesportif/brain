@@ -53,6 +53,8 @@ message to send, or one short question for a missing value needed to construct
 that command. Avoid bare conceptual instructions such as "SSH into the server",
 "run this on the server", "configure auth", "verify Codex", "check the logs",
 or "start the service" unless the complete command is included immediately.
+Ask confirmation questions in plain English and accept ordinary yes/no answers;
+do not require exact reply text unless the user must run a command verbatim.
 
 If the wizard needs a clean resume state, run:
 
@@ -177,11 +179,13 @@ command lists unless the user asks for details or `brainctl setup defaults
 7. After the core choices are captured, configure or verify Codex auth before
    service start or live Telegram traffic:
    first generate a target-host helper with
-   `pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <workspace-name> --repo <repo-root> --ssh-host <host> --ssh-user <user>`.
+   `pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <workspace-name> --repo <repo-root> --ssh-host <host> --ssh-user <ssh-login-user> --service-user <brain-service-user>`.
    For remote setup, show the exact returned `sshRunCommand` as a copy-paste
-   command, for example `ssh -t user@host 'bash
+   command, for example `ssh -t root@host 'sudo -iu brain bash
    /tmp/verify-brain-codex-auth.sh'`, so device-auth can happen in the user's
-   terminal. Do not say only "SSH into the server" or "run this on the server."
+   terminal. Verify auth as the same service user that systemd will run; root's
+   Codex login is not enough for `User=brain`. Do not say only "SSH into the
+   server" or "run this on the server."
    The helper checks `codex login status`, prints `codex login --device-auth` /
    `codex login` instructions if auth is missing, and updates setup progress
    only via guarded `brainctl validate live --allow-live --run-safe` after login

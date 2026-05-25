@@ -16,6 +16,9 @@ Use this skill when a user asks to prepare a fresh Ubuntu host for Brain.
   provide the full copy-paste command or the exact UI action. Do not say "SSH
   into the server", "run this on the host", "configure auth", "check logs", or
   "start the service" unless the exact command follows immediately.
+- Ask confirmation questions in plain English and accept natural yes/no replies;
+  do not require an exact reply phrase unless the user must run a command
+  verbatim.
 - Print only metadata about secret files: existence, owner, permissions, size, and required-key presence.
 - Provide copy-paste commands that input or store secrets only as one-use
   private temporary scripts. Use a temp directory outside version control
@@ -64,9 +67,11 @@ Use this skill when a user asks to prepare a fresh Ubuntu host for Brain.
 9. Configure/verify Codex auth before service start or live Telegram traffic.
    Generate `pnpm run brainctl setup codex-auth-script --config
    <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root>
-   --ssh-host <host> --ssh-user <user>` and give the user the returned
-   `ssh -t ... 'bash .../verify-brain-codex-auth.sh'` command. Require explicit
-   confirmation before writing credentials or running live provider checks.
+   --ssh-host <host> --ssh-user <ssh-login-user> --service-user
+   <brain-service-user>` and give the user the returned `sshRunCommand`. Verify
+   auth as the same service user that systemd will run; root's Codex login is
+   not sufficient for `User=brain`. Require explicit confirmation before writing
+   credentials or running live provider checks.
 10. Prepare/install/start the service only after confirmation.
 11. Treat first-user pairing, OpenAI transcription, web publishing, and backup
    tuning as optional follow-ups unless explicitly requested.

@@ -5,8 +5,11 @@
 Setup output should be direct-action first. When a setup step requires the user
 to do something, print the exact copy-paste command or the exact UI message to
 send, not a conceptual instruction. For remote work, this means a full command
-such as `ssh -t user@host 'bash /tmp/verify-brain-codex-auth.sh'`, not "SSH into
-the server."
+such as `ssh -t root@host 'sudo -iu brain bash /tmp/verify-brain-codex-auth.sh'`,
+not "SSH into the server."
+For confirmations, ask in plain English and accept normal yes/no replies; do
+not require the user to type a magic phrase unless they must run a command
+verbatim.
 
 For interrupted setup reruns, start with `setup status` before asking first-run
 questions. It reports the current private `state/setup-progress.json` and, when
@@ -234,15 +237,19 @@ chat, shell history, command output, or logs.
 When the wizard reaches Codex auth, generate a target-host verification helper:
 
 ```bash
-pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root> --ssh-host <host> --ssh-user <user>
+pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root> --ssh-host <host> --ssh-user <ssh-login-user> --service-user <brain-service-user>
 ```
 
 For remote setup, give the user the returned
-`ssh -t ... 'bash .../verify-brain-codex-auth.sh'` command. For local setup,
-run the returned `bash .../verify-brain-codex-auth.sh` command as the same user
-that will run Brain. The helper checks `codex login status`, prints concrete
+`ssh -t ... 'sudo -iu brain bash .../verify-brain-codex-auth.sh'` command when
+the SSH login user differs from the service user. For local setup, run the
+returned `bash .../verify-brain-codex-auth.sh` command as the same user that
+will run Brain. A root Codex login is not enough for a `User=brain` systemd
+service. The helper checks `codex login status`, prints concrete
 `codex login --device-auth` / `codex login` instructions when auth is missing,
-and records the verified setup state only through guarded
+and the JSON output includes `sshLoginCommand` for the exact remote
+device-auth command to run when login is missing. It records the verified setup
+state only through guarded
 `validate live --codex-transport exec --allow-live --run-safe`.
 
 When `validate live --run-safe` runs against an existing private workspace, it

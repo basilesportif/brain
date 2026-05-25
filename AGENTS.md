@@ -45,7 +45,9 @@ one exact action: a copy-paste command, a short BotFather message to send, or a
 single concise question for the missing value needed to build the command.
 Avoid vague instructions such as "SSH into the server", "run this remotely",
 "configure auth", "verify it", or "check the service" unless the exact command
-or UI action is included immediately next to it.
+or UI action is included immediately next to it. For confirmations, ask in plain
+English and accept natural yes/no replies; do not require the user to reply with
+an exact phrase unless they must run a command verbatim.
 
 1. Read `docs/setup-plan.md`.
 2. Read `assistant-packs/core/skills/setup-self-host/SKILL.md`. This is the
@@ -111,9 +113,12 @@ or UI action is included immediately next to it.
 12. When setup reaches Codex auth verification, give concrete commands. Prefer
    generating `pnpm run brainctl setup codex-auth-script --config
    <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root>
-   --ssh-host <host> --ssh-user <user>` on the target host or via SSH context,
-   then print the exact `sshRunCommand` value as a copy-paste command for the
-   user, for example `ssh -t user@host 'bash /tmp/verify-brain-codex-auth.sh'`.
+   --ssh-host <host> --ssh-user <ssh-login-user> --service-user <brain-service-user>`
+   on the target host or via SSH context, then print the exact `sshRunCommand`
+   value as a copy-paste command for the user, for example
+   `ssh -t root@host 'sudo -iu brain bash /tmp/verify-brain-codex-auth.sh'`.
+   Verify auth as the same non-root service user that will run Brain; root's
+   Codex session is not sufficient for a `User=brain` systemd service.
    Do not say only "SSH into the server" or "run it on the server"; always give
    the complete command including user, host, and remote script path. The helper
    prints login instructions when auth is missing.

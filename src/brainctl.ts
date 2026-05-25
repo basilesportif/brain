@@ -1205,8 +1205,8 @@ function liveValidationWizard(
       title: "Verify Codex auth before service start.",
       actions: [
         "Confirm the selected Codex transport and auth path for this machine or server.",
-        `Generate a guarded helper with: pnpm run brainctl setup codex-auth-script --config ${shellArg(options.config)} --workspace ${shellArg(options.workspace)} --repo <repo-root>`,
-        "Run the returned bash command on the target host; it checks `codex login status`, prints login instructions if needed, and updates setup progress only after a live health check succeeds.",
+        `Generate a guarded helper with: pnpm run brainctl setup codex-auth-script --config ${shellArg(options.config)} --workspace ${shellArg(options.workspace)} --repo <repo-root> --service-user <brain-service-user>`,
+        "Run the returned command as the same OS user that will run Brain; for systemd this is usually the non-root service user.",
         "If a credential is needed, store it only in a private server env file or secret store, then verify by metadata/health check without printing the value.",
         `Run a guarded provider check for the chosen transport before accepting live user traffic.`,
       ],
@@ -1720,6 +1720,7 @@ interface SetupTelegramTokenScriptOptions {
   repo?: string;
   sshHost?: string;
   sshUser?: string;
+  serviceUser?: string;
   output?: string;
   tokenFile?: string;
   adapterConfig?: string;
@@ -2116,19 +2117,51 @@ async function setupCodexAuthScriptCommand(options: SetupTelegramTokenScriptOpti
     details: {
       scriptPath,
       runCommand: `bash ${shellArg(scriptPath)}`,
-      sshRunCommand: options.sshHost
-        ? `ssh -t ${shellArg(remoteSshDestination(options.sshHost, options.sshUser))} ${shellArg(`bash ${shellArg(scriptPath)}`)}`
-        : undefined,
+      sshRunCommand: remoteCodexAuthSshCommand({
+        scriptPath,
+        sshHost: options.sshHost,
+        sshUser: options.sshUser,
+        serviceUser: options.serviceUser,
+      }),
+      sshLoginCommand: remoteCodexLoginSshCommand({
+        sshHost: options.sshHost,
+        sshUser: options.sshUser,
+        serviceUser: options.serviceUser,
+        codexBinary,
+      }),
       workspace: options.workspace,
       workspaceRoot,
       repoRoot,
       configPath,
       codexBinary,
+      runAsUser: options.serviceUser ?? options.sshUser,
       validation: "bash -n passed",
       sideEffects: "wrote private temporary verification script only; no credential values read or stored",
       secretValuesPrinted: false,
     },
   };
+}
+
+function remoteCodexAuthSshCommand(input: { scriptPath: string; sshHost?: string; sshUser?: string; serviceUser?: string }): string | undefined {
+  if (!input.sshHost) return undefined;
+  const destination = remoteSshDestination(input.sshHost, input.sshUser);
+  const sameUser = !input.serviceUser || !input.sshUser || input.serviceUser === input.sshUser;
+  const serviceUser = input.serviceUser ?? input.sshUser ?? "";
+  const remoteCommand = sameUser
+    ? `bash ${shellArg(input.scriptPath)}`
+    : `home=$(getent passwd ${shellArg(serviceUser)} | cut -d: -f6) && tmp=$(mktemp "$home/brain-codex-auth.XXXXXX.sh") && install -o ${shellArg(serviceUser)} -g ${shellArg(serviceUser)} -m 700 ${shellArg(input.scriptPath)} "$tmp"; rc=$?; if [ "$rc" -eq 0 ]; then sudo -iu ${shellArg(serviceUser)} bash "$tmp"; rc=$?; fi; rm -f "$tmp"; exit "$rc"`;
+  return `ssh -t ${shellArg(destination)} ${shellArg(remoteCommand)}`;
+}
+
+function remoteCodexLoginSshCommand(input: { sshHost?: string; sshUser?: string; serviceUser?: string; codexBinary: string }): string | undefined {
+  if (!input.sshHost) return undefined;
+  const destination = remoteSshDestination(input.sshHost, input.sshUser);
+  const sameUser = !input.serviceUser || !input.sshUser || input.serviceUser === input.sshUser;
+  const serviceUser = input.serviceUser ?? input.sshUser ?? "";
+  const remoteCommand = sameUser
+    ? `${shellArg(input.codexBinary)} login --device-auth`
+    : `sudo -iu ${shellArg(serviceUser)} ${shellArg(input.codexBinary)} login --device-auth`;
+  return `ssh -t ${shellArg(destination)} ${shellArg(remoteCommand)}`;
 }
 
 function renderTelegramTokenStorageScript(input: { workspaceRoot: string; tokenFile: string; adapterConfig: string; serviceEnv: string; secretsEnv: string }): string {
@@ -2670,8 +2703,8 @@ function setupResumeWizard(details: {
           ? ["Codex is selected; credential/session verification needs an explicit private check and is not inferred from repo files."]
           : [`Selected provider is ${String(details.provider)}; verify provider auth before service start.`],
       actions: [
-        "Generate a guarded helper on the target host with: pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root>",
-        "Run the returned bash command as the same user that will run Brain.",
+        "Generate a guarded helper on the target host with: pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root> --service-user <brain-service-user>",
+        "Run the returned command as the same OS user that will run Brain; for systemd this is usually the non-root service user.",
         "If login is missing, the helper prints `codex login --device-auth` / `codex login` instructions and exits without marking auth verified.",
       ],
       resumePrompt: "If you already verified Codex auth in the previous session, confirm or recheck it and continue to service install/start.",

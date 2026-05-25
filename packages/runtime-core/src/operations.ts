@@ -14,6 +14,10 @@ export interface OperationsPlanInput {
   environmentFile?: string;
   providerKind?: string;
   entrypointKind?: string;
+  providerTransport?: string;
+  telegramTokenFile?: string;
+  telegramPollingState?: string;
+  telegramPairingState?: string;
 }
 
 export interface OperationsPlan {
@@ -49,6 +53,9 @@ export function createOperationsPlan(input: OperationsPlanInput): OperationsPlan
   const artifactRoot = path.resolve(input.artifactRoot);
   const logPath = path.resolve(input.logPath);
   const environmentFile = path.resolve(input.environmentFile ?? path.join(path.dirname(stateRoot), "config", `${serviceName}.env`));
+  const telegramTokenFile = path.resolve(input.telegramTokenFile ?? path.join(path.dirname(stateRoot), "secrets", "telegram-bot-token"));
+  const telegramPollingState = path.resolve(input.telegramPollingState ?? path.join(stateRoot, "telegram-offset.json"));
+  const telegramPairingState = path.resolve(input.telegramPairingState ?? path.join(stateRoot, "telegram-pairing"));
   const pnpm = shellWord(input.pnpmBinary ?? "pnpm");
   const brainctl = `${pnpm} --dir ${shellWord(repoPath)} run brainctl`;
   const runtimeCommand = [
@@ -65,6 +72,16 @@ export function createOperationsPlan(input: OperationsPlanInput): OperationsPlan
     artifactRoot,
     "--log",
     logPath,
+    ...(input.providerKind === "codex" ? ["--transport", input.providerTransport ?? "exec"] : []),
+    ...(input.entrypointKind === "telegram" ? [
+      "--telegram-polling",
+      "--telegram-token-file",
+      telegramTokenFile,
+      "--polling-state",
+      telegramPollingState,
+      "--telegram-pairing-state",
+      telegramPairingState,
+    ] : []),
   ];
 
   return {

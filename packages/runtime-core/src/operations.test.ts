@@ -23,6 +23,22 @@ test("operations plan renders systemd/update/rollback seams without side effects
   assert.match(unit, /ExecStart=pnpm run brainctl run/);
   assert.match(unit, /EnvironmentFile=-/);
   assert.match(unit, /Restart=on-failure/);
+
+  const liveTelegramPlan = createOperationsPlan({
+    workspaceId: "personal",
+    repoPath: "/srv/brain",
+    configPath: "/srv/brain/config/runtime.yaml",
+    stateRoot: "/var/lib/brain/state",
+    artifactRoot: "/var/lib/brain/artifacts",
+    logPath: "/var/log/brain/runtime.jsonl",
+    providerKind: "codex",
+    entrypointKind: "telegram",
+  });
+  const liveTelegramUnit = renderSystemdService(liveTelegramPlan);
+  assert.match(liveTelegramUnit, /--transport exec/);
+  assert.match(liveTelegramUnit, /--telegram-polling/);
+  assert.match(liveTelegramUnit, /--telegram-token-file \/var\/lib\/brain\/secrets\/telegram-bot-token/);
+  assert.match(liveTelegramUnit, /--polling-state \/var\/lib\/brain\/state\/telegram-offset\.json/);
 });
 
 test("guarded live validation plan defaults to no-network checks", () => {

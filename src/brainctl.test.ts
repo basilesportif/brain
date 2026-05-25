@@ -522,6 +522,15 @@ test("brainctl setup codex-auth-script verifies login before marking provider au
     assert.equal(generatedJson.details.secretValuesPrinted, false);
     assert.equal(generatedJson.details.sshRunCommand, `ssh -t brain@203.0.113.10 'bash ${script}'`);
 
+    const generatedForServiceUser = spawnBrainctl(["setup", "codex-auth-script", "--workspace", "personal", "--path", workspace, "--config", config, "--repo", root, "--output", script, "--ssh-host", "203.0.113.10", "--ssh-user", "root", "--service-user", "brain"]);
+    assert.equal(generatedForServiceUser.status, 0, generatedForServiceUser.stderr);
+    const generatedForServiceUserJson = JSON.parse(generatedForServiceUser.stdout) as { ok: boolean; details: { sshRunCommand: string; sshLoginCommand: string; runAsUser: string } };
+    assert.equal(generatedForServiceUserJson.ok, true);
+    assert.equal(generatedForServiceUserJson.details.runAsUser, "brain");
+    assert.match(generatedForServiceUserJson.details.sshRunCommand, /ssh -t root@203\.0\.113\.10/);
+    assert.match(generatedForServiceUserJson.details.sshRunCommand, /sudo -iu brain bash/);
+    assert.equal(generatedForServiceUserJson.details.sshLoginCommand, `ssh -t root@203.0.113.10 'sudo -iu brain codex login --device-auth'`);
+
     const syntax = spawnSync("bash", ["-n", script], { encoding: "utf8" });
     assert.equal(syntax.status, 0, syntax.stderr);
     const verified = spawnSync("bash", [script], { encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` } });
