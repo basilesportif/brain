@@ -393,6 +393,21 @@ test("buildCodexExecArgs keeps Codex session persistence enabled unless ephemera
   assert.equal(args.includes("--ephemeral"), false);
   assert.deepEqual(args.slice(0, 4), ["exec", "--json", "--color", "never"]);
   assert.equal(args.at(-1), "-");
+
+  const outsideGitArgs = buildCodexExecArgs({ transport: "exec", skipGitRepoCheck: true }, {
+    id: "turn_1",
+    sessionId: "session_1",
+    inboundEvent: {
+      id: "evt_1",
+      kind: "message",
+      workspaceId: "personal",
+      entrypoint: { entrypointId: "cli", channelKind: "cli" },
+      text: "hello",
+      receivedAt: "2026-05-21T00:00:00.000Z",
+    },
+    prompt: "hello",
+  });
+  assert.equal(outsideGitArgs.includes("--skip-git-repo-check"), true);
 });
 
 test("buildCodexExecArgs supports provider-native resume without turn replay persistence", () => {

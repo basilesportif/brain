@@ -1379,6 +1379,7 @@ function createCliProvider(selection: ResolvedSupervisorRuntime, options: Superv
     transport: (options.transport as CodexTransportKind | undefined) ?? "stub",
     binary: options.binary,
     cwd: options.cwd,
+    skipGitRepoCheck: true,
     appServerUrl: options.appServerUrl,
     transcriptionApiKeyRef: selection.workspace.transcription?.apiKeyRef,
   });

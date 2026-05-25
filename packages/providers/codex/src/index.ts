@@ -20,6 +20,8 @@ export interface CodexProviderOptions {
   transportImpl?: CodexTransport;
   /** Full argv after binary for exec mode. Defaults to `codex exec --json ... -`. */
   execArgs?: string[];
+  /** Allow Codex exec to run from a deployment directory that is not a git worktree. */
+  skipGitRepoCheck?: boolean;
   /** Keep Codex's own session files by default so provider resume remains possible. */
   ephemeral?: boolean;
   /** Resume a provider-native Codex exec session by id when sending turns. */
@@ -797,6 +799,7 @@ function buildCodexExecInvocationSync(options: CodexProviderOptions, turn: Provi
   const args = useResume ? ["exec", "resume", "--json"] : ["exec", "--json", "--color", "never"];
   if (options.model) args.push("--model", options.model);
   if (!useResume && options.cwd) args.push("--cd", options.cwd);
+  if (!useResume && options.skipGitRepoCheck) args.push("--skip-git-repo-check");
   if (!useResume && options.sandbox) args.push("--sandbox", options.sandbox);
   if (options.approvalPolicy) args.push("--config", `approval_policy=${JSON.stringify(options.approvalPolicy)}`);
   if (options.ephemeral) args.push("--ephemeral");
