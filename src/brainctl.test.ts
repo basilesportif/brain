@@ -361,7 +361,7 @@ console.log(JSON.stringify({ method: "turn/completed", params: { turn: { id: "tu
         completedChecks: string[];
         nextStep: { step: string };
         guidedSequence: Array<{ step: string; requiresConfirmation?: string; privateStorage?: string[] }>;
-        setupStateUpdate: { wrote: boolean; metadata: { mode: string }; state: { secretValuesStored: boolean; statuses: { codexAuth: { status: string }; telegramToken: { configured: boolean } } } };
+        setupStateUpdate: { wrote: boolean; metadata: { mode: string }; state: { secretValuesStored: boolean; nextRecommendedStep: string; statuses: { codexAuth: { status: string }; telegramToken: { configured: boolean } } } };
       };
     };
     assert.match(liveJson.summary, /Pre-live checks passed/);
@@ -375,6 +375,25 @@ console.log(JSON.stringify({ method: "turn/completed", params: { turn: { id: "tu
     assert.equal(liveJson.details.setupStateUpdate.state.statuses.codexAuth.status, "verified");
     assert.equal(liveJson.details.setupStateUpdate.state.statuses.telegramToken.configured, false);
     assert.deepEqual(await readSnapshot(healthEnvPath), { openai: false, transcription: false, other: "keep-me" });
+
+    const liveWithTelegram = spawnBrainctl(["validate", "live", "--config", config, "--workspace", "personal", "--codex-transport", "exec", "--telegram-token-env", "BRAIN_TELEGRAM_TOKEN", "--allow-live", "--run-safe"], {
+      ...env,
+      BRAIN_TELEGRAM_TOKEN: "123456:fake-token-for-metadata-only",
+      PATH: `${root}${path.delimiter}${process.env.PATH ?? ""}`,
+    });
+    assert.equal(liveWithTelegram.status, 0, liveWithTelegram.stderr);
+    assert.doesNotMatch(liveWithTelegram.stdout, /fake-token/);
+    const liveWithTelegramJson = JSON.parse(liveWithTelegram.stdout) as {
+      summary: string;
+      details: {
+        nextStep: { step: string };
+        setupStateUpdate: { state: { nextRecommendedStep: string; statuses: { telegramToken: { configured: boolean } } } };
+      };
+    };
+    assert.match(liveWithTelegramJson.summary, /Next: Install and start the Brain service/);
+    assert.equal(liveWithTelegramJson.details.nextStep.step, "install-start-service");
+    assert.equal(liveWithTelegramJson.details.setupStateUpdate.state.nextRecommendedStep, "install-start-service");
+    assert.equal(liveWithTelegramJson.details.setupStateUpdate.state.statuses.telegramToken.configured, true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

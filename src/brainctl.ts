@@ -1094,10 +1094,10 @@ async function liveValidateCommand(options: {
   });
   const safeResults = options.runSafe ? await runSafeValidationChecks(options, plan.checks.filter((check) => check.mode === "run")) : [];
   const ok = safeResults.every((result) => result.ok !== false);
-  const wizard = liveValidationWizard(options, plan, safeResults, ok);
   const setupStateUpdate = options.runSafe && ok
     ? await updateSetupProgressFromLiveValidation(config.config.workspaces[options.workspace]?.workspacePath ?? defaultWorkspaceRoot(options.workspace), options, safeResults)
     : undefined;
+  const wizard = liveValidationWizard(options, plan, safeResults, ok, setupStateUpdate);
   return {
     ok,
     summary: wizard.summary,
@@ -1145,6 +1145,7 @@ function liveValidationWizard(
   plan: ReturnType<typeof createGuardedLiveValidationPlan>,
   safeResults: SafeValidationResult[],
   ok: boolean,
+  setupStateUpdate?: Awaited<ReturnType<typeof updateSetupProgressFromLiveValidation>>,
 ) {
   const plannedChecks = plan.checks.filter((check) => check.mode === "plan");
   const completedChecks = options.runSafe
@@ -1240,17 +1241,29 @@ function liveValidationWizard(
       ],
     },
   ];
+  const nextStepId = normalizeGuidedSetupStepId(setupStateUpdate?.state?.nextRecommendedStep);
+  const nextStep = guidedSequence.find((step) => step.step === nextStepId) ?? guidedSequence[0];
+  const nextStepTitle = nextStep.title.replace(/\.$/, "");
+  const summary = ok
+    ? options.runSafe
+      ? setupStateUpdate?.state
+        ? `Pre-live checks passed. Next: ${nextStepTitle}.`
+        : "Pre-live checks passed. Connect Telegram/private data/Composio, verify Codex auth, then start the service."
+      : "Pre-live validation plan ready. Run safe checks, then connect Telegram/private data/Composio, verify Codex auth, and start the service."
+    : "Pre-live validation needs attention before Telegram setup, private data setup, Codex auth, or service start.";
   return {
-    summary: ok
-      ? options.runSafe
-        ? "Pre-live checks passed. Connect Telegram/private data/Composio, verify Codex auth, then start the service."
-        : "Pre-live validation plan ready. Run safe checks, then connect Telegram/private data/Composio, verify Codex auth, and start the service."
-      : "Pre-live validation needs attention before Telegram setup, private data setup, Codex auth, or service start.",
+    summary,
     completedChecks,
     notLiveYet,
-    nextStep: guidedSequence[0],
+    nextStep,
     guidedSequence,
   };
+}
+
+function normalizeGuidedSetupStepId(step: string | undefined): string | undefined {
+  if (step === "configure-telegram-token") return "telegram-connection";
+  if (step === "workspace-scaffold" || step === "runtime-config") return "essential-runtime-choices";
+  return step;
 }
 
 function friendlyLiveCheckName(id: string): string {
@@ -2800,14 +2813,14 @@ async function updateSetupProgressFromLiveValidation(
     ...(statuses.runtimeConfig.valid ? ["runtime-config"] : []),
     ...(statuses.codexAuth.status === "verified" ? ["configure-verify-codex-auth"] : []),
     ...(statuses.service.started ? ["install-start-service"] : []),
-    ...(statuses.telegramToken.configured ? ["configure-telegram-token"] : []),
+    ...(statuses.telegramToken.configured ? ["telegram-connection"] : []),
   ];
   const nextRecommendedStep = statuses.codexAuth.status !== "verified"
     ? "configure-verify-codex-auth"
-    : !statuses.service.started
-      ? "install-start-service"
-      : !statuses.telegramToken.configured
-        ? "configure-telegram-token"
+    : !statuses.telegramToken.configured
+      ? "telegram-connection"
+      : !statuses.service.started
+        ? "install-start-service"
         : "first-user-pairing";
   const state: SetupProgressState = {
     version: 1,
