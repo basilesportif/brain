@@ -409,8 +409,11 @@ test("brainctl setup telegram-token-script writes a syntax-checked one-use secre
   const root = await mkdtemp(path.join(tmpdir(), "brainctl-token-script-"));
   try {
     const workspace = path.join(root, "workspace");
+    const backupRepo = path.join(root, "backup-repo");
+    const config = path.join(root, "runtime.yaml");
     const script = path.join(root, "store-brain-telegram-token.sh");
     const token = "123456:abcDEF_ghi-JKLmnop";
+    await writeFile(config, testRuntimeConfig(workspace, backupRepo));
 
     const generated = spawnBrainctl(["setup", "telegram-token-script", "--workspace", "personal", "--path", workspace, "--output", script]);
     assert.equal(generated.status, 0, generated.stderr);
@@ -441,6 +444,22 @@ test("brainctl setup telegram-token-script writes a syntax-checked one-use secre
     assert.doesNotMatch(await readFile(secretsEnv, "utf8"), new RegExp(token));
     assert.match(await readFile(serviceEnv, "utf8"), new RegExp(`TELEGRAM_BOT_TOKEN_FILE=${escapeRegExp(tokenFile)}`));
     assert.match(await readFile(secretsEnv, "utf8"), new RegExp(`TELEGRAM_MAIN_CONFIG=${escapeRegExp(adapterConfig)}`));
+    for (const dir of ["logs", "artifacts", "backups", "tmp"]) await mkdir(path.join(workspace, dir), { recursive: true });
+
+    const status = spawnBrainctl(["setup", "status", "--config", config, "--workspace", "personal", "--path", workspace]);
+    assert.equal(status.status, 0, status.stderr);
+    const statusJson = JSON.parse(status.stdout) as {
+      summary: string;
+      details: {
+        secretRefs: Array<{ source: string; ref: string; present: boolean; envSource?: string; envFile?: { path: string; present: boolean } }>;
+        setupWizard: { nextIncompleteStep: { step: string } };
+      };
+    };
+    const telegramConfigRef = statusJson.details.secretRefs.find((ref) => ref.source === "entrypoint.configRef" && ref.ref === "env:TELEGRAM_MAIN_CONFIG");
+    assert.equal(telegramConfigRef?.present, true);
+    assert.equal(telegramConfigRef?.envSource, "workspace-env-file");
+    assert.equal(telegramConfigRef?.envFile?.path, serviceEnv);
+    assert.equal(statusJson.details.setupWizard.nextIncompleteStep.step, "configure-verify-codex-auth");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

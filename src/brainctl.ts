@@ -2175,7 +2175,8 @@ async function setupInspectDetails(options: SetupInspectOptions) {
     const fullPath = path.join(workspaceRoot, "config", file);
     return { file, metadata: await fileMetadata(fullPath) };
   }));
-  const secretRefs = config?.config ? await secretRefMetadata(collectConfigRefs(config.config)) : [];
+  const envSources = config?.config ? await workspaceEnvSources(config.config, { workspaceId: options.workspace, workspaceRoot }) : new Map();
+  const secretRefs = config?.config ? await secretRefMetadata(collectConfigRefs(config.config), { envSources }) : [];
   const repo = await gitMetadata(repoRoot);
   const backup = setupBackupStatus(workspace, workspaceRoot);
   const webPublishing = setupWebPublishingStatus(workspace);
@@ -2802,18 +2803,7 @@ async function secretsCheckCommand(file: string): Promise<CliResult> {
     return { ok: false, summary: "cannot check secrets until config is valid", details: { issues: validation.issues } };
   }
   const refs = collectConfigRefs(validation.config);
-  const details = [];
-  for (const ref of refs) {
-    if (ref.ref.startsWith("env:")) {
-      const key = ref.ref.slice("env:".length);
-      details.push({ ...ref, kind: "env", present: Boolean(process.env[key]), value: "redacted" });
-    } else if (ref.ref.startsWith("file:")) {
-      const filePath = ref.ref.slice("file:".length);
-      details.push({ ...ref, kind: "file", ...(await fileMetadata(filePath)) });
-    } else {
-      details.push({ ...ref, kind: "opaque", present: false, note: "non-env/file refs are accepted but not inspectable by the skeleton checker" });
-    }
-  }
+  const details = await secretRefMetadata(refs, { envSources: await workspaceEnvSources(validation.config) });
   return { ok: true, summary: refs.length === 0 ? "no secret refs declared" : "secret refs checked without printing values", details };
 }
 
@@ -3196,12 +3186,57 @@ function collectConfigRefs(config: BrainConfig): ConfigRef[] {
   return refs;
 }
 
-async function secretRefMetadata(refs: ConfigRef[]): Promise<Array<ConfigRef & Record<string, unknown>>> {
+interface EnvSecretSource {
+  path: string;
+  metadata: Awaited<ReturnType<typeof fileMetadata>>;
+  keys: Set<string>;
+}
+
+async function workspaceEnvSources(config: BrainConfig, override?: { workspaceId: string; workspaceRoot: string }): Promise<Map<string, EnvSecretSource[]>> {
+  const result = new Map<string, EnvSecretSource[]>();
+  await Promise.all(Object.entries(config.workspaces).map(async ([workspaceId, workspace]) => {
+    const workspaceRoot = path.resolve(override?.workspaceId === workspaceId ? override.workspaceRoot : workspace.workspacePath ?? defaultWorkspaceRoot(workspaceId));
+    const candidates = [
+      path.join(workspaceRoot, "config", `brain-${workspaceId}.env`),
+      path.join(workspaceRoot, "secrets", "secrets.env"),
+    ];
+    result.set(workspaceId, await Promise.all(candidates.map(readEnvSecretSource)));
+  }));
+  return result;
+}
+
+async function readEnvSecretSource(filePath: string): Promise<EnvSecretSource> {
+  const metadata = await fileMetadata(filePath);
+  const keys = new Set<string>();
+  if (metadata.present) {
+    try {
+      const text = await readFile(filePath, "utf8");
+      for (const line of text.split(/\r?\n/)) {
+        const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+        if (match) keys.add(match[1]);
+      }
+    } catch {
+      // Metadata is still useful even if the env file cannot be parsed.
+    }
+  }
+  return { path: filePath, metadata, keys };
+}
+
+async function secretRefMetadata(refs: ConfigRef[], options: { envSources?: Map<string, EnvSecretSource[]> } = {}): Promise<Array<ConfigRef & Record<string, unknown>>> {
   const details = [];
   for (const ref of refs) {
     if (ref.ref.startsWith("env:")) {
       const key = ref.ref.slice("env:".length);
-      details.push({ ...ref, kind: "env", present: Boolean(process.env[key]), value: "redacted" });
+      const processPresent = Boolean(process.env[key]);
+      const envFile = options.envSources?.get(ref.workspaceId)?.find((source) => source.keys.has(key));
+      details.push({
+        ...ref,
+        kind: "env",
+        present: processPresent || Boolean(envFile),
+        envSource: processPresent ? "process" : envFile ? "workspace-env-file" : "missing",
+        envFile: envFile ? envFile.metadata : undefined,
+        value: "redacted",
+      });
     } else if (ref.ref.startsWith("file:")) {
       const filePath = ref.ref.slice("file:".length);
       details.push({ ...ref, kind: "file", ...(await fileMetadata(filePath)) });
