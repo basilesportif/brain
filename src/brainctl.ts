@@ -1378,7 +1378,9 @@ function createCliProvider(selection: ResolvedSupervisorRuntime, options: Superv
   if (provider === "codex") return createCodexProvider({
     transport: (options.transport as CodexTransportKind | undefined) ?? "stub",
     binary: options.binary,
-    cwd: options.cwd ?? process.cwd(),
+    cwd: options.cwd ?? selection.workspace.workspacePath ?? process.cwd(),
+    sandbox: "workspace-write",
+    approvalPolicy: "never",
     skipGitRepoCheck: true,
     appServerUrl: options.appServerUrl,
     transcriptionApiKeyRef: selection.workspace.transcription?.apiKeyRef,
@@ -1620,7 +1622,7 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-const WORKSPACE_DIRS = ["config", "secrets", "logs", "artifacts", "state", "backups", "tmp"] as const;
+const WORKSPACE_DIRS = ["config", "secrets", "logs", "artifacts", "state", "backups", "tmp", "projects", "notes", "documents", path.join("documents", "metadata")] as const;
 const SETUP_PROGRESS_FILE = "setup-progress.json";
 const LOCAL_SETUP_CONTEXT_RELATIVE_PATH = path.join("private", "setup-context.json");
 const PRIVATE_WORKSPACE_GITIGNORE = [
@@ -1833,8 +1835,12 @@ function conciseSetupFlow() {
         prompt: "Connect Telegram bot and private token ref; do not start live traffic yet.",
       },
       {
+        step: "personal-workspace",
+        prompt: "Create a private personal workspace with projects, notes, and document metadata paths that can be backed up or committed privately.",
+      },
+      {
         step: "private-data-repo",
-        prompt: "Pull or initialize the private data/backup repo.",
+        prompt: "Pull or initialize the private data/backup repo before relying on project memory.",
       },
       {
         step: "composio-accounts",
@@ -1844,6 +1850,7 @@ function conciseSetupFlow() {
     orderingNotes: [
       "Codex auth is an explicit step whenever the provider is Codex.",
       "Verify Codex auth before starting the service or accepting live Telegram traffic.",
+      "Create the personal workspace paths before the first live provider turn so project questions have an inspectable source.",
       "Keep OpenAI transcription, web publishing, backup tuning, and first-user pairing as follow-up steps unless explicitly requested now.",
     ],
   };
@@ -2642,6 +2649,7 @@ function setupResumeWizard(details: {
   setupState?: Awaited<ReturnType<typeof readSetupProgress>>;
 }) {
   const workspaceReady = details.workspaceDirectory.present && WORKSPACE_DIRS.every((dir) => details.directories[dir]?.present);
+  const personalWorkspaceReady = ["projects", "notes", "documents", path.join("documents", "metadata")].every((dir) => details.directories[dir]?.present);
   const runtimeConfigReady = details.config.present && details.config.valid && details.provider !== "missing" && details.primaryEntrypointId !== "missing";
   const telegramEntrypoint = details.entrypoints.find((entrypoint) => entrypoint.kind === "telegram" && entrypoint.enabled);
   const telegramSecretRefPresent = Boolean(telegramEntrypoint?.configRefPresent && details.secretRefs.some((ref) => ref.source === "entrypoint.configRef" && ref.present === true));
@@ -2662,6 +2670,15 @@ function setupResumeWizard(details: {
         : ["Telegram token/private entrypoint secret metadata is missing or not inspectable."],
       botFatherSteps: botFatherSteps(),
       resumePrompt: "Create or choose the bot, store its token only as a private secret ref, and validate metadata before live polling.",
+    },
+    {
+      step: "personal-workspace",
+      title: "Create personal workspace memory.",
+      complete: personalWorkspaceReady,
+      evidence: personalWorkspaceReady
+        ? [`Project, notes, and document metadata directories exist under ${details.workspaceRoot}.`]
+        : ["Project, notes, or document metadata directories are missing; create them before the first live provider turn."],
+      resumePrompt: "Create the private personal workspace scaffold, then ask whether the user wants to initialize a private Git backup for project memory.",
     },
     {
       step: "private-data-repo",
@@ -3037,25 +3054,25 @@ async function packValidateCommand(dir: string): Promise<CliResult> {
   };
 }
 
-async function configuredTranscriptionApiKeyRef(options: { config?: string; workspace: string }): Promise<{ ok: true; transcriptionApiKeyRef?: string } | { ok: false; result: CliResult }> {
-  if (!options.config) return { ok: true };
+async function configuredCodexContext(options: { config?: string; workspace: string; cwd?: string }): Promise<{ ok: true; transcriptionApiKeyRef?: string; cwd: string } | { ok: false; result: CliResult }> {
+  if (!options.config) return { ok: true, cwd: options.cwd ?? process.cwd() };
   const loaded = await loadValidConfig(options.config);
   if (!loaded.ok || !loaded.config) {
     return { ok: false, result: { ok: false, summary: "cannot load runtime config for provider check", details: loaded.details } };
   }
   const workspace = loaded.config.workspaces[options.workspace];
   if (!workspace) {
-    return { ok: false, result: { ok: false, summary: `workspace not found: ${options.workspace}`, details: { available: Object.keys(loaded.config.workspaces) } } };
+      return { ok: false, result: { ok: false, summary: `workspace not found: ${options.workspace}`, details: { available: Object.keys(loaded.config.workspaces) } } };
   }
-  return { ok: true, transcriptionApiKeyRef: workspace.transcription?.apiKeyRef };
+  return { ok: true, transcriptionApiKeyRef: workspace.transcription?.apiKeyRef, cwd: options.cwd ?? workspace.workspacePath ?? process.cwd() };
 }
 
 async function providerCheckCommand(providerId: string, options: { config?: string; workspace: string; transport?: string; binary?: string; cwd?: string; appServerUrl?: string; timeoutMs?: number }): Promise<CliResult> {
   const normalized = providerId.toLowerCase();
-  const transcription = normalized === "codex" ? await configuredTranscriptionApiKeyRef(options) : { ok: true as const, transcriptionApiKeyRef: undefined };
-  if (!transcription.ok) return transcription.result;
+  const codexContext = normalized === "codex" ? await configuredCodexContext(options) : { ok: true as const, transcriptionApiKeyRef: undefined, cwd: options.cwd ?? process.cwd() };
+  if (!codexContext.ok) return codexContext.result;
   const adapter = normalized === "codex"
-    ? createCodexProvider({ transport: (options.transport as CodexTransportKind | undefined) ?? "stub", binary: options.binary, cwd: options.cwd ?? process.cwd(), skipGitRepoCheck: true, appServerUrl: options.appServerUrl, timeoutMs: options.timeoutMs, appServerStartupTimeoutMs: options.timeoutMs, transcriptionApiKeyRef: transcription.transcriptionApiKeyRef })
+    ? createCodexProvider({ transport: (options.transport as CodexTransportKind | undefined) ?? "stub", binary: options.binary, cwd: codexContext.cwd, sandbox: "workspace-write", approvalPolicy: "never", skipGitRepoCheck: true, appServerUrl: options.appServerUrl, timeoutMs: options.timeoutMs, appServerStartupTimeoutMs: options.timeoutMs, transcriptionApiKeyRef: codexContext.transcriptionApiKeyRef })
     : normalized === "claude-code" || normalized === "claude"
       ? createClaudeCodeProvider({ transport: (options.transport as ClaudeCodeTransportKind | undefined) ?? "stub" })
       : undefined;
@@ -3090,10 +3107,10 @@ async function providerSmokeCommand(providerId: string, options: { config?: stri
     };
   }
   const normalized = providerId.toLowerCase();
-  const transcription = normalized === "codex" ? await configuredTranscriptionApiKeyRef(options) : { ok: true as const, transcriptionApiKeyRef: undefined };
-  if (!transcription.ok) return transcription.result;
+  const codexContext = normalized === "codex" ? await configuredCodexContext(options) : { ok: true as const, transcriptionApiKeyRef: undefined, cwd: options.cwd ?? process.cwd() };
+  if (!codexContext.ok) return codexContext.result;
   const adapter = normalized === "codex"
-    ? createCodexProvider({ transport: transport as CodexTransportKind, binary: options.binary, cwd: options.cwd ?? process.cwd(), skipGitRepoCheck: true, appServerUrl: options.appServerUrl, timeoutMs: options.timeoutMs, appServerStartupTimeoutMs: options.timeoutMs, transcriptionApiKeyRef: transcription.transcriptionApiKeyRef })
+    ? createCodexProvider({ transport: transport as CodexTransportKind, binary: options.binary, cwd: codexContext.cwd, sandbox: "workspace-write", approvalPolicy: "never", skipGitRepoCheck: true, appServerUrl: options.appServerUrl, timeoutMs: options.timeoutMs, appServerStartupTimeoutMs: options.timeoutMs, transcriptionApiKeyRef: codexContext.transcriptionApiKeyRef })
     : normalized === "claude-code" || normalized === "claude"
       ? createClaudeCodeProvider({ transport: transport as ClaudeCodeTransportKind })
       : undefined;

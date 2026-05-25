@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { FakeEntrypointAdapter } from "@brain/entrypoint-protocol";
-import { BrainRuntime, EchoProviderAdapter, FakeProviderAdapter, InMemorySubagentJobStore, RuntimeEntrypointBridge, StaticSubagentExecutor, SubagentLifecycle, type ProviderAdapter, type ProviderSession, type ProviderTurn, type ProviderTurnEvent, type ProviderHealth } from "./index.js";
+import { BrainRuntime, EchoProviderAdapter, FakeProviderAdapter, InMemorySubagentJobStore, RuntimeEntrypointBridge, StaticSubagentExecutor, SubagentLifecycle, buildPrompt, type ProviderAdapter, type ProviderSession, type ProviderTurn, type ProviderTurnEvent, type ProviderHealth } from "./index.js";
 
 test("BrainRuntime turns provider final text into origin-routed outbound action", async () => {
   const runtime = new BrainRuntime({
@@ -27,6 +27,28 @@ test("BrainRuntime turns provider final text into origin-routed outbound action"
   assert.equal(result.actions[0]?.target?.entrypointId, "telegram-main");
   assert.match(result.cleanText, /Echo: hello/);
   assert.deepEqual(result.subagentJobIds, []);
+});
+
+test("buildPrompt exposes private workspace project memory paths", () => {
+  const prompt = buildPrompt({
+    id: "evt_projects",
+    kind: "message",
+    workspaceId: "personal",
+    entrypoint: { entrypointId: "telegram-main", channelKind: "telegram" },
+    text: "do I have projects?",
+    receivedAt: "2026-05-21T00:00:00.000Z",
+  }, {
+    workspacePath: "/home/brain/.brain/workspace",
+    primaryEntrypointId: "telegram-main",
+    enabledEntrypoints: { "telegram-main": { kind: "telegram", enabled: true } },
+    outboundDefaults: { route: "originating-entrypoint", allowCrossEntrypointReplies: false },
+    promptContext: { includeActiveEntrypointMetadata: true, exposeChannelSecrets: false },
+  });
+
+  assert.match(prompt, /projects\/index\.md/);
+  assert.match(prompt, /documents\/metadata/);
+  assert.match(prompt, /inspect the private workspace paths/);
+  assert.match(prompt, /do not claim no project list exists from runtime metadata alone/);
 });
 
 test("BrainRuntime consumes dispatch_subagent actions through lifecycle port", async () => {

@@ -177,8 +177,19 @@ export class BrainRuntime {
 
 export function buildPrompt(event: EntryPointInboundEvent, workspace: WorkspaceConfig): string {
   const entrypoint = workspace.enabledEntrypoints[event.entrypoint.entrypointId];
+  const workspacePath = workspace.workspacePath;
   const activeMetadata = {
     workspaceId: event.workspaceId,
+    workspace: {
+      path: workspacePath,
+      projectIndexCandidates: [
+        `${workspacePath}/projects/index.md`,
+        `${workspacePath}/projects/projects.md`,
+        `${workspacePath}/projects.json`,
+      ],
+      notesPath: `${workspacePath}/notes`,
+      documentsMetadataPath: `${workspacePath}/documents/metadata`,
+    },
     activeEntrypoint: {
       entrypointId: event.entrypoint.entrypointId,
       channelKind: event.entrypoint.channelKind,
@@ -191,6 +202,8 @@ export function buildPrompt(event: EntryPointInboundEvent, workspace: WorkspaceC
     "You are Brain, a provider-neutral assistant runtime.",
     "Use generic entrypoint, inbound event, outbound action, and artifact language.",
     "Do not expose channel secrets or raw adapter credentials.",
+    "When asked about projects, notes, documents, or personal workspace state, inspect the private workspace paths in Active runtime context before answering.",
+    "If filesystem inspection fails, report the exact command or path failure; do not claim no project list exists from runtime metadata alone.",
     `Active runtime context: ${JSON.stringify(activeMetadata)}`,
     event.text ? `Inbound text: ${event.text}` : "Inbound text: (none)",
   ].join("\n");

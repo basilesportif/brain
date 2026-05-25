@@ -30,6 +30,60 @@ test("BrainSupervisor dispatches streaming status/reaction actions before final 
   assert.equal(entrypoint.dispatchedActions.map((action) => action.type).join(","), "show_status,react,send_text");
 });
 
+test("BrainSupervisor logs failed outbound dispatches above debug", async () => {
+  const logs: Array<{ level: string; message: string; raw?: unknown }> = [];
+  const entrypoint = new FakeEntrypointAdapter({
+    workspaceId: "personal",
+    entrypointId: "fake-main",
+    dispatchStatus: "failed",
+  });
+  entrypoint.enqueueText("work", { conversationId: "test" });
+  entrypoint.close();
+  const runtime = new BrainRuntime({
+    workspaceId: "personal",
+    workspace,
+    provider: new FakeProviderAdapter([{ type: "final", text: "Done" }]),
+  });
+  const supervisor = new BrainSupervisor({
+    runtime,
+    entrypoint,
+    logger: (record) => { logs.push({ level: record.level, message: record.message, raw: record.raw }); },
+  });
+
+  await supervisor.run({ maxEvents: 1 });
+
+  const dispatchLog = logs.find((record) => record.message === "Dispatched outbound action: send_text");
+  assert.equal(dispatchLog?.level, "error");
+  const raw = dispatchLog?.raw as { status?: string; target?: { route?: string; entrypointId?: string; conversationId?: string }; error?: string };
+  assert.equal(raw.status, "failed");
+  assert.equal(raw.target?.route, "originating-entrypoint");
+  assert.equal(raw.target?.entrypointId, "fake-main");
+  assert.equal(raw.target?.conversationId, "test");
+  assert.equal(raw.error, undefined);
+});
+
+test("BrainSupervisor logs successful outbound dispatches at info", async () => {
+  const logs: Array<{ level: string; message: string }> = [];
+  const entrypoint = new FakeEntrypointAdapter({ workspaceId: "personal", entrypointId: "fake-main" });
+  entrypoint.enqueueText("work", { conversationId: "test" });
+  entrypoint.close();
+  const runtime = new BrainRuntime({
+    workspaceId: "personal",
+    workspace,
+    provider: new FakeProviderAdapter([{ type: "final", text: "Done" }]),
+  });
+  const supervisor = new BrainSupervisor({
+    runtime,
+    entrypoint,
+    logger: (record) => { logs.push({ level: record.level, message: record.message }); },
+  });
+
+  await supervisor.run({ maxEvents: 1 });
+
+  const dispatchLog = logs.find((record) => record.message === "Dispatched outbound action: send_text");
+  assert.equal(dispatchLog?.level, "info");
+});
+
 test("BrainSupervisor delivers send_to_user subagent terminal results to the originating target", async () => {
   const entrypoint = new FakeEntrypointAdapter({ workspaceId: "personal", entrypointId: "fake-main" });
   const runtime = new BrainRuntime({ workspaceId: "personal", workspace, provider: new FakeProviderAdapter() });

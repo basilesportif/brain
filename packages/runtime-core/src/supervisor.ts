@@ -192,7 +192,16 @@ export class BrainSupervisor {
       const routed = routeOutboundToOrigin(event, action);
       const result = await this.options.entrypoint.dispatch(routed);
       results.push(result);
-      await this.log("debug", "entrypoint", `Dispatched outbound action: ${routed.type}`, event.id, { status: result.status, target: routed.target });
+      const dispatchLevel = result.status === "sent" || result.status === "queued"
+        ? "info"
+        : result.status === "failed"
+          ? "error"
+          : "warn";
+      await this.log(dispatchLevel, "entrypoint", `Dispatched outbound action: ${routed.type}`, event.id, {
+        status: result.status,
+        target: routed.target,
+        error: result.error,
+      });
     }
     return results;
   }

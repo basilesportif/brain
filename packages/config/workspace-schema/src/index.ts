@@ -27,7 +27,7 @@ export const promptContextSchema = z.object({
 export const backupStrategySchema = z.enum(["none", "local-snapshot", "private-git"]);
 export type BackupStrategy = z.infer<typeof backupStrategySchema>;
 
-export const defaultBackupInclude = ["config/**", "state/**", "artifacts/metadata/**"];
+export const defaultBackupInclude = ["config/**", "state/**", "projects/**", "notes/**", "documents/metadata/**", "artifacts/metadata/**"];
 export const defaultBackupExclude = [
   "secrets/**",
   "logs/**",

@@ -37,6 +37,9 @@ workspaces:
         include:
           - config/**
           - state/**
+          - projects/**
+          - notes/**
+          - documents/metadata/**
           - artifacts/metadata/**
         exclude:
           - secrets/**

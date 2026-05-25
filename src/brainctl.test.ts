@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { tmpdir, userInfo } from "node:os";
 import path from "node:path";
@@ -312,6 +312,7 @@ test("brainctl Codex provider CLI paths strip configured transcription env refs"
     const fakeCodex = path.join(root, "codex");
     const healthEnvPath = path.join(root, "health-env.json");
     const turnEnvPath = path.join(root, "turn-env.json");
+    const turnInvocationPath = path.join(root, "turn-invocation.json");
     await mkdir(workspace, { recursive: true });
     await writeFile(config, testRuntimeConfig(workspace, backupRepo, { transcriptionEnabled: true, transcriptionApiKeyRef: "env:BRAIN_TRANSCRIPTION_KEY" }));
     await writeFile(fakeCodex, `#!/usr/bin/env node
@@ -327,6 +328,7 @@ if (process.argv.includes("--version")) {
   process.exit(0);
 }
 await writeFile(${JSON.stringify(turnEnvPath)}, snapshot());
+await writeFile(${JSON.stringify(turnInvocationPath)}, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd() }));
 console.log(JSON.stringify({ method: "item/agentMessage/delta", params: { delta: "ok" } }));
 console.log(JSON.stringify({ method: "turn/completed", params: { turn: { id: "turn_fake", status: "completed", items: [] } } }));
 `);
@@ -348,6 +350,14 @@ console.log(JSON.stringify({ method: "turn/completed", params: { turn: { id: "tu
     assert.equal(providerSmoke.status, 0, providerSmoke.stderr);
     assert.doesNotMatch(providerSmoke.stdout, /sk-test-/);
     assert.deepEqual(await readSnapshot(turnEnvPath), { openai: false, transcription: false, other: "keep-me" });
+    const invocation = JSON.parse(await readFile(turnInvocationPath, "utf8")) as { argv: string[]; cwd: string };
+    assert.equal(invocation.cwd, await realpath(workspace));
+    assert.ok(invocation.argv.includes("--cd"));
+    assert.equal(invocation.argv[invocation.argv.indexOf("--cd") + 1], workspace);
+    assert.ok(invocation.argv.includes("--sandbox"));
+    assert.equal(invocation.argv[invocation.argv.indexOf("--sandbox") + 1], "workspace-write");
+    assert.ok(invocation.argv.includes("--config"));
+    assert.ok(invocation.argv.includes("approval_policy=\"never\""));
 
     const live = spawnBrainctl(["validate", "live", "--config", config, "--workspace", "personal", "--codex-transport", "exec", "--allow-live", "--run-safe"], {
       ...env,
@@ -464,7 +474,7 @@ test("brainctl setup telegram-token-script writes a syntax-checked one-use secre
     assert.doesNotMatch(await readFile(secretsEnv, "utf8"), new RegExp(token));
     assert.match(await readFile(serviceEnv, "utf8"), new RegExp(`TELEGRAM_BOT_TOKEN_FILE=${escapeRegExp(tokenFile)}`));
     assert.match(await readFile(secretsEnv, "utf8"), new RegExp(`TELEGRAM_MAIN_CONFIG=${escapeRegExp(adapterConfig)}`));
-    for (const dir of ["logs", "artifacts", "backups", "tmp"]) await mkdir(path.join(workspace, dir), { recursive: true });
+    for (const dir of ["logs", "artifacts", "backups", "tmp", "projects", "notes", "documents", path.join("documents", "metadata")]) await mkdir(path.join(workspace, dir), { recursive: true });
 
     const status = spawnBrainctl(["setup", "status", "--config", config, "--workspace", "personal", "--path", workspace]);
     assert.equal(status.status, 0, status.stderr);
@@ -873,9 +883,10 @@ test("brainctl setup defaults renders concise remote choices and persists ignore
     assert.equal(parsed.details.decisions.find((item) => item.decision === "Remote SSH user")?.default, "root");
     assert.equal(parsed.details.decisions.find((item) => item.decision === "Source checkout")?.default, "/home/brain/brain");
     assert.equal(parsed.details.decisions.find((item) => item.decision === "Private workspace")?.default, "/home/brain/.brain/workspace");
-    assert.deepEqual(parsed.details.setupFlow.coreSteps.map((item) => item.step), ["essential-runtime-choices", "configure-verify-codex-auth", "telegram-connection", "private-data-repo", "composio-accounts"]);
+    assert.deepEqual(parsed.details.setupFlow.coreSteps.map((item) => item.step), ["essential-runtime-choices", "configure-verify-codex-auth", "telegram-connection", "personal-workspace", "private-data-repo", "composio-accounts"]);
     assert.ok(parsed.details.setupFlow.orderingNotes.some((item) => /provider is Codex/.test(item)));
     assert.ok(parsed.details.setupFlow.orderingNotes.some((item) => /Codex auth before starting the service/.test(item)));
+    assert.ok(parsed.details.setupFlow.orderingNotes.some((item) => /project questions/.test(item)));
     assert.ok(parsed.details.safety.some((item) => /outside git/.test(item)));
     assert.equal(parsed.details.localSetupContext.wrote, true);
     assert.equal(parsed.details.localSetupContext.mode, "0600");

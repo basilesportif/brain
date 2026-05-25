@@ -56,6 +56,15 @@ or "start the service" unless the complete command is included immediately.
 Ask confirmation questions in plain English and accept ordinary yes/no answers;
 do not require exact reply text unless the user must run a command verbatim.
 
+Initial setup must create an inspectable personal workspace before live traffic:
+`projects/`, `notes/`, `documents/`, and `documents/metadata/` under the private
+workspace path. Codex should run from that private workspace path for live Brain
+turns, with non-interactive approval behavior, so questions like "do I have
+projects?" can inspect project memory files instead of answering from active
+entrypoint metadata alone. Ask whether the user wants to initialize or connect a
+private Git backup for this personal workspace memory; never commit secrets,
+logs, Telegram IDs, transcripts, or provider session material.
+
 If the wizard needs a clean resume state, run:
 
 ```bash
@@ -157,26 +166,31 @@ command lists unless the user asks for details or `brainctl setup defaults
    - if no bot exists, show the BotFather steps;
    - store only a private token ref, not the token value;
    - do not start polling/webhooks yet.
-2. Pull or initialize the private data/backup repo:
+2. Create personal workspace memory:
+   - create `projects/`, `notes/`, `documents/`, and `documents/metadata/`;
+   - tell the user these are the files Brain can inspect for project memory;
+   - ask whether to initialize or connect a private Git backup so non-secret
+     project memory can be committed privately.
+3. Pull or initialize the private data/backup repo:
    - prefer an existing private-git remote when supplied;
    - otherwise initialize a private local repo/path and add a remote later;
    - keep secrets, logs, tmp, and caches excluded by default.
-3. Connect Composio accounts if needed:
+4. Connect Composio accounts if needed:
    - collect only env/file refs for the Composio API key and connected-account
      metadata;
    - skip for a minimal Telegram + Codex setup.
-4. What workspace name should Brain use? Default: `personal`.
-5. Which provider should execute assistant work?
+5. What workspace name should Brain use? Default: `personal`.
+6. Which provider should execute assistant work?
    - `codex` — Codex provider; Codex app-server details stay behind the
      provider adapter boundary.
    - `claude-code` — Claude Code provider placeholder/seam; no real Claude
      Code wiring is installed in this setup flow.
-6. How will the chosen provider be authenticated?
+7. How will the chosen provider be authenticated?
    - Existing CLI/session on this machine or server.
    - API key or token stored in a private workspace secret file or host secret
      store.
    - Not ready yet; create placeholders and report unauthenticated state.
-7. After the core choices are captured, configure or verify Codex auth before
+8. After the core choices are captured, configure or verify Codex auth before
    service start or live Telegram traffic:
    first generate a target-host helper with
    `pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <workspace-name> --repo <repo-root> --ssh-host <host> --ssh-user <ssh-login-user> --service-user <brain-service-user>`.
@@ -196,35 +210,36 @@ command lists unless the user asks for details or `brainctl setup defaults
    workspace/server env file or host secret store, and run only redacted
    metadata/health checks unless the user explicitly allows live provider
    checks.
-8. Review and install/start the Brain service only after Telegram token storage,
+9. Review and install/start the Brain service only after Telegram token storage,
    private data setup, and Codex auth are ready:
    render the systemd plan, confirm service user, working directory, private env
    file, and unit path, and require explicit confirmation before any `sudo
    systemctl` install/enable/start.
-9. Optional follow-up: which Telegram admin bootstrap should be used? Default:
+10. Optional follow-up: which Telegram admin bootstrap should be used? Default:
    first-user pairing,
    where the first Telegram user/chat to message the newly configured bot is
    persisted as the paired/admin identity in private state. Use a user-supplied
    explicit allowlist or optional `/pair` code only if requested.
-10. Optional follow-up: should voice/audio transcription be enabled for Telegram attachments?
+11. Optional follow-up: should voice/audio transcription be enabled for Telegram attachments?
    Default: no. If yes, use `transcription.provider: openai`, store the OpenAI
    key only as a private ref such as `env:OPENAI_API_KEY` or `file:/...`, choose
    the model, and scope it to `telegram-main` with `voice`/`audio` attachment
    kinds. Never paste or commit the key.
-11. Optional follow-up: is generated web/page publishing needed now? Default: no; keep web preview
+12. Optional follow-up: is generated web/page publishing needed now? Default: no; keep web preview
    disabled unless the user explicitly enables it. If yes, choose domain vs
    direct IP, public base URL, publish root, and Caddy/reverse-proxy plan. DNS
    is needed for a domain and not needed for direct-IP publishing; setup never
    changes DNS.
-12. Optional follow-up: tune backup strategy details after the initial private
+13. Optional follow-up: tune backup strategy details after the initial private
     data repo exists. Safe defaults exclude secrets, logs, tmp, and caches.
 
 ### Local-only questions
 
 1. Which private workspace directory should be used? Suggested default:
    `~/.brain/workspace`.
-2. Should setup create local config, secrets, logs, artifacts, backups, and
-   state directories there with restrictive permissions?
+2. Should setup create local config, secrets, logs, artifacts, backups, state,
+   projects, notes, and document metadata directories there with restrictive
+   permissions?
 
 ### Remote-only questions
 
@@ -285,7 +300,8 @@ on private workspace knowledge.
 - Repo clone path, branch/ref, and remote URL are known.
 - Private workspace path is outside the source checkout and outside git.
 - Workspace directories exist for `config/`, `secrets/`, `logs/`, `artifacts/`,
-  `state/`, `backups/`, and `tmp/` with restrictive ownership/permissions.
+  `state/`, `backups/`, `tmp/`, `projects/`, `notes/`, `documents/`, and
+  `documents/metadata/` with restrictive ownership/permissions.
 - Runtime config starts from `examples/config/runtime.yaml` or TOML and contains
   one `primaryEntrypointId` in `single-primary` mode.
 

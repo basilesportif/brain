@@ -52,7 +52,7 @@ workspaces:
         repoPath: /home/brain/.brain/workspace/backups/private-git
         remote: git@github.com:example/private-brain-backup.git
         branch: main
-        include: [config/**, state/**, artifacts/metadata/**]
+        include: [config/**, state/**, projects/**, notes/**, documents/metadata/**, artifacts/metadata/**]
         exclude: [secrets/**, logs/**, tmp/**, cache/**, caches/**, "**/.cache/**", "**/node_modules/**", "**/*.log"]
     webPublishing:
       enabled: false
@@ -130,7 +130,7 @@ strategy = "private-git"
 repoPath = "/home/brain/.brain/workspace/backups/private-git"
 remote = "git@github.com:example/private-brain-backup.git"
 branch = "main"
-include = ["config/**", "state/**", "artifacts/metadata/**"]
+include = ["config/**", "state/**", "projects/**", "notes/**", "documents/metadata/**", "artifacts/metadata/**"]
 exclude = ["secrets/**", "logs/**", "tmp/**", "cache/**", "caches/**", "**/.cache/**", "**/node_modules/**", "**/*.log"]
 
 [workspaces.personal.webPublishing]

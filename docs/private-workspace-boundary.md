@@ -18,6 +18,10 @@ Saved files and PDFs:
 
 - Store private file bytes under a configured private runtime directory such as `private/documents/files/`, not under assistant packs, docs, examples, apps, or packages.
 - Store only lightweight document metadata under the same private boundary, for example `private/documents/metadata.jsonl`.
+- Store project memory under the configured private workspace, typically
+  `projects/`, `notes/`, and `documents/metadata/`. These paths may be committed
+  only to the user's private workspace backup repo, never to the public source
+  checkout.
 - Keep `private/`, `workspace/`, and `data/` ignored except for their README files.
 
 Setup and backup inspection:
