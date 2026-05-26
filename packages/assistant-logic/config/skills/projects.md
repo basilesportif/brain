@@ -1,7 +1,7 @@
 # Projects Skill
 
 > All `workspace/` references below resolve to the active assistant workspace.
-> Brain integration: run these scripts through `pnpm run brainctl workspace run --path <workspace> <script>.js -- <args>` from the Brain checkout. Historical `node scripts/...` examples below map to the same in-repo scripts under `packages/assistant-logic/scripts/`.
+> Brain integration: run these commands through `pnpm run brainctl workspace run --path <workspace> <script>.js -- <args>` from the Brain checkout. Historical `node scripts/...` examples below map to compiled native CLI commands under `packages/assistant-logic/dist/cli/`.
 
 ## Usage
 
@@ -20,64 +20,64 @@ If `workspace/instructions/skills/projects.md` exists, read it as additive user-
 
 ## Commands
 
-All scripts output JSON to stdout. Run from the project root.
+All commands output JSON to stdout. Run them from the Brain checkout through `brainctl workspace run`.
 
 ### Add a project
 
 ```bash
 # Quick-add (just a name)
-node scripts/project-add.js --name "Tax Strategy 2026"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-add.js -- --name "Tax Strategy 2026"
 
 # Full details
-node scripts/project-add.js --name "Tax Strategy 2026" --description "Annual tax planning and filing" --status active --target-date "2026-04-15" --person-id ct_abc123 --business-id bz_def456 --notes "Initial setup"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-add.js -- --name "Tax Strategy 2026" --description "Annual tax planning and filing" --status active --target-date "2026-04-15" --person-id ct_abc123 --business-id bz_def456 --notes "Initial setup"
 ```
 
 ### Update a project
 
 ```bash
 # Update any field(s) — only provided fields change
-node scripts/project-update.js --id pj_abc123 --name "New Name" --status on-hold --target-date "2026-06-01"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-update.js -- --id pj_abc123 --name "New Name" --status on-hold --target-date "2026-06-01"
 
 # Add/remove linked people
-node scripts/project-update.js --id pj_abc123 --add-person ct_xxx --remove-person ct_yyy
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-update.js -- --id pj_abc123 --add-person ct_xxx --remove-person ct_yyy
 
 # Add/remove linked businesses
-node scripts/project-update.js --id pj_abc123 --add-business bz_xxx --remove-business bz_yyy
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-update.js -- --id pj_abc123 --add-business bz_xxx --remove-business bz_yyy
 
 # Archive (soft-delete)
-node scripts/project-update.js --id pj_abc123 --status archived
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-update.js -- --id pj_abc123 --status archived
 ```
 
 ### List projects
 
 ```bash
 # All non-archived projects
-node scripts/project-list.js
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-list.js --
 
 # Filter by status
-node scripts/project-list.js --status active
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-list.js -- --status active
 
 # Search by name/description
-node scripts/project-list.js --query "tax"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-list.js -- --query "tax"
 
 # Include archived
-node scripts/project-list.js --all
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-list.js -- --all
 
 # Sort by field (name/createdAt/updatedAt/targetDate)
-node scripts/project-list.js --sort targetDate
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-list.js -- --sort targetDate
 ```
 
 ### View full project detail
 
 ```bash
 # Shows project + linked people (names from CRM) + linked businesses (names from CRM) + linked todos + notes + resources
-node scripts/project-view.js --id pj_abc123
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-view.js -- --id pj_abc123
 ```
 
 ### Add a note
 
 ```bash
-node scripts/project-note.js --id pj_abc123 --text "Called accountant, confirmed structure"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-note.js -- --id pj_abc123 --text "Called accountant, confirmed structure"
 ```
 
 ### Remove redundant notes
@@ -90,44 +90,44 @@ Before deleting, identify the exact notes to remove, verify that any unique cont
 
 ```bash
 # Add a resource
-node scripts/project-resource.js --id pj_abc123 --add --label "Tax guide" --url "https://example.com/guide"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-resource.js -- --id pj_abc123 --add --label "Tax guide" --url "https://example.com/guide"
 
 # Remove by index
-node scripts/project-resource.js --id pj_abc123 --remove --index 0
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-resource.js -- --id pj_abc123 --remove --index 0
 
 # Remove by label
-node scripts/project-resource.js --id pj_abc123 --remove --label "Tax guide"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-resource.js -- --id pj_abc123 --remove --label "Tax guide"
 
 # List all resources
-node scripts/project-resource.js --id pj_abc123 --list
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-resource.js -- --id pj_abc123 --list
 ```
 
 ### Manage project tasks
 
 ```bash
 # Add a task
-node scripts/project-task.js --id pj_abc123 --add "Define borrower profile for rate analysis"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-task.js -- --id pj_abc123 --add "Define borrower profile for rate analysis"
 
 # List open tasks (default)
-node scripts/project-task.js --id pj_abc123 --list
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-task.js -- --id pj_abc123 --list
 
 # List all tasks including done
-node scripts/project-task.js --id pj_abc123 --list --all
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-task.js -- --id pj_abc123 --list --all
 
 # Mark a task done
-node scripts/project-task.js --id pj_abc123 --complete pt_xxx
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-task.js -- --id pj_abc123 --complete pt_xxx
 
 # Reopen a completed task
-node scripts/project-task.js --id pj_abc123 --reopen pt_xxx
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-task.js -- --id pj_abc123 --reopen pt_xxx
 
 # Delete a task
-node scripts/project-task.js --id pj_abc123 --remove pt_xxx
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-task.js -- --id pj_abc123 --remove pt_xxx
 ```
 
 ### Delete a project
 
 ```bash
-node scripts/project-delete.js --id pj_abc123
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-delete.js -- --id pj_abc123
 ```
 
 Prefer `--status archived` via update instead of delete, to preserve history.
@@ -135,13 +135,13 @@ Prefer `--status archived` via update instead of delete, to preserve history.
 ### Add a todo linked to a project
 
 ```bash
-node scripts/todo-add.js --title "File extension" --project-id pj_abc123
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" todo-add.js -- --title "File extension" --project-id pj_abc123
 ```
 
 ### List todos for a project
 
 ```bash
-node scripts/todo-list.js --project-id pj_abc123
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" todo-list.js -- --project-id pj_abc123
 ```
 
 ## Interaction Rules

@@ -58,7 +58,7 @@ Personal workspace parity is JSON-backed through Brain's in-repo
 `data/reminders.json`, `private/documents/metadata.jsonl`,
 `instructions/`, `tasks/`, and selected repo-registry state. Use
 `brainctl workspace run --path <workspace> <assistant-script>.js -- <args>` to
-run the integrated assistant-logic scripts against that workspace. Markdown
+run native `@brain/assistant-logic` CLI commands against that workspace. Markdown
 `projects/`, `notes/`, and `documents/metadata/` folders remain supporting
 resources only.
 

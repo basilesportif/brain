@@ -1,7 +1,7 @@
 # Reminders Skill
 
 > All `workspace/` references below resolve to the active assistant workspace.
-> Brain integration: run these scripts through `pnpm run brainctl workspace run --path <workspace> <script>.js -- <args>` from the Brain checkout. Historical `node scripts/...` examples below map to the same in-repo scripts under `packages/assistant-logic/scripts/`.
+> Brain integration: run these commands through `pnpm run brainctl workspace run --path <workspace> <script>.js -- <args>` from the Brain checkout. Historical `node scripts/...` examples below map to compiled native CLI commands under `packages/assistant-logic/dist/cli/`.
 
 ## Usage
 
@@ -18,62 +18,62 @@ Reminders are stored in `workspace/data/reminders.json` (created lazily on first
 
 ## Commands
 
-All scripts output JSON to stdout. Run from the project root.
+All commands output JSON to stdout. Run them from the Brain checkout through `brainctl workspace run`.
 
 ### Add a reminder
 
 ```bash
 # Daily at 9:00 AM
-node scripts/reminder-add.js --title "Take medicine" --daily --time "09:00"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" reminder-add.js -- --title "Take medicine" --daily --time "09:00"
 
 # Weekly on Friday at 5:00 PM
-node scripts/reminder-add.js --title "Weekly review" --weekly friday --time "17:00"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" reminder-add.js -- --title "Weekly review" --weekly friday --time "17:00"
 
 # One-time
-node scripts/reminder-add.js --title "Dentist appointment" --once "2026-04-15T10:00:00-04:00"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" reminder-add.js -- --title "Dentist appointment" --once "2026-04-15T10:00:00-04:00"
 
 # Cron (weekdays at 9 AM)
-node scripts/reminder-add.js --title "Morning standup" --cron "0 9 * * 1-5"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" reminder-add.js -- --title "Morning standup" --cron "0 9 * * 1-5"
 
 # With timezone (default: America/New_York)
-node scripts/reminder-add.js --title "Call London office" --daily --time "14:00" --timezone "Europe/London"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" reminder-add.js -- --title "Call London office" --daily --time "14:00" --timezone "Europe/London"
 ```
 
 ### List reminders
 
 ```bash
 # All enabled reminders
-node scripts/reminder-list.js
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" reminder-list.js --
 
 # Include disabled reminders
-node scripts/reminder-list.js --all
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" reminder-list.js -- --all
 
 # Search by title
-node scripts/reminder-list.js --query "medicine"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" reminder-list.js -- --query "medicine"
 ```
 
 ### Update a reminder
 
 ```bash
 # Change title
-node scripts/reminder-update.js --id rm_xxx --title "New title"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" reminder-update.js -- --id rm_xxx --title "New title"
 
 # Change time
-node scripts/reminder-update.js --id rm_xxx --time "10:00"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" reminder-update.js -- --id rm_xxx --time "10:00"
 
 # Disable / enable
-node scripts/reminder-update.js --id rm_xxx --disable
-node scripts/reminder-update.js --id rm_xxx --enable
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" reminder-update.js -- --id rm_xxx --disable
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" reminder-update.js -- --id rm_xxx --enable
 ```
 
 ### Delete a reminder
 
 ```bash
 # By exact ID
-node scripts/reminder-delete.js --id rm_xxx
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" reminder-delete.js -- --id rm_xxx
 
 # By title match (deletes if exactly one match)
-node scripts/reminder-delete.js --title "medicine"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" reminder-delete.js -- --title "medicine"
 ```
 
 If `--title` matches multiple reminders, the script exits with code 2 and lists the matches on stderr. Use `--id` to disambiguate.
@@ -81,7 +81,7 @@ If `--title` matches multiple reminders, the script exits with code 2 and lists 
 ### Check due reminders (loop use)
 
 ```bash
-node scripts/reminder-check.js
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" reminder-check.js --
 ```
 
 Returns JSON with any triggered reminders. Used by the `reminder-check` loop.

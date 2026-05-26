@@ -59,8 +59,7 @@ do not require exact reply text unless the user must run a command verbatim.
 
 Initial setup must create an inspectable JSON-backed assistant workspace before
 live traffic. The Brain source of truth uses the in-repo
-`packages/assistant-logic` stores and scripts while a native TypeScript port
-remains future work:
+`packages/assistant-logic` native TypeScript stores and CLI commands:
 `data/todos.json`, `data/projects.json`, `data/crm.json`,
 `data/reminders.json`, `private/documents/metadata.jsonl`,
 `instructions/skills/`, `instructions/prompts/`, `tasks/`, and selected
@@ -74,7 +73,7 @@ non-interactive approval behavior, `TMPDIR` pointed at
 Ubuntu server sandboxes can fail before shell commands start; the safety
 boundary is the dedicated service user plus private workspace path, not a
 per-turn approval prompt. This lets questions like "do I have projects?" inspect
-the JSON stores through integrated assistant-logic scripts instead of answering from
+the JSON stores through native assistant-logic CLI commands instead of answering from
 active entrypoint metadata or markdown folders alone.
 Ask whether the user wants to initialize or connect a private Git backup for
 this personal workspace memory; never commit secrets, logs, Telegram IDs,
@@ -186,7 +185,7 @@ command lists unless the user asks for details or `brainctl setup defaults
      `private/documents/metadata.jsonl`, selected `.claude/repo-registry/`
      state paths, and markdown resource folders;
    - tell the user todos/projects/CRM/reminders are JSON-backed and accessed by
-     integrated assistant-logic scripts via `brainctl workspace run`;
+     native assistant-logic CLI commands via `brainctl workspace run`;
    - ask whether to initialize or connect a private Git backup so non-secret
      workspace state can be committed privately.
 3. Pull or initialize the private data/backup repo:

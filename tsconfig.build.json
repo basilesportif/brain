@@ -1,6 +1,7 @@
 {
   "files": [],
   "references": [
+    { "path": "packages/assistant-logic" },
     { "path": "packages/entrypoint-protocol" },
     { "path": "packages/config/workspace-schema" },
     { "path": "packages/assistant-pack-schema" },

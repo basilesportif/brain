@@ -1,7 +1,7 @@
 # File Save Skill
 
 > All `workspace/` references below resolve to the active assistant workspace. File bytes default to a private directory next to the workspace, not to a public/source repo.
-> Brain integration: run these scripts through `pnpm run brainctl workspace run --path <workspace> <script>.js -- <args>` from the Brain checkout. Historical `node scripts/...` examples below map to the same in-repo scripts under `packages/assistant-logic/scripts/`.
+> Brain integration: run these commands through `pnpm run brainctl workspace run --path <workspace> <script>.js -- <args>` from the Brain checkout. Historical `node scripts/...` examples below map to compiled native CLI commands under `packages/assistant-logic/dist/cli/`.
 
 ## Usage
 
@@ -64,7 +64,7 @@ pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" file-save.js -- --
 With conversation metadata and labels:
 
 ```bash
-node scripts/file-save.js \
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" file-save.js -- \
   --source "/path/to/uploaded/file.pdf" \
   --original-filename "prospectus.pdf" \
   --mime-type "application/pdf" \
@@ -92,10 +92,10 @@ If both a project and contact are present, include both.
 ### List saved document metadata
 
 ```bash
-node scripts/file-list.js
-node scripts/file-list.js --project "Decisive Outcomes"
-node scripts/file-list.js --contact "Bill Pate"
-node scripts/file-list.js --query "conference prospectus"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" file-list.js --
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" file-list.js -- --project "Decisive Outcomes"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" file-list.js -- --contact "Bill Pate"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" file-list.js -- --query "conference prospectus"
 ```
 
 ## Interaction Rules

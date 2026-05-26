@@ -109,8 +109,8 @@ deployment handoff.
   interactive approval prompts, and server sandboxes can fail before shell
   commands start; isolate Brain with the dedicated service user and private
   workspace path instead. Todos/projects/CRM/reminders and file-save questions
-  should be answered by reusing Brain's in-repo assistant-logic scripts through
-  `brainctl workspace run` or compatible `ASSISTANT_WORKSPACE=<path>` commands,
+  should be answered by using Brain's native assistant-logic CLI commands through
+  `brainctl workspace run` with `ASSISTANT_WORKSPACE=<path>` and private roots set,
   not from active entrypoint metadata or markdown folders alone.
 - Ensure the in-repo `packages/assistant-logic` package is present in the Brain
   checkout. No sibling assistant-agent-logic checkout is required; validate with

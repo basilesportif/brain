@@ -1,0 +1,11 @@
+.env
+.env.*
+.envrc
+data/*.json
+private/
+documents/
+data/documents/
+data/file-save-metadata.json
+data/file-save-metadata.jsonl
+
+!.env.example

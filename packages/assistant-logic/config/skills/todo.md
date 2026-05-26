@@ -1,7 +1,7 @@
 # To-Do Skill
 
 > All `workspace/` references below resolve to the active assistant workspace.
-> Brain integration: run these scripts through `pnpm run brainctl workspace run --path <workspace> <script>.js -- <args>` from the Brain checkout. Historical `node scripts/...` examples below map to the same in-repo scripts under `packages/assistant-logic/scripts/`.
+> Brain integration: run these commands through `pnpm run brainctl workspace run --path <workspace> <script>.js -- <args>` from the Brain checkout. Historical `node scripts/...` examples below map to compiled native CLI commands under `packages/assistant-logic/dist/cli/`.
 
 ## Usage
 
@@ -11,33 +11,33 @@ To-dos are stored in `workspace/data/todos.json` (created lazily on first add). 
 
 ## Commands
 
-All scripts output JSON to stdout. Run from the project root.
+All commands output JSON to stdout. Run them from the Brain checkout through `brainctl workspace run`.
 
 ### Add a to-do
 
 ```bash
-node scripts/todo-add.js --title "Buy coffee" --description "Whole beans from the roaster"
-node scripts/todo-add.js --title "Call dentist"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" todo-add.js -- --title "Buy coffee" --description "Whole beans from the roaster"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" todo-add.js -- --title "Call dentist"
 ```
 
 ### List to-dos
 
 ```bash
 # All to-dos
-node scripts/todo-list.js
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" todo-list.js --
 
 # Filter by substring (case-insensitive, matches title and description)
-node scripts/todo-list.js --query "coffee"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" todo-list.js -- --query "coffee"
 ```
 
 ### Delete a to-do
 
 ```bash
 # By exact ID (preferred)
-node scripts/todo-delete.js --id "td_abc123"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" todo-delete.js -- --id "td_abc123"
 
 # By title match (deletes if exactly one match)
-node scripts/todo-delete.js --title "coffee"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" todo-delete.js -- --title "coffee"
 ```
 
 If `--title` matches multiple to-dos, the script exits with code 2 and lists the matches on stderr. Use `--id` to disambiguate.
@@ -45,7 +45,7 @@ If `--title` matches multiple to-dos, the script exits with code 2 and lists the
 ## Post-Mutation Rule
 
 **MANDATORY: After EVERY add or delete — no matter how small — you MUST:**
-1. Run `node scripts/todo-list.js`
+1. Run `pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" todo-list.js --`
 2. Include the full numbered list in the Telegram reply (or terminal response)
 
 This is non-negotiable. Do NOT send any reply without the updated list attached. Skipping this step is a bug.

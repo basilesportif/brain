@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@brain/assistant-logic':
+        specifier: workspace:*
+        version: link:packages/assistant-logic
       '@brain/assistant-pack-schema':
         specifier: workspace:*
         version: link:packages/assistant-pack-schema

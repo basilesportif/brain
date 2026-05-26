@@ -1,0 +1,15 @@
+# Replace all ca_XXXX values with your own Composio connected account IDs.
+# Find them at: https://app.composio.dev/connected_accounts
+accounts:
+  google_calendar:
+    id: ca_XXXX                     # Google Calendar connected account
+    email: you@gmail.com
+  gmail:
+    - id: ca_XXXX
+      email: you@gmail.com
+    - id: ca_XXXX
+      email: you@work.com
+
+calendars:
+  # Add named aliases for your calendars (optional)
+  # football: "<google-calendar-id>@group.calendar.google.com"

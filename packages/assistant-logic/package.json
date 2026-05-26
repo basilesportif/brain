@@ -2,14 +2,18 @@
   "name": "@brain/assistant-logic",
   "version": "0.0.0",
   "private": true,
-  "description": "In-repo assistant-agent-logic compatibility scripts and resources for Brain workspaces.",
-  "type": "commonjs",
+  "description": "Native TypeScript assistant workspace stores, CLI commands, and migrated assistant-agent-logic resources for Brain.",
+  "type": "module",
   "license": "UNLICENSED",
   "exports": {
-    "./scripts/*": "./scripts/*",
+    ".": "./dist/index.js",
+    "./lib/*": "./dist/lib/*",
+    "./cli/*": "./dist/cli/*",
     "./config/*": "./config/*"
   },
+  "types": "./dist/index.d.ts",
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "build": "tsc -b",
+    "test": "node --test dist/**/*.test.js"
   }
 }

@@ -32,9 +32,8 @@ Ownership rules:
 
 Configuration examples live under `examples/config/` and are public-safe. Real workspace config, adapter secrets, bot tokens, allowlists, and host-specific paths belong in the private workspace or host secret store, not in source control.
 
-The Brain workspace state model intentionally reuses the in-repo
-`packages/assistant-logic` JSON stores while a native TypeScript port remains
-future work. Setup creates/recognizes:
+The Brain workspace state model uses native TypeScript modules and CLI
+commands in the in-repo `packages/assistant-logic` package. Setup creates/recognizes:
 
 - `data/todos.json`, `data/projects.json`, `data/crm.json`, and
   `data/reminders.json`;

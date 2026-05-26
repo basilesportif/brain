@@ -206,7 +206,8 @@ pnpm run brainctl workspace run --path ~/.brain/workspace file-save.js -- --sour
 
 No external `assistant-agent-logic` checkout is required. The legacy
 `--assistant-repo` flag is accepted only as a deprecated no-op while the wrapper
-always resolves `packages/assistant-logic` in the Brain checkout.
+always resolves the native `@brain/assistant-logic` package in this checkout and
+runs its compiled `dist/cli/*.js` commands.
 
 ## Optional web publishing and Composio setup
 

@@ -1,0 +1,7 @@
+# Messaging platform credentials
+# Fill in Telegram API credentials, then run login scripts.
+
+telegram:
+  api_id: ""          # From https://my.telegram.org -> API development tools
+  api_hash: ""        # From https://my.telegram.org -> API development tools
+  session: ""         # Auto-filled by: node scripts/telegram-login.js

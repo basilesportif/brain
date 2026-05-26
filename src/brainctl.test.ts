@@ -706,7 +706,7 @@ test("brainctl scaffolds and reuses in-repo assistant-logic JSON workspace store
     assert.equal(setup.status, 0, setup.stderr);
     const setupJson = JSON.parse(setup.stdout) as { details: { plan: { configured: string[] }; assistantWorkspaceScaffold: { writtenFiles: string[] } } };
     assert.ok(setupJson.details.plan.configured.some((item) => /assistant JSON store ready: todos/.test(item)));
-    assert.ok(setupJson.details.plan.configured.some((item) => /in-repo assistant-logic scripts available/.test(item)));
+    assert.ok(setupJson.details.plan.configured.some((item) => /native assistant-logic CLI commands available/.test(item)));
     assert.ok(setupJson.details.assistantWorkspaceScaffold.writtenFiles.includes(path.join("data", "todos.json")));
     assert.ok(setupJson.details.assistantWorkspaceScaffold.writtenFiles.includes(path.join("instructions", "skills", "projects.md")));
     assert.ok(setupJson.details.assistantWorkspaceScaffold.writtenFiles.includes(path.join("private", "documents", "metadata.jsonl")));
@@ -784,9 +784,9 @@ test("brainctl scaffolds and reuses in-repo assistant-logic JSON workspace store
     assert.equal(statusJson.ok, true);
     assert.equal(statusJson.details.status.ready, true);
     assert.equal(statusJson.details.status.assistantLogicRoot, assistantLogicPackage);
-    assert.equal(statusJson.details.status.assistantLogicSource, "in-repo:packages/assistant-logic");
+    assert.equal(statusJson.details.status.assistantLogicSource, "in-repo:@brain/assistant-logic");
     assert.equal(statusJson.details.status.deprecatedAssistantRepoIgnored, false);
-    assert.ok(statusJson.details.status.scripts.every((script) => script.present && script.path.startsWith(assistantLogicPackage)));
+    assert.ok(statusJson.details.status.scripts.every((script) => script.present && script.path.startsWith(path.join(assistantLogicPackage, "dist", "cli"))));
     assert.ok(statusJson.details.status.stateStores.every((store) => store.valid));
     assert.equal(statusJson.details.status.fileSave.ready, true);
     assert.equal(statusJson.details.status.fileSave.metadataPath, path.join(workspace, "private", "documents", "metadata.jsonl"));

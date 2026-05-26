@@ -1,7 +1,7 @@
 # CRM Skill
 
 > All `workspace/` references below resolve to the active assistant workspace.
-> Brain integration: run these scripts through `pnpm run brainctl workspace run --path <workspace> <script>.js -- <args>` from the Brain checkout. Historical `node scripts/...` examples below map to the same in-repo scripts under `packages/assistant-logic/scripts/`.
+> Brain integration: run these commands through `pnpm run brainctl workspace run --path <workspace> <script>.js -- <args>` from the Brain checkout. Historical `node scripts/...` examples below map to compiled native CLI commands under `packages/assistant-logic/dist/cli/`.
 
 ## Usage
 
@@ -22,7 +22,7 @@ The raw `crm.json` file uses these root keys:
 
 **For searching/looking up contacts:** always use:
 ```bash
-node scripts/crm-list-people.js --query "search term"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-list-people.js -- --query "search term"
 ```
 
 This searches name, email, company, and notes. It works correctly every time.
@@ -37,22 +37,22 @@ This searches name, email, company, and notes. It works correctly every time.
 
 ## Commands
 
-All scripts output JSON to stdout. Run from the project root.
+All commands output JSON to stdout. Run them from the Brain checkout through `brainctl workspace run`.
 
 ### Add a person
 
 ```bash
 # Quick-add (just a name)
-node scripts/crm-add-person.js --name "Jane Smith"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-add-person.js -- --name "Jane Smith"
 
 # Full details
-node scripts/crm-add-person.js --name "Jane Smith" --email "jane@example.com" --phone "+1-555-0100" --company "Acme Corp" --title "VP Engineering" --status active --source "conference" --notes "Met at DevCon 2026"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-add-person.js -- --name "Jane Smith" --email "jane@example.com" --phone "+1-555-0100" --company "Acme Corp" --title "VP Engineering" --status active --source "conference" --notes "Met at DevCon 2026"
 
 # Link to a business on creation
-node scripts/crm-add-person.js --name "Jane Smith" --business-id bz_abc123
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-add-person.js -- --name "Jane Smith" --business-id bz_abc123
 
 # Skip duplicate check
-node scripts/crm-add-person.js --name "Jane Smith" --force
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-add-person.js -- --name "Jane Smith" --force
 ```
 
 Duplicate detection runs automatically — if a similar name exists, the script warns and exits. Use `--force` to add anyway.
@@ -61,90 +61,90 @@ Duplicate detection runs automatically — if a similar name exists, the script 
 
 ```bash
 # Update any field(s) — only provided fields change
-node scripts/crm-update-person.js --id ct_abc123 --email "new@example.com" --phone "+1-555-0200"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-update-person.js -- --id ct_abc123 --email "new@example.com" --phone "+1-555-0200"
 
 # Change status (including archive)
-node scripts/crm-update-person.js --id ct_abc123 --status archived
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-update-person.js -- --id ct_abc123 --status archived
 
 # Add/remove tags
-node scripts/crm-update-person.js --id ct_abc123 --add-tag "developer" --add-tag "boston"
-node scripts/crm-update-person.js --id ct_abc123 --remove-tag "lead"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-update-person.js -- --id ct_abc123 --add-tag "developer" --add-tag "boston"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-update-person.js -- --id ct_abc123 --remove-tag "lead"
 
 # Update title/role
-node scripts/crm-update-person.js --id ct_abc123 --title "CTO" --company "Acme Corp"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-update-person.js -- --id ct_abc123 --title "CTO" --company "Acme Corp"
 ```
 
 ### List people
 
 ```bash
 # All people
-node scripts/crm-list-people.js
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-list-people.js --
 
 # Filter by text (searches name, email, company, notes)
-node scripts/crm-list-people.js --query "jane"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-list-people.js -- --query "jane"
 
 # Filter by status
-node scripts/crm-list-people.js --status active
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-list-people.js -- --status active
 
 # Filter by linked business
-node scripts/crm-list-people.js --business-id bz_abc123
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-list-people.js -- --business-id bz_abc123
 
 # Filter by tag
-node scripts/crm-list-people.js --tag "developer"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-list-people.js -- --tag "developer"
 
 # Sort by field (name, createdAt, updatedAt, lastContactedAt)
-node scripts/crm-list-people.js --sort updatedAt
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-list-people.js -- --sort updatedAt
 
 # Show which fields are missing
-node scripts/crm-list-people.js --missing-fields
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-list-people.js -- --missing-fields
 ```
 
 ### View full person/business detail
 
 ```bash
 # Shows the entity + linked entities + correspondence history + pending follow-ups
-node scripts/crm-view.js --id ct_abc123
-node scripts/crm-view.js --id bz_def456
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-view.js -- --id ct_abc123
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-view.js -- --id bz_def456
 ```
 
 ### Add a business
 
 ```bash
-node scripts/crm-add-business.js --name "Acme Corp" --description "Widget manufacturer" --status prospecting --deal-value 50000 --notes "Initial outreach via email"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-add-business.js -- --name "Acme Corp" --description "Widget manufacturer" --status prospecting --deal-value 50000 --notes "Initial outreach via email"
 ```
 
 ### Update a business
 
 ```bash
-node scripts/crm-update-business.js --id bz_abc123 --status active --deal-value 75000
-node scripts/crm-update-business.js --id bz_abc123 --status archived
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-update-business.js -- --id bz_abc123 --status active --deal-value 75000
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-update-business.js -- --id bz_abc123 --status archived
 ```
 
 ### List businesses
 
 ```bash
-node scripts/crm-list-businesses.js
-node scripts/crm-list-businesses.js --query "acme"
-node scripts/crm-list-businesses.js --status active
-node scripts/crm-list-businesses.js --sort updatedAt
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-list-businesses.js --
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-list-businesses.js -- --query "acme"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-list-businesses.js -- --status active
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-list-businesses.js -- --sort updatedAt
 
 # Pipeline summary (count + deal value by status)
-node scripts/crm-list-businesses.js --summary
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-list-businesses.js -- --summary
 # Or standalone:
-node scripts/crm-pipeline.js
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-pipeline.js --
 ```
 
 ### Log correspondence
 
 ```bash
-node scripts/crm-log.js --person-id ct_abc123 --type email --summary "Sent proposal for Q3 project"
-node scripts/crm-log.js --person-id ct_abc123 --type call --summary "Discussed pricing" --business-id bz_def456 --follow-up --follow-up-date 2026-04-01
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-log.js -- --person-id ct_abc123 --type email --summary "Sent proposal for Q3 project"
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-log.js -- --person-id ct_abc123 --type call --summary "Discussed pricing" --business-id bz_def456 --follow-up --follow-up-date 2026-04-01
 
 # With long-form notes (transcript, detailed call notes, etc.)
-node scripts/crm-log.js --person-id ct_abc123 --type call --summary "Project kickoff call" --notes "Full transcript or detailed notes here..."
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-log.js -- --person-id ct_abc123 --type call --summary "Project kickoff call" --notes "Full transcript or detailed notes here..."
 
 # Pipe notes from stdin for very long content
-echo "long transcript..." | node scripts/crm-log.js --person-id ct_abc123 --type call --summary "Project kickoff call" --notes-stdin
+echo "long transcript..." | pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-log.js -- --person-id ct_abc123 --type call --summary "Project kickoff call" --notes-stdin
 ```
 
 Logging correspondence automatically updates `lastContactedAt` on the person.
@@ -153,68 +153,68 @@ Logging correspondence automatically updates `lastContactedAt` on the person.
 
 ```bash
 # Add or update notes on an existing entry (e.g., add transcript after logging a call)
-node scripts/crm-add-notes.js --id co_abc123 --notes "Full transcript text..."
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-add-notes.js -- --id co_abc123 --notes "Full transcript text..."
 
 # Pipe from stdin for very long content
-cat transcript.txt | node scripts/crm-add-notes.js --id co_abc123 --notes-stdin
+cat transcript.txt | pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-add-notes.js -- --id co_abc123 --notes-stdin
 ```
 
 ### View correspondence history
 
 ```bash
 # All correspondence for a person
-node scripts/crm-history.js --person-id ct_abc123
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-history.js -- --person-id ct_abc123
 
 # Filter by type
-node scripts/crm-history.js --person-id ct_abc123 --type email
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-history.js -- --person-id ct_abc123 --type email
 
 # Last N entries
-node scripts/crm-history.js --person-id ct_abc123 --limit 5
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-history.js -- --person-id ct_abc123 --limit 5
 
 # Include full notes in output (default list view omits notes for cleanliness)
-node scripts/crm-history.js --person-id ct_abc123 --full
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-history.js -- --person-id ct_abc123 --full
 
 # For a business
-node scripts/crm-history.js --business-id bz_def456
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-history.js -- --business-id bz_def456
 ```
 
 ### Check follow-ups
 
 ```bash
 # All unresolved follow-ups
-node scripts/crm-follow-ups.js
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-follow-ups.js --
 
 # Only overdue (follow-up date <= today, or no date set)
-node scripts/crm-follow-ups.js --due
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-follow-ups.js -- --due
 
 # Filter by person or business
-node scripts/crm-follow-ups.js --person-id ct_abc123
-node scripts/crm-follow-ups.js --business-id bz_def456
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-follow-ups.js -- --person-id ct_abc123
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-follow-ups.js -- --business-id bz_def456
 ```
 
 ### Resolve or reschedule a follow-up
 
 ```bash
 # Mark as done
-node scripts/crm-resolve.js --id co_abc123
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-resolve.js -- --id co_abc123
 
 # Reschedule to a new date (keeps it open)
-node scripts/crm-resolve.js --id co_abc123 --reschedule 2026-04-15
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-resolve.js -- --id co_abc123 --reschedule 2026-04-15
 ```
 
 ### Link / unlink person and business
 
 ```bash
-node scripts/crm-link.js --person-id ct_abc123 --business-id bz_def456
-node scripts/crm-unlink.js --person-id ct_abc123 --business-id bz_def456
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-link.js -- --person-id ct_abc123 --business-id bz_def456
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-unlink.js -- --person-id ct_abc123 --business-id bz_def456
 ```
 
 ### Delete any entity
 
 ```bash
-node scripts/crm-delete.js --id ct_abc123
-node scripts/crm-delete.js --id bz_def456
-node scripts/crm-delete.js --id co_ghi789
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-delete.js -- --id ct_abc123
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-delete.js -- --id bz_def456
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-delete.js -- --id co_ghi789
 ```
 
 Deleting a person cleans up business references. Deleting a business cleans up person references. To soft-delete instead, use `--status archived` via the update scripts.
@@ -223,16 +223,16 @@ Deleting a person cleans up business references. Deleting a business cleans up p
 
 ```bash
 # People with no contact in the last 30 days
-node scripts/crm-stale.js
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-stale.js --
 
 # Custom threshold
-node scripts/crm-stale.js --days 14
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-stale.js -- --days 14
 ```
 
 ### Find contacts with missing info
 
 ```bash
-node scripts/crm-missing-fields.js
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-missing-fields.js --
 ```
 
 ## Interaction Rules
@@ -255,7 +255,7 @@ Use this workflow when the user says "update my contacts", "clean up contacts", 
 
 1. **Run the missing-fields check:**
    ```bash
-   node scripts/crm-missing-fields.js
+   pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-missing-fields.js --
    ```
 
 2. **Group contacts by priority:** Start with high-priority or active contacts, then leads, then inactive.
@@ -267,7 +267,7 @@ Use this workflow when the user says "update my contacts", "clean up contacts", 
 
 4. **Update each contact** as the user provides info:
    ```bash
-   node scripts/crm-update-person.js --id ct_xxx --email "..." --phone "..." --company "..." --title "..."
+   pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-update-person.js -- --id ct_xxx --email "..." --phone "..." --company "..." --title "..."
    ```
 
 5. **After all contacts are reviewed**, give a summary:

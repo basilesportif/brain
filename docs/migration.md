@@ -20,14 +20,14 @@ See `docs/runtime-configuration.md` for the draft config examples and validation
 
 ## Short-term workspace state parity
 
-Brain currently reuses its in-repo `packages/assistant-logic` JSON workspace
-behavior for personal state instead of porting stores into TypeScript. The authoritative
+Brain now provides native TypeScript `packages/assistant-logic` JSON workspace
+modules and CLI commands for personal state. The authoritative
 state files are `data/todos.json`, `data/projects.json`, `data/crm.json`,
 `data/reminders.json`, plus `private/documents/metadata.jsonl` for file-save
 metadata and `instructions/**`/`tasks/**`/selected repo-registry state for
 overlays and automation metadata.
 
-Use `brainctl workspace scaffold/status/run`; it invokes the integrated
-assistant-logic scripts with `ASSISTANT_WORKSPACE=<workspace>` and private
+Use `brainctl workspace scaffold/status/run`; it invokes native
+assistant-logic CLI commands with `ASSISTANT_WORKSPACE=<workspace>` and private
 document roots set. Do not migrate existing markdown notes; `projects/`,
 `notes/`, and `documents/metadata/` are resource folders only in this phase.
