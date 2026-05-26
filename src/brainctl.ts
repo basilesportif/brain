@@ -2861,7 +2861,35 @@ async function setupCodexAuthScriptCommand(options: SetupTelegramTokenScriptOpti
   const scriptDir = options.output ? path.dirname(path.resolve(options.output)) : await mkdtemp(path.join(os.tmpdir(), "brain-codex-auth-"));
   const scriptPath = path.resolve(options.output ?? path.join(scriptDir, "verify-brain-codex-auth.sh"));
   const codexBinary = options.binary ?? "codex";
-  const script = renderCodexAuthVerificationScript({ workspace: options.workspace, workspaceRoot, repoRoot, configPath, codexBinary });
+  const sshRunCommand = remoteCodexAuthSshCommand({
+    scriptPath,
+    sshHost: options.sshHost,
+    sshUser: options.sshUser,
+    serviceUser: options.serviceUser,
+  });
+  const sshLoginCommand = remoteCodexLoginSshCommand({
+    sshHost: options.sshHost,
+    sshUser: options.sshUser,
+    serviceUser: options.serviceUser,
+    codexBinary,
+    loginArgs: ["login", "--device-auth"],
+  });
+  const sshInteractiveLoginCommand = remoteCodexLoginSshCommand({
+    sshHost: options.sshHost,
+    sshUser: options.sshUser,
+    serviceUser: options.serviceUser,
+    codexBinary,
+    loginArgs: ["login"],
+  });
+  const script = renderCodexAuthVerificationScript({
+    workspace: options.workspace,
+    workspaceRoot,
+    repoRoot,
+    configPath,
+    codexBinary,
+    sshLoginCommand,
+    sshInteractiveLoginCommand,
+  });
 
   await mkdir(scriptDir, { recursive: true, mode: 0o700 });
   await chmod(scriptDir, 0o700).catch(() => undefined);
@@ -2887,18 +2915,9 @@ async function setupCodexAuthScriptCommand(options: SetupTelegramTokenScriptOpti
     details: {
       scriptPath,
       runCommand: `bash ${shellArg(scriptPath)}`,
-      sshRunCommand: remoteCodexAuthSshCommand({
-        scriptPath,
-        sshHost: options.sshHost,
-        sshUser: options.sshUser,
-        serviceUser: options.serviceUser,
-      }),
-      sshLoginCommand: remoteCodexLoginSshCommand({
-        sshHost: options.sshHost,
-        sshUser: options.sshUser,
-        serviceUser: options.serviceUser,
-        codexBinary,
-      }),
+      sshRunCommand,
+      sshLoginCommand,
+      sshInteractiveLoginCommand,
       workspace: options.workspace,
       workspaceRoot,
       repoRoot,
@@ -2923,14 +2942,15 @@ function remoteCodexAuthSshCommand(input: { scriptPath: string; sshHost?: string
   return `ssh -t ${shellArg(destination)} ${shellArg(remoteCommand)}`;
 }
 
-function remoteCodexLoginSshCommand(input: { sshHost?: string; sshUser?: string; serviceUser?: string; codexBinary: string }): string | undefined {
+function remoteCodexLoginSshCommand(input: { sshHost?: string; sshUser?: string; serviceUser?: string; codexBinary: string; loginArgs: string[] }): string | undefined {
   if (!input.sshHost) return undefined;
   const destination = remoteSshDestination(input.sshHost, input.sshUser);
   const sameUser = !input.serviceUser || !input.sshUser || input.serviceUser === input.sshUser;
   const serviceUser = input.serviceUser ?? input.sshUser ?? "";
+  const loginCommand = [input.codexBinary, ...input.loginArgs].map(shellArg).join(" ");
   const remoteCommand = sameUser
-    ? `${shellArg(input.codexBinary)} login --device-auth`
-    : `sudo -iu ${shellArg(serviceUser)} ${shellArg(input.codexBinary)} login --device-auth`;
+    ? loginCommand
+    : `sudo -iu ${shellArg(serviceUser)} ${loginCommand}`;
   return `ssh -t ${shellArg(destination)} ${shellArg(remoteCommand)}`;
 }
 
@@ -3019,7 +3039,15 @@ printf "Stored Telegram token in private Brain secret files. Token value was not
 `;
 }
 
-function renderCodexAuthVerificationScript(input: { workspace: string; workspaceRoot: string; repoRoot: string; configPath: string; codexBinary: string }): string {
+function renderCodexAuthVerificationScript(input: {
+  workspace: string;
+  workspaceRoot: string;
+  repoRoot: string;
+  configPath: string;
+  codexBinary: string;
+  sshLoginCommand?: string;
+  sshInteractiveLoginCommand?: string;
+}): string {
   return `#!/usr/bin/env bash
 set -euo pipefail
 umask 077
@@ -3029,14 +3057,40 @@ config=${shellLiteral(input.configPath)}
 workspace=${shellLiteral(input.workspace)}
 workspace_root=${shellLiteral(input.workspaceRoot)}
 codex_binary=${shellLiteral(input.codexBinary)}
+local_device_login_command=${shellLiteral(`${input.codexBinary} login --device-auth`)}
+local_interactive_login_command=${shellLiteral(`${input.codexBinary} login`)}
+ssh_device_login_command=${shellLiteral(input.sshLoginCommand ?? "")}
+ssh_interactive_login_command=${shellLiteral(input.sshInteractiveLoginCommand ?? "")}
 
 print_login_help() {
   cat >&2 <<'HELP'
 Codex auth is not verified yet.
+HELP
+
+  if [ -n "$ssh_device_login_command" ]; then
+    cat >&2 <<'HELP'
+
+Run this exact command from your local terminal to start Codex device auth on
+the server as the same user that will run Brain:
+HELP
+    printf "  %s\\n" "$ssh_device_login_command" >&2
+    if [ -n "$ssh_interactive_login_command" ]; then
+      cat >&2 <<'HELP'
+
+If device auth is not available, run this interactive login command instead:
+HELP
+      printf "  %s\\n" "$ssh_interactive_login_command" >&2
+    fi
+  else
+    cat >&2 <<HELP
 
 Run one of these on the target host as the same user that will run Brain:
-  codex login --device-auth
-  codex login
+  $local_device_login_command
+  $local_interactive_login_command
+HELP
+  fi
+
+  cat >&2 <<'HELP'
 
 If you must use an API key or access token, use a one-use private script that
 reads hidden input and pipes it to:

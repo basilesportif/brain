@@ -71,9 +71,12 @@ Use this skill when a user asks to prepare a fresh Ubuntu host for Brain.
    <brain-service-user>` and give the user the returned `sshRunCommand`. Verify
    auth as the same service user that systemd will run; root's Codex login is
    not sufficient for `User=brain`. Setup progress must record the verified OS
-   user and resume from auth if it differs from the service user. Require
-   explicit confirmation before writing credentials or running live provider
-   checks.
+   user and resume from auth if it differs from the service user. If auth is
+   missing during remote setup, the helper itself must print the exact
+   copy-paste SSH login command, such as `ssh -t root@host 'sudo -iu brain codex
+   login --device-auth'`, instead of only local-on-target `codex login`
+   instructions. Require explicit confirmation before writing credentials or
+   running live provider checks.
 10. Prepare/install/start the service only after confirmation.
 11. Treat first-user pairing, OpenAI transcription, web publishing, and backup
    tuning as optional follow-ups unless explicitly requested.

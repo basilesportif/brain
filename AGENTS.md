@@ -131,7 +131,9 @@ an exact phrase unless they must run a command verbatim.
    treat auth verified as one user as sufficient for a different service user.
    Do not say only "SSH into the server" or "run it on the server"; always give
    the complete command including user, host, and remote script path. The helper
-   prints login instructions when auth is missing.
+   must print the exact remote `ssh -t <ssh-user>@<host> 'sudo -iu
+   <service-user> codex login --device-auth'` command when auth is missing, not
+   only local-on-target `codex login` instructions or a JSON field.
 13. Keep real workspace config, env files, tokens, Telegram IDs, logs, generated
    artifacts, hostnames, and repo-registry state outside git.
 14. Run `pnpm run check` after setup, documentation, or runtime changes.

@@ -538,15 +538,41 @@ test("brainctl setup codex-auth-script verifies login before marking provider au
 
     const generatedForServiceUser = spawnBrainctl(["setup", "codex-auth-script", "--workspace", "personal", "--path", workspace, "--config", config, "--repo", root, "--output", script, "--ssh-host", "203.0.113.10", "--ssh-user", "root", "--service-user", "brain"]);
     assert.equal(generatedForServiceUser.status, 0, generatedForServiceUser.stderr);
-    const generatedForServiceUserJson = JSON.parse(generatedForServiceUser.stdout) as { ok: boolean; details: { sshRunCommand: string; sshLoginCommand: string; runAsUser: string } };
+    const generatedForServiceUserJson = JSON.parse(generatedForServiceUser.stdout) as { ok: boolean; details: { sshRunCommand: string; sshLoginCommand: string; sshInteractiveLoginCommand: string; runAsUser: string } };
     assert.equal(generatedForServiceUserJson.ok, true);
     assert.equal(generatedForServiceUserJson.details.runAsUser, "brain");
     assert.match(generatedForServiceUserJson.details.sshRunCommand, /ssh -t root@203\.0\.113\.10/);
     assert.match(generatedForServiceUserJson.details.sshRunCommand, /sudo -iu brain bash/);
     assert.equal(generatedForServiceUserJson.details.sshLoginCommand, `ssh -t root@203.0.113.10 'sudo -iu brain codex login --device-auth'`);
+    assert.equal(generatedForServiceUserJson.details.sshInteractiveLoginCommand, `ssh -t root@203.0.113.10 'sudo -iu brain codex login'`);
 
     const syntax = spawnSync("bash", ["-n", script], { encoding: "utf8" });
     assert.equal(syntax.status, 0, syntax.stderr);
+
+    await writeFile(path.join(bin, "codex"), [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      "if [ \"${1:-}\" = \"--version\" ]; then echo codex-test; exit 0; fi",
+      "if [ \"${1:-}\" = \"login\" ] && [ \"${2:-}\" = \"status\" ]; then echo 'Not logged in' >&2; exit 1; fi",
+      "exit 2",
+      "",
+    ].join("\n"), { mode: 0o700 });
+    await chmod(path.join(bin, "codex"), 0o700);
+    const missingAuth = spawnSync("bash", [script], { encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` } });
+    assert.notEqual(missingAuth.status, 0);
+    assert.match(missingAuth.stderr, /Run this exact command from your local terminal/);
+    assert.match(missingAuth.stderr, /ssh -t root@203\.0\.113\.10 'sudo -iu brain codex login --device-auth'/);
+    assert.match(missingAuth.stderr, /ssh -t root@203\.0\.113\.10 'sudo -iu brain codex login'/);
+
+    await writeFile(path.join(bin, "codex"), [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      "if [ \"${1:-}\" = \"--version\" ]; then echo codex-test; exit 0; fi",
+      "if [ \"${1:-}\" = \"login\" ] && [ \"${2:-}\" = \"status\" ]; then echo 'Logged in using ChatGPT'; exit 0; fi",
+      "exit 2",
+      "",
+    ].join("\n"), { mode: 0o700 });
+    await chmod(path.join(bin, "codex"), 0o700);
     const verified = spawnSync("bash", [script], { encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` } });
     assert.equal(verified.status, 0, verified.stderr);
     assert.match(await readFile(log, "utf8"), /run brainctl validate live/);

@@ -87,11 +87,13 @@ deployment handoff.
   make `User=brain` ready. Setup progress records the verified OS user and must
   not treat auth verified as one user as sufficient for a different service
   user. Do not say only "SSH into the server" or "run this on the server." The
-  helper checks `codex login status`, prints concrete `codex login` / `codex
-  login --device-auth` instructions if needed, returns `sshLoginCommand` for the
-  exact remote device-auth command, and updates setup progress only through
-  guarded `brainctl validate live --allow-live --run-safe` after login is
-  present.
+  helper checks `codex login status`. If auth is missing during remote setup,
+  the helper itself must print the exact copy-paste SSH login command, such as
+  `ssh -t root@host 'sudo -iu brain codex login --device-auth'`; do not leave
+  the user with only local-on-target `codex login` instructions. The JSON output
+  should also include `sshLoginCommand` for automation, and setup progress is
+  updated only through guarded `brainctl validate live --allow-live --run-safe`
+  after login is present.
 - Setup/secret metadata should inspect private workspace env files such as
   `<workspace>/config/brain-<workspace>.env` and
   `<workspace>/secrets/secrets.env`. Do not mark a step incomplete just because
@@ -219,8 +221,8 @@ unless the user asks for details or `brainctl setup defaults --verbose` is used.
      command including user, host, and remote script path; for local setup,
      show the exact returned `runCommand`,
    - verify the Codex session as the service user that will run Brain,
-   - if it reports missing auth, follow its `codex login --device-auth` or
-     `codex login` instructions and rerun it,
+   - if it reports missing auth during remote setup, run the exact SSH login
+     command printed by the helper, then rerun it,
    - confirm the selected Codex transport/auth path,
    - store any credential only in the private workspace/server env file or host
      secret store,

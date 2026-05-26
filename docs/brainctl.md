@@ -304,13 +304,15 @@ For remote setup, give the user the returned
 the SSH login user differs from the service user. For local setup, run the
 returned `bash .../verify-brain-codex-auth.sh` command as the same user that
 will run Brain. A root Codex login is not enough for a `User=brain` systemd
-service. The helper checks `codex login status`, prints concrete
-`codex login --device-auth` / `codex login` instructions when auth is missing,
-and the JSON output includes `sshLoginCommand` for the exact remote
-device-auth command to run when login is missing. It records the verified OS
-user in setup progress, so `setup status --service-user brain` will not accept a
-Codex session that was verified as `root`. It records verified setup state only
-through guarded
+service. The helper checks `codex login status`. If auth is missing during
+remote setup, the helper itself prints the exact SSH command to run from the
+operator's terminal, such as
+`ssh -t root@host 'sudo -iu brain codex login --device-auth'`; it must not
+leave the user with only local-on-target `codex login` instructions. The JSON
+output also includes `sshLoginCommand` for automation. It records the verified
+OS user in setup progress, so `setup status --service-user brain` will not
+accept a Codex session that was verified as `root`. It records verified setup
+state only through guarded
 `validate live --codex-transport exec --allow-live --run-safe`.
 
 When `validate live --run-safe` runs against an existing private workspace, it

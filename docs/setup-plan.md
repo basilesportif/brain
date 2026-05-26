@@ -219,10 +219,13 @@ command lists unless the user asks for details or `brainctl setup defaults
    setup progress and resume from Codex auth if the recorded user differs from
    the service user. Do not say only "SSH into the server" or "run this on the
    server."
-   The helper checks `codex login status`, prints `codex login --device-auth` /
-   `codex login` instructions if auth is missing, and updates setup progress
-   only via guarded `brainctl validate live --allow-live --run-safe` after login
-   is present;
+   The helper checks `codex login status`. If auth is missing during remote
+   setup, the helper itself must print the exact copy-paste SSH login command,
+   such as `ssh -t root@host 'sudo -iu brain codex login --device-auth'`; do
+   not leave the user with only local-on-target `codex login` instructions. The
+   JSON output should also include `sshLoginCommand` for automation, and setup
+   progress is updated only via guarded
+   `brainctl validate live --allow-live --run-safe` after login is present;
    use the selected Codex transport, store any credential only in the private
    workspace/server env file or host secret store, and run only redacted
    metadata/health checks unless the user explicitly allows live provider
