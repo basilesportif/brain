@@ -1,0 +1,9 @@
+# ProtonMail Bridge connection metadata. Keep the Bridge password in .env only.
+protonmail:
+  bridge_host: "127.0.0.1"
+  bridge_imap_port: 1143
+  bridge_smtp_port: 1025
+  bridge_docker_image: "shenxn/protonmail-bridge:latest"
+  accounts:
+    - email: you@example.com
+      label: "Personal ProtonMail"

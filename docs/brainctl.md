@@ -180,11 +180,9 @@ Bulky/private document bytes under `private/documents/files/**`, secrets, logs,
 tmp/cache paths, setup progress metadata, and repo-registry runtime caches are
 excluded by default.
 
-## Assistant JSON workspace parity
+## Assistant workspace parity
 
-Brain carries the todo/project/CRM/reminder/file-save JSON stores in the
-in-repo `packages/assistant-logic` package. Setup creates a compatible
-workspace and `brainctl workspace run` executes those integrated scripts with:
+Brain carries native todo/project/CRM/reminder/file-save JSON stores and the vendored assistant-agent-logic live integration scripts in the in-repo `packages/assistant-logic` package. Setup creates a compatible workspace and `brainctl workspace run` executes those integrated commands with:
 
 ```bash
 ASSISTANT_WORKSPACE=<workspace>
@@ -202,12 +200,21 @@ pnpm run brainctl workspace run --path ~/.brain/workspace project-list.js
 pnpm run brainctl workspace run --path ~/.brain/workspace crm-list-people.js
 pnpm run brainctl workspace run --path ~/.brain/workspace reminder-list.js
 pnpm run brainctl workspace run --path ~/.brain/workspace file-save.js -- --source /path/to/file.pdf
+pnpm run brainctl workspace run --path ~/.brain/workspace bet-list.js
+pnpm run brainctl workspace run --path ~/.brain/workspace gmail-recent.js -- --limit 10
+pnpm run brainctl workspace run --path ~/.brain/workspace calendar-events.js -- --days 7
+pnpm run brainctl workspace run --path ~/.brain/workspace composio-connect.js -- --list
+pnpm run brainctl workspace run --path ~/.brain/workspace protonmail-send.js -- --list-drafts
+pnpm run brainctl workspace run --path ~/.brain/workspace finance-balances.js
+pnpm run brainctl workspace run --path ~/.brain/workspace whoop-profile.js
+pnpm run brainctl workspace run --path ~/.brain/workspace telegram-unread.js
 ```
 
-No external `assistant-agent-logic` checkout is required. The legacy
-`--assistant-repo` flag is accepted only as a deprecated no-op while the wrapper
-always resolves the native `@brain/assistant-logic` package in this checkout and
-runs its compiled `dist/cli/*.js` commands.
+No external `assistant-agent-logic` checkout is required. The legacy `--assistant-repo` flag is accepted only as a deprecated no-op. The wrapper prefers native compiled `dist/cli/*.js` commands for core stores and falls back to vendored `packages/assistant-logic/scripts/*` for live integrations.
+
+`workspace scaffold` writes empty stores and example templates only. Copy/fill `.env.example`, `composio.yaml.example`, `messaging.yaml.example`, `telegram.yaml.example`, and `protonmail.yaml.example` inside the private workspace; never commit filled credentials, OAuth tokens, Telegram sessions, ProtonMail Bridge passwords, finance tokens, WHOOP tokens, live API output, or private logs.
+
+Run `brainctl workspace commands --path <workspace>` to list the full command catalog and whether each command resolves to a native or vendored implementation.
 
 ## Optional web publishing and Composio setup
 

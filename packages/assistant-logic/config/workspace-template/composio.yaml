@@ -11,5 +11,9 @@ accounts:
       email: you@work.com
 
 calendars:
-  # Add named aliases for your calendars (optional)
+  # Add named aliases for your calendars (optional). Real calendar ids stay private.
   # football: "<google-calendar-id>@group.calendar.google.com"
+
+# Optional Gmail query excludes for private sender-specific noise filters.
+# Prefer workspace .env ASSISTANT_GMAIL_QUERY_EXCLUDES for secret/private values.
+gmail_query_excludes: []

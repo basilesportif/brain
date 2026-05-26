@@ -706,8 +706,11 @@ test("brainctl scaffolds and reuses in-repo assistant-logic JSON workspace store
     assert.equal(setup.status, 0, setup.stderr);
     const setupJson = JSON.parse(setup.stdout) as { details: { plan: { configured: string[] }; assistantWorkspaceScaffold: { writtenFiles: string[] } } };
     assert.ok(setupJson.details.plan.configured.some((item) => /assistant JSON store ready: todos/.test(item)));
-    assert.ok(setupJson.details.plan.configured.some((item) => /native assistant-logic CLI commands available/.test(item)));
+    assert.ok(setupJson.details.plan.configured.some((item) => /assistant-logic native and vendored commands available/.test(item)));
     assert.ok(setupJson.details.assistantWorkspaceScaffold.writtenFiles.includes(path.join("data", "todos.json")));
+    assert.ok(setupJson.details.assistantWorkspaceScaffold.writtenFiles.includes(path.join("data", "bets.json")));
+    assert.ok(setupJson.details.assistantWorkspaceScaffold.writtenFiles.includes(".env.example"));
+    assert.ok(setupJson.details.assistantWorkspaceScaffold.writtenFiles.includes("composio.yaml.example"));
     assert.ok(setupJson.details.assistantWorkspaceScaffold.writtenFiles.includes(path.join("instructions", "skills", "projects.md")));
     assert.ok(setupJson.details.assistantWorkspaceScaffold.writtenFiles.includes(path.join("private", "documents", "metadata.jsonl")));
 
@@ -764,6 +767,15 @@ test("brainctl scaffolds and reuses in-repo assistant-logic JSON workspace store
     assert.equal(fileListJson.details.stdout.documents[0]?.title, "Source note");
     assert.equal(fileListJson.details.stdout.documents[0]?.project, "Parity Project");
 
+    const addBet = spawnBrainctl(["workspace", "run", "--path", workspace, "bet-add.js", "--", "--date", "2026-05-26", "--market", "moneyline", "--side", "home", "--home", "Home", "--away", "Away", "--odds", "-110", "--units", "1"]);
+    assert.equal(addBet.status, 0, addBet.stderr);
+    const betList = spawnBrainctl(["workspace", "run", "--path", workspace, "bet-list.js"]);
+    assert.equal(betList.status, 0, betList.stderr);
+    const betListJson = JSON.parse(betList.stdout) as { details: { commandKind: string; stdout: { count: number; bets: Array<{ market: string }> } } };
+    assert.equal(betListJson.details.commandKind, "vendored");
+    assert.equal(betListJson.details.stdout.count, 1);
+    assert.equal(betListJson.details.stdout.bets[0]?.market, "moneyline");
+
     const status = spawnBrainctl(["workspace", "status", "--path", workspace]);
     assert.equal(status.status, 0, status.stderr);
     const statusJson = JSON.parse(status.stdout) as {
@@ -777,7 +789,7 @@ test("brainctl scaffolds and reuses in-repo assistant-logic JSON workspace store
           stateStores: Array<{ key: string; valid: boolean }>;
           fileSave: { ready: boolean; metadataPath: string };
           commands: Array<{ area: string; examples: string[] }>;
-          scripts: Array<{ path: string; present: boolean }>;
+          scripts: Array<{ script: string; kind: string; path: string; present: boolean }>;
         };
       };
     };
@@ -786,11 +798,15 @@ test("brainctl scaffolds and reuses in-repo assistant-logic JSON workspace store
     assert.equal(statusJson.details.status.assistantLogicRoot, assistantLogicPackage);
     assert.equal(statusJson.details.status.assistantLogicSource, "in-repo:@brain/assistant-logic");
     assert.equal(statusJson.details.status.deprecatedAssistantRepoIgnored, false);
-    assert.ok(statusJson.details.status.scripts.every((script) => script.present && script.path.startsWith(path.join(assistantLogicPackage, "dist", "cli"))));
+    assert.ok(statusJson.details.status.scripts.every((script) => script.present && (script.path.startsWith(path.join(assistantLogicPackage, "dist", "cli")) || script.path.startsWith(path.join(assistantLogicPackage, "scripts")))));
+    assert.ok(statusJson.details.status.scripts.some((script) => script.kind === "vendored" && script.script === "gmail-recent.js"));
+    assert.ok(statusJson.details.status.scripts.some((script) => script.kind === "native" && script.script === "todo-add.js"));
     assert.ok(statusJson.details.status.stateStores.every((store) => store.valid));
     assert.equal(statusJson.details.status.fileSave.ready, true);
     assert.equal(statusJson.details.status.fileSave.metadataPath, path.join(workspace, "private", "documents", "metadata.jsonl"));
-    assert.deepEqual(statusJson.details.status.commands.map((command) => command.area), ["todos", "projects", "crm", "reminders", "file-save"]);
+    assert.ok(statusJson.details.status.commands.map((command) => command.area).includes("gmail-email"));
+    assert.ok(statusJson.details.status.commands.map((command) => command.area).includes("telegram-user-client-and-messaging"));
+    assert.ok(statusJson.details.status.commands.map((command) => command.area).includes("whoop"));
     assert.ok(statusJson.details.status.commands.every((command) => command.examples.every((example) => !example.includes("--assistant-repo"))));
 
     const deprecatedOptionStatus = spawnBrainctl(["workspace", "status", "--path", workspace, "--assistant-repo", path.join(root, "missing-assistant-agent-logic")]);

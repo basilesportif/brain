@@ -279,28 +279,28 @@ backup.command("status")
   .option("--path <path>", "private workspace path override")
   .action(async (options) => exitWith(await backupCommand("status", options)));
 
-const workspaceCommands = program.command("workspace").description("Brain native assistant workspace JSON store helpers");
+const workspaceCommands = program.command("workspace").description("Brain assistant workspace helpers for native stores and vendored integrations");
 workspaceCommands.command("scaffold")
-  .description("Create the native Brain assistant workspace JSON scaffold without overwriting stores.")
+  .description("Create the Brain assistant workspace scaffold without overwriting stores or secrets.")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--path <path>", "private workspace path")
   .option("--assistant-repo <path>", "deprecated; ignored because Brain uses the native @brain/assistant-logic package")
   .option("--dry-run", "show planned scaffold paths without writing files")
   .action(async (options) => exitWith(await workspaceScaffoldCommand(options)));
 workspaceCommands.command("status")
-  .description("Inspect native Brain assistant workspace parity metadata.")
+  .description("Inspect Brain assistant workspace parity metadata, including vendored live-integration scripts.")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--path <path>", "private workspace path")
   .option("--assistant-repo <path>", "deprecated; ignored because Brain uses the native @brain/assistant-logic package")
   .action(async (options) => exitWith(await workspaceStatusCommand(options)));
 workspaceCommands.command("commands")
-  .description("List native Brain assistant-logic CLI commands for todos/projects/CRM/reminders/file-save.")
+  .description("List Brain assistant-logic commands, including native stores and vendored live integrations.")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--path <path>", "private workspace path")
   .option("--assistant-repo <path>", "deprecated; ignored because Brain uses the native @brain/assistant-logic package")
   .action(async (options) => exitWith(await workspaceCommandsCommand(options)));
 workspaceCommands.command("run")
-  .description("Run a native Brain assistant-logic CLI command with ASSISTANT_WORKSPACE and private document roots set.")
+  .description("Run a Brain assistant-logic command with ASSISTANT_WORKSPACE and private roots set.")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--path <path>", "private workspace path")
   .option("--assistant-repo <path>", "deprecated; ignored because Brain uses the native @brain/assistant-logic package")
@@ -1061,8 +1061,8 @@ async function workspaceScaffoldCommand(options: { workspace: string; path?: str
   return {
     ok: options.dryRun ? true : status.ready,
     summary: options.dryRun
-      ? "native assistant JSON workspace scaffold plan ready (dry run)"
-      : "native assistant JSON workspace scaffold reconciled without overwriting stores",
+      ? "assistant workspace scaffold plan ready (dry run)"
+      : "assistant workspace scaffold reconciled without overwriting stores or secrets",
     details: {
       workspace: options.workspace,
       workspaceRoot,
@@ -1079,8 +1079,8 @@ async function workspaceStatusCommand(options: { workspace: string; path?: strin
   return {
     ok: status.ready,
     summary: status.ready
-      ? "native assistant-logic JSON workspace parity paths are ready"
-      : "native assistant-logic JSON workspace parity paths are missing or invalid",
+      ? "assistant-logic workspace parity paths and vendored commands are ready"
+      : "assistant-logic workspace parity paths or vendored commands are missing or invalid",
     details: { workspace: options.workspace, workspaceRoot, status, sideEffects: "none" },
   };
 }
@@ -1089,14 +1089,10 @@ async function workspaceCommandsCommand(options: { workspace: string; path?: str
   const workspaceRoot = path.resolve(options.path ?? defaultWorkspaceRoot(options.workspace));
   const assistantLogicRoot = assistantLogicPackageRoot();
   const commands = assistantWorkspaceCommandCatalog(workspaceRoot, assistantLogicRoot);
-  const scriptMetadata = await Promise.all(commands.flatMap((group) => group.scripts).map(async (script) => ({
-    script,
-    path: assistantScriptPath(assistantLogicRoot, script),
-    metadata: await fileMetadata(assistantScriptPath(assistantLogicRoot, script)),
-  })));
+  const scriptMetadata = await assistantCommandScriptMetadata(assistantLogicRoot, commands.flatMap((group) => group.scripts));
   return {
-    ok: scriptMetadata.every((item) => item.metadata.present),
-    summary: "native assistant-logic JSON workspace command catalog rendered",
+    ok: scriptMetadata.every((item) => item.present),
+    summary: "assistant-logic workspace command catalog rendered",
     details: {
       workspace: options.workspace,
       workspaceRoot,
@@ -1114,23 +1110,16 @@ async function workspaceCommandsCommand(options: { workspace: string; path?: str
 async function workspaceRunCommand(script: string, scriptArgs: string[], options: { workspace: string; path?: string; assistantRepo?: string }): Promise<CliResult> {
   const workspaceRoot = path.resolve(options.path ?? defaultWorkspaceRoot(options.workspace));
   const assistantLogicRoot = assistantLogicPackageRoot();
-  const resolved = resolveAssistantScript(assistantLogicRoot, script);
+  const resolved = await resolveAssistantScript(assistantLogicRoot, script);
   if (!resolved.ok) return resolved.result;
   const forwardedArgs = scriptArgs[0] === "--" ? scriptArgs.slice(1) : scriptArgs;
-  const scriptMetadata = await fileMetadata(resolved.path);
-  if (!scriptMetadata.present) {
-    return {
-      ok: false,
-      summary: "native assistant-logic CLI command is missing",
-      details: { script, scriptPath: resolved.path, assistantLogicRoot, scriptMetadata, sideEffects: "none" },
-    };
-  }
   const env = {
     ...process.env,
     ...assistantWorkspaceEnv(workspaceRoot),
   };
-  const result = spawnSync(process.execPath, [resolved.path, ...forwardedArgs], {
-    cwd: assistantLogicRoot,
+  const runner = resolved.script.endsWith(".sh") ? "bash" : process.execPath;
+  const result = spawnSync(runner, [resolved.path, ...forwardedArgs], {
+    cwd: resolved.cwd,
     encoding: "utf8",
     env,
     maxBuffer: 10 * 1024 * 1024,
@@ -1141,13 +1130,14 @@ async function workspaceRunCommand(script: string, scriptArgs: string[], options
   return {
     ok: (result.status ?? 1) === 0,
     summary: (result.status ?? 1) === 0
-      ? `native assistant-logic CLI completed: ${resolved.script}`
-      : `native assistant-logic CLI failed: ${resolved.script}`,
+      ? `${resolved.kind} assistant-logic command completed: ${resolved.script}`
+      : `${resolved.kind} assistant-logic command failed: ${resolved.script}`,
     details: {
       workspace: options.workspace,
       workspaceRoot,
       assistantLogicRoot,
       assistantLogicSource: "in-repo:@brain/assistant-logic",
+      commandKind: resolved.kind,
       deprecatedAssistantRepoIgnored: Boolean(options.assistantRepo),
       script: resolved.script,
       scriptPath: resolved.path,
@@ -1156,7 +1146,9 @@ async function workspaceRunCommand(script: string, scriptArgs: string[], options
       exitCode: result.status,
       stdout: parsedStdout,
       stderr: String(redactSecrets(stderr)),
-      sideEffects: "native assistant-logic CLI controlled the JSON workspace state",
+      sideEffects: resolved.kind === "native"
+        ? "native assistant-logic CLI controlled the JSON workspace state"
+        : "vendored assistant-agent-logic script controlled workspace state or live integrations using private configuration",
     },
   };
 }
@@ -1175,6 +1167,7 @@ function assistantWorkspaceScaffoldPlan(workspaceRoot: string) {
   return {
     directories: assistantWorkspaceDirectories(workspaceRoot),
     jsonStores: ASSISTANT_STATE_STORES.map((store) => path.join(workspaceRoot, store.relativePath)),
+    configTemplates: assistantWorkspaceTemplateFiles(workspaceRoot).map((item) => item.destination),
     instructionOverlays: [
       path.join(workspaceRoot, "instructions", "README.md"),
       ...ASSISTANT_OVERLAY_SKILLS.map((skill) => path.join(workspaceRoot, "instructions", "skills", `${skill}.md`)),
@@ -1204,6 +1197,11 @@ async function ensureAssistantWorkspaceScaffold(workspaceRoot: string) {
     const result = await writeJsonIfMissing(filePath, store.defaultValue());
     (result.wrote ? writtenFiles : skippedExisting).push(path.relative(workspaceRoot, filePath));
   }
+  for (const template of assistantWorkspaceTemplateFiles(workspaceRoot)) {
+    const contents = await readFile(template.source, "utf8");
+    const result = await writeTextIfMissing(template.destination, contents);
+    (result.wrote ? writtenFiles : skippedExisting).push(path.relative(workspaceRoot, template.destination));
+  }
   const instructionReadme = path.join(workspaceRoot, "instructions", "README.md");
   const readmeResult = await writeTextIfMissing(instructionReadme, renderInstructionsReadme());
   (readmeResult.wrote ? writtenFiles : skippedExisting).push(path.relative(workspaceRoot, instructionReadme));
@@ -1230,6 +1228,17 @@ async function ensureAssistantWorkspaceScaffold(workspaceRoot: string) {
     skippedExisting,
     overwritten: false,
   };
+}
+
+function assistantWorkspaceTemplateFiles(workspaceRoot: string): Array<{ source: string; destination: string }> {
+  const templateRoot = path.join(assistantLogicPackageRoot(), "config", "workspace-template");
+  return [
+    { source: path.join(templateRoot, ".env.example"), destination: path.join(workspaceRoot, ".env.example") },
+    { source: path.join(templateRoot, "composio.yaml"), destination: path.join(workspaceRoot, "composio.yaml.example") },
+    { source: path.join(templateRoot, "messaging.yaml"), destination: path.join(workspaceRoot, "messaging.yaml.example") },
+    { source: path.join(templateRoot, "telegram.yaml"), destination: path.join(workspaceRoot, "telegram.yaml.example") },
+    { source: path.join(templateRoot, "protonmail.yaml"), destination: path.join(workspaceRoot, "protonmail.yaml.example") },
+  ];
 }
 
 function assistantWorkspaceDirectories(workspaceRoot: string): string[] {
@@ -1266,15 +1275,12 @@ async function assistantWorkspaceParityStatus(input: { workspaceRoot: string; wo
   const workspaceRoot = path.resolve(input.workspaceRoot);
   const assistantLogicRoot = assistantLogicPackageRoot();
   const assistantRepoMetadata = await fileMetadata(assistantLogicRoot);
-  const scriptMetadata = await Promise.all(ASSISTANT_PARITY_SCRIPTS.map(async (script) => ({
-    script,
-    path: assistantScriptPath(assistantLogicRoot, script),
-    present: (await fileMetadata(assistantScriptPath(assistantLogicRoot, script))).present,
-  })));
+  const commands = assistantWorkspaceCommandCatalog(workspaceRoot, assistantLogicRoot);
+  const scriptMetadata = await assistantCommandScriptMetadata(assistantLogicRoot, commands.flatMap((group) => group.scripts));
   const stateStores = await Promise.all(ASSISTANT_STATE_STORES.map(async (store) => {
     const filePath = path.join(workspaceRoot, store.relativePath);
     const metadata = await fileMetadata(filePath);
-    const validation = metadata.present ? await validateAssistantStateStore(filePath, store.rootKeys) : { valid: false, issue: "missing" };
+    const validation = metadata.present ? await validateAssistantStateStore(filePath, store) : { valid: false, issue: "missing" };
     return { key: store.key, relativePath: store.relativePath, path: filePath, present: metadata.present, metadata, ...validation };
   }));
   const instructionFiles = [
@@ -1306,7 +1312,6 @@ async function assistantWorkspaceParityStatus(input: { workspaceRoot: string; wo
     "documents",
     path.join("documents", "metadata"),
   ].map(async (dir) => ({ relativePath: dir, metadata: await fileMetadata(path.join(workspaceRoot, dir)) })));
-  const commands = assistantWorkspaceCommandCatalog(workspaceRoot, assistantLogicRoot);
   const instructionsReady = instructionMetadata.every((item) => item.metadata.present);
   const tasksReady = (await fileMetadata(tasksReadme)).present;
   const repoRegistryReady = (await fileMetadata(repoRegistryReadme)).present || (await fileMetadata(path.join(workspaceRoot, ".claude", "repo-registry", "index.yaml"))).present;
@@ -1351,12 +1356,18 @@ async function assistantWorkspaceParityStatus(input: { workspaceRoot: string; wo
   };
 }
 
-async function validateAssistantStateStore(filePath: string, rootKeys: readonly string[]): Promise<{ valid: boolean; issue?: string }> {
+async function validateAssistantStateStore(filePath: string, spec: AssistantStateStoreSpec): Promise<{ valid: boolean; issue?: string }> {
   try {
     const parsed = JSON.parse(await readFile(filePath, "utf8")) as Record<string, unknown>;
+    if (spec.rootType === "array") {
+      return Array.isArray(parsed) ? { valid: true } : { valid: false, issue: "root is not an array" };
+    }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { valid: false, issue: "root is not an object" };
-    for (const key of rootKeys) {
+    for (const key of spec.arrayRootKeys) {
       if (!Array.isArray(parsed[key])) return { valid: false, issue: `missing array root key: ${key}` };
+    }
+    for (const key of spec.objectRootKeys ?? []) {
+      if (!parsed[key] || typeof parsed[key] !== "object" || Array.isArray(parsed[key])) return { valid: false, issue: `missing object root key: ${key}` };
     }
     return { valid: true };
   } catch (error) {
@@ -1390,26 +1401,88 @@ function assistantLogicPackageRoot(): string {
 }
 
 function assistantScriptPath(assistantLogicRoot: string, script: string): string {
+  return assistantNativeScriptPath(assistantLogicRoot, script);
+}
+
+function assistantNativeScriptPath(assistantLogicRoot: string, script: string): string {
   const scriptName = normalizeAssistantScriptName(script);
   return path.join(assistantLogicRoot, "dist", "cli", scriptName);
 }
 
+function assistantVendoredScriptPath(assistantLogicRoot: string, script: string): string {
+  const scriptName = normalizeAssistantScriptName(script);
+  return path.join(assistantLogicRoot, "scripts", scriptName);
+}
+
 function normalizeAssistantScriptName(script: string): string {
   const base = script.startsWith("scripts/") ? script.slice("scripts/".length) : script;
-  const withExtension = base.endsWith(".js") ? base : `${base}.js`;
+  const withExtension = /\.(?:c?js|mjs|sh)$/u.test(base) ? base : `${base}.js`;
   if (withExtension.includes("..") || path.isAbsolute(withExtension) || withExtension.includes(path.sep)) {
     throw new Error(`unsupported assistant script path: ${script}`);
   }
   return withExtension;
 }
 
-function resolveAssistantScript(assistantLogicRoot: string, script: string): { ok: true; script: string; path: string } | { ok: false; result: CliResult } {
+type AssistantCommandKind = "native" | "vendored";
+
+type ResolvedAssistantCommand =
+  | { ok: true; kind: AssistantCommandKind; script: string; path: string; cwd: string }
+  | { ok: false; result: CliResult };
+
+async function resolveAssistantScript(assistantLogicRoot: string, script: string): Promise<ResolvedAssistantCommand> {
   try {
     const normalized = normalizeAssistantScriptName(script);
-    return { ok: true, script: normalized, path: path.join(assistantLogicRoot, "dist", "cli", normalized) };
+    const nativePath = assistantNativeScriptPath(assistantLogicRoot, normalized);
+    const nativeMetadata = await fileMetadata(nativePath);
+    if (nativeMetadata.present) {
+      return { ok: true, kind: "native", script: normalized, path: nativePath, cwd: assistantLogicRoot };
+    }
+    const vendoredPath = assistantVendoredScriptPath(assistantLogicRoot, normalized);
+    const vendoredMetadata = await fileMetadata(vendoredPath);
+    if (vendoredMetadata.present) {
+      return { ok: true, kind: "vendored", script: normalized, path: vendoredPath, cwd: path.join(assistantLogicRoot, "scripts") };
+    }
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        summary: "assistant-logic command is missing",
+        details: {
+          script,
+          normalizedScript: normalized,
+          assistantLogicRoot,
+          nativePath,
+          nativeMetadata,
+          vendoredPath,
+          vendoredMetadata,
+          sideEffects: "none",
+        },
+      },
+    };
   } catch (error) {
     return { ok: false, result: { ok: false, summary: "assistant-logic CLI command name is invalid", details: { script, error: errorMessage(error), sideEffects: "none" } } };
   }
+}
+
+async function assistantCommandScriptMetadata(assistantLogicRoot: string, scripts: readonly string[]) {
+  const uniqueScripts = Array.from(new Set(scripts.map((script) => normalizeAssistantScriptName(script)))).sort();
+  return Promise.all(uniqueScripts.map(async (script) => {
+    const nativePath = assistantNativeScriptPath(assistantLogicRoot, script);
+    const vendoredPath = assistantVendoredScriptPath(assistantLogicRoot, script);
+    const nativeMetadata = await fileMetadata(nativePath);
+    const vendoredMetadata = await fileMetadata(vendoredPath);
+    const kind: AssistantCommandKind | "missing" = nativeMetadata.present ? "native" : vendoredMetadata.present ? "vendored" : "missing";
+    const activePath = kind === "native" ? nativePath : kind === "vendored" ? vendoredPath : nativePath;
+    return {
+      script,
+      present: kind !== "missing",
+      kind,
+      path: activePath,
+      metadata: kind === "vendored" ? vendoredMetadata : nativeMetadata,
+      native: { path: nativePath, metadata: nativeMetadata },
+      vendored: { path: vendoredPath, metadata: vendoredMetadata },
+    };
+  }));
 }
 
 function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogicRoot: string) {
@@ -1417,6 +1490,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
   return [
     {
       area: "todos",
+      integration: "native-json-store",
       state: path.join(workspaceRoot, "data", "todos.json"),
       scripts: ["todo-add.js", "todo-list.js", "todo-delete.js"],
       examples: [
@@ -1426,6 +1500,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "projects",
+      integration: "native-json-store",
       state: path.join(workspaceRoot, "data", "projects.json"),
       scripts: ["project-add.js", "project-list.js", "project-view.js", "project-update.js", "project-note.js", "project-resource.js", "project-task.js", "project-delete.js"],
       examples: [
@@ -1435,6 +1510,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "crm",
+      integration: "native-json-store",
       state: path.join(workspaceRoot, "data", "crm.json"),
       scripts: ["crm-add-person.js", "crm-add-notes.js", "crm-list-people.js", "crm-view.js", "crm-add-business.js", "crm-list-businesses.js", "crm-log.js", "crm-history.js", "crm-follow-ups.js", "crm-resolve.js", "crm-link.js", "crm-unlink.js", "crm-update-person.js", "crm-update-business.js", "crm-missing-fields.js", "crm-pipeline.js", "crm-stale.js", "crm-delete.js"],
       examples: [
@@ -1444,6 +1520,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "reminders",
+      integration: "native-json-store",
       state: path.join(workspaceRoot, "data", "reminders.json"),
       scripts: ["reminder-add.js", "reminder-list.js", "reminder-update.js", "reminder-delete.js", "reminder-check.js"],
       examples: [
@@ -1453,11 +1530,109 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "file-save",
+      integration: "native-private-files",
       state: assistantWorkspaceDocumentMetadataPath(workspaceRoot),
       scripts: ["file-save.js", "file-list.js"],
       examples: [
         runner("file-save.js", '--source "/path/to/file.pdf" --title "saved document"'),
         runner("file-list.js", ""),
+      ],
+    },
+    {
+      area: "betting",
+      integration: "vendored-assistant-agent-logic",
+      state: path.join(workspaceRoot, "data", "bets.json"),
+      scripts: ["bet-add.js", "bet-list.js", "bet-result.js", "bet-summary.js", "bet-delete.js"],
+      examples: [
+        runner("bet-add.js", '--date 2026-05-26 --market moneyline --side home --home "Home" --away "Away" --odds -110 --units 1'),
+        runner("bet-summary.js", ""),
+      ],
+    },
+    {
+      area: "gmail-email",
+      integration: "vendored-live-composio-gmail",
+      state: [path.join(workspaceRoot, "data", "seen-emails.json"), path.join(workspaceRoot, "data", "dismissed-emails.json"), path.join(workspaceRoot, "data", "urgent-emails.json")],
+      privateConfig: [path.join(workspaceRoot, ".env"), path.join(workspaceRoot, "composio.yaml")],
+      scripts: ["gmail-recent.js", "gmail-search.js", "gmail-send.js", "gmail-actionable.js", "email-actionable.js", "urgent-email.js", "dismiss-email.js"],
+      examples: [
+        runner("gmail-recent.js", "--limit 10"),
+        runner("gmail-search.js", '--query "from:example@example.com"'),
+      ],
+    },
+    {
+      area: "google-calendar",
+      integration: "vendored-live-composio-google-calendar",
+      state: [path.join(workspaceRoot, "data", "calendar-allowlist.json"), path.join(workspaceRoot, "data", "seen-invites.json"), path.join(workspaceRoot, "data", "declined-invites-log.json"), path.join(workspaceRoot, "data", "flagged-events.json")],
+      privateConfig: [path.join(workspaceRoot, ".env"), path.join(workspaceRoot, "composio.yaml")],
+      scripts: ["calendar-events.js", "calendar-search.js", "calendar-create-event.js", "update-calendar-event.js", "calendar-add-guest.js", "calendar-check-invites.js", "calendar-allowlist.js", "flag-event.js", "fix-football-events.js"],
+      examples: [
+        runner("calendar-events.js", "--days 7"),
+        runner("calendar-allowlist.js", "--list"),
+      ],
+    },
+    {
+      area: "composio",
+      integration: "vendored-live-composio-connection",
+      state: path.join(workspaceRoot, "composio.yaml"),
+      privateConfig: [path.join(workspaceRoot, ".env"), path.join(workspaceRoot, "composio.yaml")],
+      scripts: ["composio-connect.js"],
+      examples: [
+        runner("composio-connect.js", "--list-configs --app gmail"),
+        runner("composio-connect.js", "--list"),
+      ],
+    },
+    {
+      area: "protonmail",
+      integration: "vendored-live-protonmail-bridge",
+      state: [path.join(workspaceRoot, "data", "protonmail-drafts.json"), path.join(workspaceRoot, "data", "protonmail-audit.jsonl")],
+      privateConfig: [path.join(workspaceRoot, "protonmail.yaml")],
+      scripts: ["protonmail-recent.js", "protonmail-search.js", "protonmail-send.js", "protonmail-actionable.js"],
+      examples: [
+        runner("protonmail-send.js", '--list-drafts'),
+        runner("protonmail-recent.js", "--limit 10"),
+      ],
+    },
+    {
+      area: "finance-mercury-plaid",
+      integration: "vendored-live-finance",
+      state: [path.join(workspaceRoot, "data"), path.join(workspaceRoot, ".env")],
+      privateConfig: [path.join(workspaceRoot, ".env")],
+      scripts: ["finance-source.js", "finance-accounts.js", "finance-balances.js", "finance-transactions.js", "mercury-accounts.js", "mercury-balances.js", "mercury-transactions.js", "plaid-link.js"],
+      examples: [
+        runner("finance-accounts.js", ""),
+        runner("finance-transactions.js", "--limit 25"),
+      ],
+    },
+    {
+      area: "whoop",
+      integration: "vendored-live-whoop",
+      state: path.join(workspaceRoot, ".env"),
+      privateConfig: [path.join(workspaceRoot, ".env")],
+      scripts: ["whoop-connect.js", "whoop-profile.js", "whoop-cycle.js", "whoop-recovery.js", "whoop-sleep.js", "whoop-workout.js"],
+      examples: [
+        runner("whoop-profile.js", ""),
+        runner("whoop-recovery.js", "--limit 7"),
+      ],
+    },
+    {
+      area: "telegram-user-client-and-messaging",
+      integration: "vendored-live-telegram-mtproto",
+      state: [path.join(workspaceRoot, "data", "dismissed-messages.json"), path.join(workspaceRoot, "data", "urgent-messages.json")],
+      privateConfig: [path.join(workspaceRoot, "messaging.yaml")],
+      scripts: ["telegram-login.js", "telegram-history.js", "telegram-unread.js", "messages-unread.js", "urgent-message.js", "dismiss-message.js"],
+      examples: [
+        runner("telegram-login.js", ""),
+        runner("messages-unread.js", "--telegram 20"),
+      ],
+    },
+    {
+      area: "utility-live-support",
+      integration: "vendored-assistant-agent-logic-utilities",
+      state: [path.join(workspaceRoot, "tasks"), path.join(workspaceRoot, "data")],
+      scripts: ["dictionary-deploy.js", "transcribe-voice.js", "register-loops.sh", "dispatch-claude-sdk.mjs", "validate-repo.js"],
+      examples: [
+        runner("validate-repo.js", ""),
+        runner("register-loops.sh", ""),
       ],
     },
   ];
@@ -1472,9 +1647,10 @@ function renderInstructionsReadme(): string {
     "",
     "Do not use overlays to redefine commands, storage paths, JSON formats, approval requirements, or safety rules.",
     "",
-    "Core Brain parity overlays include todo, projects, CRM, reminders, file-save, and repo-registry.",
-    "Optional/reference overlays are scaffolded for vendored assistant-agent-logic skill resources such as Composio, finance, messaging, ProtonMail, betting, dictionary, generated web pages, Mercury, and Whoop.",
-    "See `docs/assistant-logic-integration-audit.md` for which optional live integrations are native Brain features versus reference-only resources.",
+    "Brain ships native TypeScript commands for todo, projects, CRM, reminders, and file-save.",
+    "Brain also vendors the assistant-agent-logic live-integration command set for Composio/Gmail/Calendar, ProtonMail, finance/Mercury/Plaid, Whoop, Telegram user-client messaging, betting, dictionary, generated web pages, and loop utilities.",
+    "Keep personal account IDs, OAuth/API tokens, Telegram sessions, ProtonMail Bridge credentials, and finance/Whoop secrets in this private workspace, not in the Brain repo.",
+    "See `docs/assistant-logic-integration-audit.md` and `docs/migration.md` for the integrated/status table and private data migration guidance.",
     "",
   ].join("\n");
 }
@@ -2168,52 +2344,37 @@ const WORKSPACE_DIRS = [
   "documents",
   path.join("documents", "metadata"),
 ] as const;
-const ASSISTANT_STATE_STORES = [
-  { key: "todos", relativePath: path.join("data", "todos.json"), rootKeys: ["todos"], defaultValue: () => ({ version: 1, updatedAt: new Date().toISOString(), todos: [] }) },
-  { key: "projects", relativePath: path.join("data", "projects.json"), rootKeys: ["projects"], defaultValue: () => ({ version: 1, updatedAt: new Date().toISOString(), projects: [] }) },
-  { key: "crm", relativePath: path.join("data", "crm.json"), rootKeys: ["people", "businesses", "correspondence"], defaultValue: () => ({ version: 1, updatedAt: new Date().toISOString(), people: [], businesses: [], correspondence: [] }) },
-  { key: "reminders", relativePath: path.join("data", "reminders.json"), rootKeys: ["reminders"], defaultValue: () => ({ version: 1, updatedAt: new Date().toISOString(), reminders: [] }) },
+type AssistantStateStoreSpec = {
+  key: string;
+  relativePath: string;
+  rootType?: "object" | "array";
+  arrayRootKeys: readonly string[];
+  objectRootKeys?: readonly string[];
+  defaultValue: () => unknown;
+};
+
+const ASSISTANT_STATE_STORES: readonly AssistantStateStoreSpec[] = [
+  { key: "todos", relativePath: path.join("data", "todos.json"), arrayRootKeys: ["todos"], defaultValue: () => ({ version: 1, updatedAt: new Date().toISOString(), todos: [] }) },
+  { key: "projects", relativePath: path.join("data", "projects.json"), arrayRootKeys: ["projects"], defaultValue: () => ({ version: 1, updatedAt: new Date().toISOString(), projects: [] }) },
+  { key: "crm", relativePath: path.join("data", "crm.json"), arrayRootKeys: ["people", "businesses", "correspondence"], defaultValue: () => ({ version: 1, updatedAt: new Date().toISOString(), people: [], businesses: [], correspondence: [] }) },
+  { key: "reminders", relativePath: path.join("data", "reminders.json"), arrayRootKeys: ["reminders"], defaultValue: () => ({ version: 1, updatedAt: new Date().toISOString(), reminders: [] }) },
+  { key: "calendarAllowlist", relativePath: path.join("data", "calendar-allowlist.json"), arrayRootKeys: ["emails", "domains"], defaultValue: () => ({ version: 1, enabled: false, emails: [], domains: [], updatedAt: null }) },
+  { key: "seenInvites", relativePath: path.join("data", "seen-invites.json"), arrayRootKeys: [], objectRootKeys: ["seenIds"], defaultValue: () => ({ version: 1, seenIds: {}, updatedAt: null }) },
+  { key: "declinedInvitesLog", relativePath: path.join("data", "declined-invites-log.json"), arrayRootKeys: ["log"], defaultValue: () => ({ version: 1, log: [] }) },
+  { key: "dismissedEmails", relativePath: path.join("data", "dismissed-emails.json"), arrayRootKeys: [], objectRootKeys: ["threads", "senders"], defaultValue: () => ({ threads: {}, senders: {} }) },
+  { key: "seenEmails", relativePath: path.join("data", "seen-emails.json"), arrayRootKeys: [], objectRootKeys: ["seenIds"], defaultValue: () => ({ version: 1, seenIds: {}, lastCheckedAt: null, updatedAt: null }) },
+  { key: "urgentEmails", relativePath: path.join("data", "urgent-emails.json"), arrayRootKeys: [], objectRootKeys: ["threads"], defaultValue: () => ({ threads: {} }) },
+  { key: "flaggedEvents", relativePath: path.join("data", "flagged-events.json"), arrayRootKeys: [], objectRootKeys: ["events"], defaultValue: () => ({ events: {} }) },
+  { key: "dismissedMessages", relativePath: path.join("data", "dismissed-messages.json"), arrayRootKeys: [], objectRootKeys: ["chats"], defaultValue: () => ({ chats: {} }) },
+  { key: "seenMessages", relativePath: path.join("data", "seen-messages.json"), arrayRootKeys: [], objectRootKeys: ["seenIds"], defaultValue: () => ({ version: 1, seenIds: {}, lastCheckedAt: null, updatedAt: null }) },
+  { key: "urgentMessages", relativePath: path.join("data", "urgent-messages.json"), arrayRootKeys: [], objectRootKeys: ["chats"], defaultValue: () => ({ chats: {} }) },
+  { key: "bets", relativePath: path.join("data", "bets.json"), arrayRootKeys: ["bets"], defaultValue: () => ({ version: 1, updatedAt: new Date().toISOString(), bets: [] }) },
+  { key: "financeSources", relativePath: path.join("data", "finance-sources.json"), arrayRootKeys: ["sources"], defaultValue: () => ({ version: 1, sources: [] }) },
+  { key: "whoopAuthPlaceholder", relativePath: path.join("data", "whoop-auth.example.json"), arrayRootKeys: [], defaultValue: () => ({ note: "whoop-connect.js writes private OAuth tokens to data/whoop-auth.json; this placeholder contains no token values." }) },
+  { key: "protonmailDrafts", relativePath: path.join("data", "protonmail-drafts.json"), rootType: "array", arrayRootKeys: [], defaultValue: () => [] },
 ] as const;
 const ASSISTANT_OVERLAY_SKILLS = ["todo", "projects", "crm", "reminders", "file-save", "repo-registry", "calendar-allowlist", "composio", "finance", "messaging", "protonmail", "betting", "dictionary", "generated-web-page", "loops", "mercury", "whoop", "web-page-design"] as const;
 const ASSISTANT_OVERLAY_PROMPTS = ["email-reply-preferences", "bet-entry-preferences"] as const;
-const ASSISTANT_PARITY_SCRIPTS = [
-  "todo-add.js",
-  "todo-list.js",
-  "todo-delete.js",
-  "project-add.js",
-  "project-list.js",
-  "project-view.js",
-  "project-update.js",
-  "project-note.js",
-  "project-resource.js",
-  "project-task.js",
-  "project-delete.js",
-  "crm-add-person.js",
-  "crm-add-notes.js",
-  "crm-list-people.js",
-  "crm-view.js",
-  "crm-add-business.js",
-  "crm-list-businesses.js",
-  "crm-log.js",
-  "crm-history.js",
-  "crm-follow-ups.js",
-  "crm-resolve.js",
-  "crm-link.js",
-  "crm-unlink.js",
-  "crm-update-person.js",
-  "crm-update-business.js",
-  "crm-missing-fields.js",
-  "crm-pipeline.js",
-  "crm-stale.js",
-  "crm-delete.js",
-  "reminder-add.js",
-  "reminder-list.js",
-  "reminder-update.js",
-  "reminder-delete.js",
-  "reminder-check.js",
-  "file-save.js",
-  "file-list.js",
-] as const;
 const SETUP_PROGRESS_FILE = "setup-progress.json";
 const LOCAL_SETUP_CONTEXT_RELATIVE_PATH = path.join("private", "setup-context.json");
 const PRIVATE_WORKSPACE_GITIGNORE = [
@@ -3223,9 +3384,9 @@ function buildSetupPlan(input: {
   }
 
   if (input.assistantWorkspace.assistantRepoMetadata.present && input.assistantWorkspace.scripts.every((script) => script.present)) {
-    configured.push("native assistant-logic CLI commands available for JSON workspace parity");
+    configured.push("assistant-logic native and vendored commands available for full workspace parity");
   } else {
-    missing_required.push("native assistant-logic package/CLI commands missing for JSON workspace parity");
+    missing_required.push("assistant-logic package/native/vendored commands missing for workspace parity");
   }
 
   for (const store of input.assistantWorkspace.stateStores) {
