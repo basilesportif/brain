@@ -155,6 +155,10 @@ export class BrainSupervisor {
         },
       }));
       dispatchResults.push(...await this.dispatchActions(originEvent, returnToMain.actions));
+      if ((job.route === "return_to_main" || job.route === "dispatch_subagent") && !hasUserFacingAction(returnToMain.actions)) {
+        const fallback = subagentFallbackAction(job, result);
+        actions.push(fallback);
+      }
     }
 
     if (actions.length > 0) {
@@ -251,6 +255,25 @@ function subagentDeliveryActions(job: SubagentJob, result: SubagentRunResult): B
     ];
   }
   return [];
+}
+
+function subagentFallbackAction(job: SubagentJob, result: SubagentRunResult): BrainOutboundAction {
+  return {
+    type: "send_text",
+    text: formatSubagentResult(job, result),
+    format: "markdown",
+    target: originTargetFromJob(job),
+    metadata: { source: "subagent-result-fallback" },
+  };
+}
+
+function hasUserFacingAction(actions: BrainOutboundAction[]): boolean {
+  return actions.some((action) =>
+    action.type === "send_text" ||
+    action.type === "send_artifact" ||
+    action.type === "request_clarification" ||
+    action.type === "edit_message"
+  );
 }
 
 function subagentOriginEvent(job: SubagentJob, result: SubagentRunResult, fallbackEntrypoint: EntryPointInboundEvent["entrypoint"], nowIso: string): EntryPointInboundEvent {

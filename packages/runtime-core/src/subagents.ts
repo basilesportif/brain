@@ -41,6 +41,7 @@ export interface SubagentDispatchPort {
 export interface SubagentControlPort extends SubagentDispatchPort {
   requestCancel?(ref: string, reason?: string): Promise<CancelSubagentJobResult>;
   steerJob?(ref: string, text: string): Promise<SteerSubagentJobResult>;
+  activeSnapshot?(limit?: number, now?: Date): Promise<ActiveSubagentSnapshot>;
 }
 
 export interface SubagentRunResult {

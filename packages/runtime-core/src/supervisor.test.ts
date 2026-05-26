@@ -186,3 +186,45 @@ test("BrainSupervisor can return subagent terminal results to the main runtime",
   assert.match(action?.type === "send_text" ? action.text : "", /Main received/);
   assert.equal(action?.target?.conversationId, "conversation-1");
 });
+
+test("BrainSupervisor falls back to direct user-visible subagent result when return_to_main is silent", async () => {
+  const entrypoint = new FakeEntrypointAdapter({ workspaceId: "personal", entrypointId: "fake-main" });
+  const runtime = new BrainRuntime({
+    workspaceId: "personal",
+    workspace,
+    provider: new FakeProviderAdapter([{ type: "final", text: "   " }]),
+  });
+  const supervisor = new BrainSupervisor({ runtime, entrypoint, now: () => new Date("2026-05-21T00:00:00.000Z") });
+  const job = {
+    id: "job_silent_main",
+    workspaceId: "personal",
+    profile: "researcher",
+    route: "return_to_main",
+    ownerType: "main",
+    resultTarget: "main",
+    status: "completed",
+    prompt: "research",
+    artifactDir: "/tmp/job_silent_main",
+    summary: "Research parity gap",
+    enqueuedAt: "2026-05-21T00:00:00.000Z",
+    completedAt: "2026-05-21T00:00:01.000Z",
+    resultText: "child result",
+    metadata: {
+      origin: {
+        eventId: "evt_1",
+        entrypointId: "fake-main",
+        channelKind: "fake",
+        conversationId: "conversation-1",
+      },
+    },
+  } as const;
+
+  const delivered = await supervisor.deliverSubagentResult(job, { status: "completed", outputText: "child result" });
+
+  assert.equal(delivered.actions.length, 1);
+  assert.equal(entrypoint.dispatchedActions.filter((candidate) => candidate.type === "send_text").length, 1);
+  const action = entrypoint.dispatchedActions.find((candidate) => candidate.type === "send_text");
+  assert.match(action?.type === "send_text" ? action.text : "", /✅ Subagent researcher completed/);
+  assert.match(action?.type === "send_text" ? action.text : "", /child result/);
+  assert.equal(action?.target?.conversationId, "conversation-1");
+});

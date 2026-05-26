@@ -12,7 +12,8 @@
     "skills/file-save/SKILL.md"
   ],
   "prompts": [
-    "prompts/runtime-boundary.md"
+    "prompts/runtime-boundary.md",
+    "prompts/codex-chat-parity.md"
   ],
   "workflows": [
     "workflows/static-page.json"

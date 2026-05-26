@@ -35,12 +35,23 @@ test("native CLI surfaces preserve JSON stdout for todos/projects/CRM/reminders/
     const todos = parseStdout(runCli(workspace, "todo-list.js"));
     assert.equal(todos.count, 1);
     assert.equal(todos.todos[0].title, "Buy coffee");
+    const deletedTodo = parseStdout(runCli(workspace, "todo-delete.js", ["--id", todo.todo.id]));
+    assert.equal(deletedTodo.ok, true);
+    const todosAfterDelete = parseStdout(runCli(workspace, "todo-list.js"));
+    assert.equal(todosAfterDelete.count, 0);
 
     const project = parseStdout(runCli(workspace, "project-add.js", ["--name", "Parity Project"]));
     assert.equal(project.ok, true);
     assert.match(project.project.id, /^pj_[0-9a-f]{16}$/);
     const projects = parseStdout(runCli(workspace, "project-list.js"));
     assert.equal(projects.projects[0].name, "Parity Project");
+    const resource = parseStdout(runCli(workspace, "project-resource.js", ["--id", project.project.id, "--add", "--label", "Spec", "--url", "https://example.test/spec"]));
+    assert.equal(resource.ok, true);
+    const task = parseStdout(runCli(workspace, "project-task.js", ["--id", project.project.id, "--add", "Draft outline"]));
+    assert.equal(task.ok, true);
+    const viewedProject = parseStdout(runCli(workspace, "project-view.js", ["--id", project.project.id]));
+    assert.equal(viewedProject.project.resources[0].label, "Spec");
+    assert.equal(viewedProject.openTasks[0].title, "Draft outline");
 
     const person = parseStdout(runCli(workspace, "crm-add-person.js", ["--name", "Jane Smith"]));
     assert.equal(person.ok, true);
