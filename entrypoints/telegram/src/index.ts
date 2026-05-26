@@ -45,6 +45,12 @@ export interface TelegramEntrypointAdapterOptions extends TelegramEntrypointOpti
   polling?: TelegramPollingOptions;
   pairing?: TelegramPairingOptions;
   attachmentHandling?: TelegramAttachmentHandlingOptions;
+  /**
+   * Optional local-path send allowlist. When configured, send_artifact actions
+   * that upload a local path must resolve under one of these roots. Remote
+   * Telegram file ids/URIs are not constrained by this filesystem check.
+   */
+  allowedSendRoots?: string[];
   dispatchIntent?(intent: TelegramCallIntent, action: BrainOutboundAction): Promise<OutboundDispatchResult> | OutboundDispatchResult;
 }
 
@@ -388,6 +394,11 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
     if (this.isDuplicateReaction(action)) {
       return { action, status: "skipped", error: "Telegram reaction already sent" };
     }
+    try {
+      this.validateSendArtifactPath(action);
+    } catch (error) {
+      return { action, status: "failed", error: error instanceof Error ? error.message : String(error) };
+    }
     const intent = outboundActionToTelegramIntent(action);
     if (!intent) return actionDispatchResult(action, intent);
     if (this.options.dispatchIntent) return this.options.dispatchIntent(intent, action);
@@ -404,6 +415,15 @@ export class TelegramEntrypointAdapter implements BrainEntrypointAdapter {
       }
     }
     return actionDispatchResult(action, intent);
+  }
+
+  private validateSendArtifactPath(action: BrainOutboundAction): void {
+    if (action.type !== "send_artifact" || !action.path) return;
+    const roots = this.options.allowedSendRoots?.map((root) => path.resolve(root)) ?? [];
+    if (roots.length === 0) return;
+    const resolved = path.resolve(action.path);
+    if (roots.some((root) => isInsidePath(resolved, root))) return;
+    throw new Error(`Refusing to send Telegram artifact outside allowed roots: ${action.path}`);
   }
 
   async resolveAttachmentDownload(attachment: BrainAttachment): Promise<BrainAttachment> {

@@ -57,6 +57,7 @@ test("buildPrompt exposes private workspace paths and codex-chat parity behavior
   assert.match(prompt, /Main-loop routing parity/);
   assert.match(prompt, /main_loop: model=<configured-or-runtime-default>/);
   assert.match(prompt, /Dispatch a subagent for repo\/file inspection/);
+  assert.match(prompt, /stress\/fan-out requests/);
   assert.match(prompt, /For add\/delete, run the mutation and then always run/);
   assert.match(prompt, /include the full updated numbered todo list/);
   assert.match(prompt, /project-resource\.js/);

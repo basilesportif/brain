@@ -5,17 +5,39 @@ import { BrainRuntime, BrainSupervisor, EmployeeLifecycle, FakeProviderAdapter, 
 
 test("RuntimeCommandInterceptor handles logs and deploy/update as safe service commands", async () => {
   const interceptor = new RuntimeCommandInterceptor({
-    logs: { async tail() { return [{ at: "2026-05-21T00:00:00.000Z", level: "info", component: "test", message: "hello", raw: { token: "secret" } }]; } },
+    logs: { async tail() { return [{ at: "2026-05-21T00:00:00.000Z", level: "info", component: "test", message: "hello sk-proj-abcdefghijklmnopqrstuvwxyz", raw: { token: "secret" } }]; } },
   });
   const logs = await interceptor.handle(event("logs raw 5"));
   assert.equal(logs?.handled, true);
   assert.equal(logs?.command, "logs");
   assert.match(logs?.actions[0]?.type === "send_text" ? logs.actions[0].text : "", /Runtime logs/);
   assert.doesNotMatch(logs?.actions[0]?.type === "send_text" ? logs.actions[0].text : "", /secret/);
+  assert.doesNotMatch(logs?.actions[0]?.type === "send_text" ? logs.actions[0].text : "", /sk-proj-/);
 
   const deploy = await interceptor.handle(event("update"));
   assert.equal(deploy?.handled, true);
   assert.match(deploy?.actions[0]?.type === "send_text" ? deploy.actions[0].text : "", /will not pull/);
+});
+
+test("RuntimeCommandInterceptor handles loop status before provider turns", async () => {
+  const interceptor = new RuntimeCommandInterceptor({
+    automation: {
+      health: () => ({
+        ok: true,
+        workspaceId: "personal",
+        loops: [{ id: "daily-brief", enabled: true, status: "ready", schedule: { valid: true, dueNow: false, noHostSchedulerInstalled: true } }],
+        monitors: [{ id: "runtime-errors", enabled: false, status: "disabled" }],
+      }),
+    },
+  });
+
+  const loops = await interceptor.handle(event("loop status"));
+  assert.equal(loops?.handled, true);
+  assert.equal(loops?.command, "loops");
+  const text = loops?.actions[0]?.type === "send_text" ? loops.actions[0].text : "";
+  assert.match(text, /Automation status: ok/);
+  assert.match(text, /daily-brief/);
+  assert.match(text, /runtime-errors/);
 });
 
 test("RuntimeCommandInterceptor formats and controls subagent jobs", async () => {

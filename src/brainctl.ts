@@ -113,6 +113,7 @@ program.command("start")
   .option("--telegram-download-dir <path>", "directory for downloaded Telegram attachments")
   .option("--telegram-transcription-command <cmd>", "private command used to transcribe local voice/audio/video files; receives file path as argv[1]")
   .option("--employee-runtime", "enable provider-backed Employee sessions for employee start/steer commands")
+  .option("--automation-file <path>", "optional loops/monitors YAML/JSON file for service-level loop status")
   .action(async (options) => exitWith(await startCommand(options)));
 
 program.command("run")
@@ -142,6 +143,7 @@ program.command("run")
   .option("--telegram-download-dir <path>", "directory for downloaded Telegram attachments")
   .option("--telegram-transcription-command <cmd>", "private command used to transcribe local voice/audio/video files; receives file path as argv[1]")
   .option("--employee-runtime", "enable provider-backed Employee sessions for employee start/steer commands")
+  .option("--automation-file <path>", "optional loops/monitors YAML/JSON file for service-level loop status")
   .action(async (options) => exitWith(await runCommand(options)));
 
 program.command("health")
@@ -232,6 +234,7 @@ web.command("publish")
   .option("--id <id>", "page id")
   .option("--title <title>", "override page title")
   .option("--runtime-root <path>", "runtime pages root")
+  .option("--runtime-host <host>", "optional SSH host that owns the runtime pages root")
   .option("--manifest-path <path>", "manifest path")
   .option("--public-base-url <url>", "public pages base URL")
   .option("--ttl-hours <n>", "scratch TTL in hours", parseNumberOption)
@@ -242,6 +245,7 @@ web.command("publish")
 web.command("prune")
   .description("Prune expired generated pages from the runtime root.")
   .option("--runtime-root <path>", "runtime pages root")
+  .option("--runtime-host <host>", "optional SSH host that owns the runtime pages root")
   .option("--manifest-path <path>", "manifest path")
   .option("--now <iso>", "override current time")
   .option("--dry-run", "render prune result without deleting files")
@@ -476,6 +480,7 @@ interface SupervisorRunCommandOptions {
   telegramDownloadDir?: string;
   telegramTranscriptionCommand?: string;
   employeeRuntime?: boolean;
+  automationFile?: string;
 }
 
 type RuntimeSelectionSource = "cli" | "config" | "fallback" | "fake-flag";
@@ -521,6 +526,7 @@ async function startCommand(options: SupervisorRunCommandOptions & { foreground?
         liveTelegramPolling: Boolean(options.telegramPolling),
         telegramBootstrapPairing: options.telegramPairing ? "optional /pair code" : "first-user",
         telegramTranscription: publicTelegramTranscriptionRuntime(telegramTranscriptionRuntime(selection.runtime, options)),
+        automationFile: options.automationFile ? path.resolve(options.automationFile) : undefined,
         deployment: "not performed",
       },
     };
@@ -562,9 +568,16 @@ async function runCommand(options: SupervisorRunCommandOptions): Promise<CliResu
   const entrypoint = await createCliEntrypoint(selection.runtime, options, paths);
   const runtime = new BrainRuntime({ workspaceId: options.workspace, workspace, provider, subagents });
   const logReader = new FileRuntimeLogReader(paths.logPath);
+  const automation = options.automationFile
+    ? new AutomationRuntime({
+        workspaceId: options.workspace,
+        ...(await readAutomationConfig(options.automationFile)),
+      })
+    : undefined;
   const commandInterceptor = new RuntimeCommandInterceptor({
     subagents,
     employees,
+    automation,
     logs: logReader,
     health: { health: () => supervisor?.health() ?? { ok: false, detail: "supervisor not constructed" } },
   });
@@ -791,6 +804,7 @@ async function webPublishCommand(options: {
   id?: string;
   title?: string;
   runtimeRoot?: string;
+  runtimeHost?: string;
   manifestPath?: string;
   publicBaseUrl?: string;
   ttlHours?: number;
@@ -804,6 +818,7 @@ async function webPublishCommand(options: {
       id: options.id,
       title: options.title,
       runtimeRoot: options.runtimeRoot,
+      runtimeHost: options.runtimeHost,
       manifestPath: options.manifestPath,
       publicBaseUrl: options.publicBaseUrl,
       ttlHours: options.ttlHours,
@@ -818,9 +833,9 @@ async function webPublishCommand(options: {
   }
 }
 
-async function webPruneCommand(options: { runtimeRoot?: string; manifestPath?: string; now?: string; dryRun?: boolean }): Promise<CliResult> {
+async function webPruneCommand(options: { runtimeRoot?: string; runtimeHost?: string; manifestPath?: string; now?: string; dryRun?: boolean }): Promise<CliResult> {
   try {
-    const result = await pruneExpiredPages({ runtimeRoot: options.runtimeRoot, manifestPath: options.manifestPath, now: options.now, dryRun: options.dryRun });
+    const result = await pruneExpiredPages({ runtimeRoot: options.runtimeRoot, runtimeHost: options.runtimeHost, manifestPath: options.manifestPath, now: options.now, dryRun: options.dryRun });
     return { ok: true, summary: result.dryRun ? "generated page prune dry-run complete" : "generated pages pruned", details: result };
   } catch (error) {
     return { ok: false, summary: "generated page prune failed", details: { error: errorMessage(error), dryRun: Boolean(options.dryRun) } };
@@ -2108,7 +2123,7 @@ function subagentExecutorIdFor(selection: ResolvedSupervisorRuntime): string {
   return selection.providerKind === "fake" ? "brainctl-static" : `provider:${selection.providerKind}`;
 }
 
-async function createCliEntrypoint(selection: ResolvedSupervisorRuntime, options: SupervisorRunCommandOptions, paths: { stateRoot: string }): Promise<FakeEntrypointAdapter | TelegramEntrypointAdapter> {
+async function createCliEntrypoint(selection: ResolvedSupervisorRuntime, options: SupervisorRunCommandOptions, paths: { stateRoot: string; artifactRoot: string }): Promise<FakeEntrypointAdapter | TelegramEntrypointAdapter> {
   const kind = selection.entrypointKind;
   if (kind === "fake") {
     const entrypoint = new FakeEntrypointAdapter({ workspaceId: selection.workspaceId, entrypointId: selection.primaryEntrypointId, channelKind: "fake", displayName: "Brainctl fake entrypoint" });
@@ -2145,6 +2160,7 @@ async function createCliEntrypoint(selection: ResolvedSupervisorRuntime, options
     entrypointId: selection.primaryEntrypointId,
     displayName: selection.primaryEntrypoint.displayName,
     apiClient,
+    allowedSendRoots: telegramAllowedSendRoots(selection, paths, downloadDir),
     polling: options.telegramPolling ? {
       enabled: true,
       maxPolls: options.telegramMaxPolls,
@@ -2162,6 +2178,15 @@ async function createCliEntrypoint(selection: ResolvedSupervisorRuntime, options
       transcriptionFailureMode: "codex-chat",
     } : undefined,
   });
+}
+
+function telegramAllowedSendRoots(selection: ResolvedSupervisorRuntime, paths: { stateRoot: string; artifactRoot: string }, downloadDir: string): string[] {
+  const workspaceRoot = path.resolve(selection.workspace.workspacePath);
+  const artifactRoot = path.resolve(paths.artifactRoot);
+  const workspaceArtifactsRoot = path.resolve(workspaceRoot, "artifacts");
+  const privateDocumentFiles = path.resolve(workspaceRoot, "private", "documents", "files");
+  const telegramDownloads = path.resolve(downloadDir);
+  return Array.from(new Set([artifactRoot, workspaceArtifactsRoot, privateDocumentFiles, telegramDownloads]));
 }
 
 function commandTranscriber(command: string): TelegramAttachmentTranscriber {

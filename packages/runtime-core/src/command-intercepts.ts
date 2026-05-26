@@ -1,4 +1,5 @@
 import type { BrainOutboundAction, EntryPointInboundEvent, JsonRecord } from "@brain/entrypoint-protocol";
+import type { AutomationHealth } from "./automation.js";
 import type { SubagentJob, SubagentJobStatus } from "./jobs.js";
 import type { ActiveSubagentSnapshot, CancelSubagentJobResult, JobRefResolution, SteerSubagentJobResult, SubagentControlPort } from "./subagents.js";
 import type { EmployeeControlPort, EmployeeLifecycleResult, EmployeeRecord } from "./employees.js";
@@ -19,6 +20,10 @@ export interface RuntimeHealthProvider {
   health(): Promise<unknown> | unknown;
 }
 
+export interface AutomationInspectionPort {
+  health(): Promise<AutomationHealth> | AutomationHealth;
+}
+
 export interface SubagentInspectionPort extends SubagentControlPort {
   listJobs?(): Promise<SubagentJob[]>;
   activeSnapshot?(limit?: number, now?: Date): Promise<ActiveSubagentSnapshot>;
@@ -28,6 +33,7 @@ export interface SubagentInspectionPort extends SubagentControlPort {
 export interface RuntimeCommandInterceptorOptions {
   subagents?: SubagentInspectionPort;
   employees?: EmployeeControlPort;
+  automation?: AutomationInspectionPort;
   logs?: RuntimeLogReader;
   health?: RuntimeHealthProvider;
   maxLogLines?: number;
@@ -48,6 +54,8 @@ export const BRAIN_SERVICE_HELP_TEXT = `Brain service commands (handled before p
   logs [N]                — last N runtime log lines (default 100)
   logs raw [N]            — include raw structured log payloads when available
   introspect [N]          — alias for logs
+  loops                   — configured loop and monitor status
+  loop status             — alias for loops
   agents                  — active subagent jobs and usable refs
   agents detail           — active jobs plus 10 recent terminal jobs
   agents <N>              — active jobs plus N recent terminal jobs
@@ -74,6 +82,8 @@ export class RuntimeCommandInterceptor {
 
     const logCommand = parseLogCommand(text, this.options.maxLogLines ?? 2_000);
     if (logCommand.isLog) return this.textResult("logs", await this.formatLogs(logCommand.lines, logCommand.includeRaw));
+
+    if (parseLoopsCommand(text)) return this.textResult("loops", await this.formatAutomationStatus());
 
     const backend = parseSubagentBackendCommand(text);
     if (backend.isBackend) return this.textResult("agent backend", this.formatBackendSeam(backend));
@@ -118,6 +128,33 @@ export class RuntimeCommandInterceptor {
     if (entries.length === 0) return "No runtime log entries.";
     const rendered = entries.map((entry) => formatLogEntry(entry, includeRaw));
     return [`Runtime logs (last ${entries.length}${includeRaw ? ", raw" : ""}):`, "", ...rendered].join("\n");
+  }
+
+  private async formatAutomationStatus(): Promise<string> {
+    if (!this.options.automation) return "Automation runtime is not configured.";
+    try {
+      const health = await this.options.automation.health();
+      const enabledLoops = health.loops.filter((loop) => loop.enabled).length;
+      const enabledMonitors = health.monitors.filter((monitor) => monitor.enabled).length;
+      const lines = [
+        `Automation status: ${health.ok ? "ok" : "needs attention"} (workspace=${health.workspaceId})`,
+        `Loops: ${enabledLoops}/${health.loops.length} enabled`,
+      ];
+      if (health.loops.length === 0) lines.push("- no loops configured");
+      for (const loop of health.loops) {
+        const due = loop.schedule?.dueNow === undefined ? "" : ` dueNow=${loop.schedule.dueNow}`;
+        const schedule = loop.schedule ? ` scheduleValid=${loop.schedule.valid}${due}` : "";
+        lines.push(`- ${loop.enabled ? "enabled" : "disabled"} ${loop.id} status=${loop.status}${schedule}${loop.detail ? ` — ${loop.detail}` : ""}`);
+      }
+      lines.push(`Monitors: ${enabledMonitors}/${health.monitors.length} enabled`);
+      if (health.monitors.length === 0) lines.push("- no monitors configured");
+      for (const monitor of health.monitors) {
+        lines.push(`- ${monitor.enabled ? "enabled" : "disabled"} ${monitor.id} status=${monitor.status}${monitor.detail ? ` — ${monitor.detail}` : ""}`);
+      }
+      return lines.join("\n");
+    } catch (error) {
+      return `Automation status failed: ${errorMessage(error)}`;
+    }
   }
 
   private async formatJobs(lastN: number): Promise<string> {
@@ -216,6 +253,10 @@ export function parseLogCommand(text: string, maxLines = 2_000): { isLog: boolea
   const includeRaw = match[2]?.toLowerCase() === "raw";
   const lines = match[3] ? Math.min(Math.max(parseInt(match[3], 10), 1), maxLines) : 100;
   return { isLog: true, lines, includeRaw };
+}
+
+export function parseLoopsCommand(text: string): boolean {
+  return /^\/?(?:loops|loops?\s+status)$/i.test(text.trim());
 }
 
 export function parseAgentsCommand(text: string): { isAgents: boolean; lastN: number } {
@@ -383,7 +424,7 @@ async function resolveFromList(subagents: SubagentInspectionPort, ref: string): 
 
 function formatLogEntry(entry: RuntimeLogEntry, includeRaw: boolean): string {
   const prefix = [entry.at, entry.level, entry.component].filter(Boolean).join(" ");
-  const base = `${prefix ? `${prefix} ` : ""}${entry.message ?? "(no message)"}`;
+  const base = redactString(`${prefix ? `${prefix} ` : ""}${entry.message ?? "(no message)"}`);
   if (!includeRaw || entry.raw === undefined) return base;
   return `${base} ${safeJson(entry.raw)}`;
 }

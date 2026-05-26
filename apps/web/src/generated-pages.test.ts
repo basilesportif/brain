@@ -34,10 +34,34 @@ test("rejects secret-like files/content and symlinks", async () => {
     const secretPage = path.join(root, "secret-page");
     await writeFileRecursive(path.join(secretPage, "index.html"), "<title>x</title><script>const OPENAI_API_KEY = 'placeholder';</script>");
     await assert.rejects(() => validatePageDirectory(secretPage), /Secret-like content/);
+    const slackPage = path.join(root, "slack-page");
+    await writeFileRecursive(path.join(slackPage, "index.html"), "<title>x</title><script>const t = 'xoxb-123456789012345678901';</script>");
+    await assert.rejects(() => validatePageDirectory(slackPage), /Slack token/);
     const linkedPage = await makePage(path.join(root, "linked"));
     await symlink("/etc/passwd", path.join(linkedPage, "reference.txt"));
     await assert.rejects(() => validatePageDirectory(linkedPage), /Symlinks are not allowed/);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("honors codex-chat-web compatible environment aliases", async () => {
+  const root = await tempRoot();
+  const originalBase = process.env.CODEX_CHAT_WEB_PUBLIC_BASE_URL;
+  const originalRuntime = process.env.CODEX_CHAT_WEB_RUNTIME_ROOT;
+  const originalManifest = process.env.CODEX_CHAT_WEB_MANIFEST_PATH;
+  try {
+    process.env.CODEX_CHAT_WEB_PUBLIC_BASE_URL = "https://me.galebach.com/pages";
+    process.env.CODEX_CHAT_WEB_RUNTIME_ROOT = path.join(root, "runtime");
+    process.env.CODEX_CHAT_WEB_MANIFEST_PATH = path.join(root, "manifest.json");
+    const sourceDir = await makePage(root);
+    const result = await publishPage({ sourceDir, id: "env-page", now: "2026-05-21T00:00:00.000Z" });
+    assert.equal(result.url, "https://me.galebach.com/pages/env-page/");
+    assert.equal(await readFile(path.join(root, "runtime", "env-page", "index.html"), "utf8"), "<!doctype html><title>Brain Page</title><main>Hello</main>");
+  } finally {
+    if (originalBase === undefined) delete process.env.CODEX_CHAT_WEB_PUBLIC_BASE_URL; else process.env.CODEX_CHAT_WEB_PUBLIC_BASE_URL = originalBase;
+    if (originalRuntime === undefined) delete process.env.CODEX_CHAT_WEB_RUNTIME_ROOT; else process.env.CODEX_CHAT_WEB_RUNTIME_ROOT = originalRuntime;
+    if (originalManifest === undefined) delete process.env.CODEX_CHAT_WEB_MANIFEST_PATH; else process.env.CODEX_CHAT_WEB_MANIFEST_PATH = originalManifest;
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("prunes expired scratch pages", async () => {

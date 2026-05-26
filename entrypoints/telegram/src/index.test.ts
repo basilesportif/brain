@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { FileTelegramPairingStore, FileTelegramPollingStateStore, OpenAITelegramAttachmentTranscriber, TelegramBotApiClient, TelegramEntrypointAdapter, createTelegramWebhookServer, handleTelegramWebhookUpdate, loadTelegramToken, outboundActionToTelegramIntent, pollTelegramUpdates, resolveTelegramAttachmentDownload, telegramUpdateToInboundEvent, type OpenAIAudioTranscriptionClient, type TelegramBotApi, type TelegramCallIntent } from "./index.js";
@@ -586,6 +586,38 @@ test("Telegram token loading and local upload boundaries redact secrets", async 
     const intent = outboundActionToTelegramIntent({ type: "send_artifact", path: "/tmp/voice.ogg", mimeType: "audio/ogg", target: { conversationId: "123" } });
     assert.equal(intent?.method, "sendVoice");
     assert.equal(intent?.payload.voice, "/tmp/voice.ogg");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("TelegramEntrypointAdapter refuses local artifact sends outside configured roots", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-telegram-send-root-"));
+  const allowed = path.join(root, "artifacts");
+  const allowedFile = path.join(allowed, "ok.png");
+  const deniedFile = path.join(root, "secret.png");
+  try {
+    await mkdir(allowed, { recursive: true });
+    await writeFile(allowedFile, "ok");
+    await writeFile(deniedFile, "no");
+    const calls: TelegramCallIntent[] = [];
+    const adapter = new TelegramEntrypointAdapter({
+      workspaceId: "personal",
+      allowedSendRoots: [allowed],
+      dispatchIntent: (intent, action) => {
+        calls.push(intent);
+        return { action, status: "sent" };
+      },
+    });
+
+    const denied = await adapter.dispatch({ type: "send_artifact", path: deniedFile, target: { conversationId: "123" } });
+    assert.equal(denied.status, "failed");
+    assert.match(denied.error ?? "", /outside allowed roots/);
+    assert.equal(calls.length, 0);
+
+    const sent = await adapter.dispatch({ type: "send_artifact", path: allowedFile, target: { conversationId: "123" } });
+    assert.equal(sent.status, "sent");
+    assert.equal(calls[0]?.payload.photo, allowedFile);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
