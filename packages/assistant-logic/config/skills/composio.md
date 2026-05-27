@@ -49,6 +49,8 @@ echo '{...}' | node scripts/calendar-create-event.js
 node scripts/calendar-add-guest.js EVENT_ID guest@example.com
 ```
 
+`calendar-create-event.js` automatically omits attendees that match the workspace's configured own email addresses. Do not add Tim/the user as an attendee for events that are simply for them; create the event on the intended calendar instead. If an own email truly must be invited as a separate guest, pass `"includeSelfAttendees": true`.
+
 > **DATE ACCURACY — CRITICAL.** Relative day references ("Friday", "next Monday", "tomorrow", "this weekend") are the single biggest source of calendar bugs. Past failure: on Tuesday April 21, "Friday" was mentally calculated as April 25 — which is a Saturday. The correct Friday was April 24. These four rules are non-negotiable:
 >
 > 1. **Never pre-compute relative dates for sub-agents.** When the user says "Friday", "next Monday", "tomorrow", etc., do NOT calculate the absolute date yourself and hand the sub-agent a string like `"2026-04-25"`. Pass the relative phrase through, or let the sub-agent resolve the date from scratch using today's actual date. Pre-computed dates pollute the sub-agent's context with your (possibly wrong) arithmetic.

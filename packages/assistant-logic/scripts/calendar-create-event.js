@@ -8,7 +8,8 @@
  *   start       (required) — ISO datetime e.g. "2026-03-21T10:00:00"
  *   end         (required) — ISO datetime
  *   timeZone    (optional, default "America/New_York")
- *   attendees   (optional) — array of email strings
+ *   attendees   (optional) — array of email strings or attendee objects
+ *                 Own/self emails are omitted by default to avoid self-invites
  *   description (optional)
  *   location    (optional)
  *   transparency (optional) — "transparent" (free) or "opaque" (busy, default)
@@ -16,6 +17,8 @@
  *   recurrence  (optional) — array of RRULE strings
  *   calendarId  (optional, default "primary")
  *   sendUpdates (optional, default "all")
+ *   includeSelfAttendees (optional, default false) — set true only if you
+ *                 intentionally want to invite one of the configured own emails
  *
  * Usage:
  *   echo '{"summary":"Lunch","start":"...","end":"..."}' | node scripts/calendar-create-event.js
@@ -26,6 +29,7 @@ const {
   requireGoogleCalendarAccount,
 } = require("./lib/config");
 const { getAccessToken, googleFetch } = require("./lib/google-auth");
+const { buildCalendarAttendees } = require("./lib/calendar-attendees");
 
 const GCAL_BASE = "https://www.googleapis.com/calendar/v3";
 
@@ -67,9 +71,12 @@ async function main() {
     end: { dateTime: end, timeZone },
   };
 
-  if (input.attendees && input.attendees.length > 0) {
-    body.attendees = input.attendees.map((email) => ({ email }));
-  }
+  const attendees = buildCalendarAttendees(input.attendees, {
+    composio,
+    calendarId,
+    includeSelfAttendees: input.includeSelfAttendees,
+  });
+  if (attendees) body.attendees = attendees;
   if (input.description) body.description = input.description;
   if (input.location) body.location = input.location;
   if (input.transparency) body.transparency = input.transparency;
