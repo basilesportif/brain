@@ -84,11 +84,11 @@ You can use either form with `--app`.
 
 ## v3 API endpoint
 
-The script supports the newer v3 endpoint (`POST /api/v3/connected_accounts/link`), which is the recommended way to generate connection links. Use `--v3` or pass an `ac_`-prefixed auth config ID (nanoid format) to activate it automatically.
+The script uses the current v3.1 endpoint (`POST /api/v3.1/connected_accounts/link`) to generate connection links. The legacy `--v3` flag is still accepted for compatibility, but v3.1 is always used.
 
-Additional v3 endpoints:
-- **Check status**: `GET /api/v3/connected_accounts/{nanoid}/status`
-- **Manual refresh**: `POST /api/v3/connected_accounts/{nanoid}/refresh` (also available via `--refresh --id <ca_id>`)
+Additional v3.1 endpoints:
+- **Check status**: `GET /api/v3.1/connected_accounts/{nanoid}`
+- **Manual refresh**: `POST /api/v3.1/connected_accounts/{nanoid}/refresh` (also available via `--refresh --id <ca_id>`)
 
 ## Notes
 

@@ -13,6 +13,9 @@
  */
 const { loadComposioConfig } = require("./lib/config");
 
+const COMPOSIO_API_VERSION = "v3.1";
+const COMPOSIO_API_PREFIX = `/api/${COMPOSIO_API_VERSION}`;
+
 // App name aliases — map common/friendly names to actual Composio app names
 const APP_ALIASES = {
   google_calendar: "googlecalendar",
@@ -55,15 +58,26 @@ async function api(method, path, body) {
   return data;
 }
 
+function itemsFrom(data) {
+  return Array.isArray(data) ? data : data.items || [];
+}
+
 // --list-configs [--app <name>]
 async function listConfigs(appFilter) {
-  const data = await api("GET", "/api/v1/integrations");
-  let items = (data.items || data).map((c) => ({
+  const params = new URLSearchParams({
+    limit: "1000",
+    show_disabled: "true",
+  });
+  if (appFilter) params.set("toolkit_slug", resolveAppName(appFilter));
+
+  const data = await api("GET", `${COMPOSIO_API_PREFIX}/auth_configs?${params}`);
+  let items = itemsFrom(data).map((c) => ({
     id: c.id,
     name: c.name,
-    app: c.appName || c.app_name,
-    authScheme: c.authScheme || c.auth_scheme,
-    createdAt: c.createdAt || c.created_at,
+    app: c.toolkit?.slug || c.appName || c.app_name,
+    authScheme: c.auth_scheme || c.authScheme,
+    status: c.status,
+    createdAt: c.created_at || c.createdAt,
   }));
   if (appFilter) {
     const filter = resolveAppName(appFilter);
@@ -76,10 +90,15 @@ async function listConfigs(appFilter) {
 
 // --generate --app <name> --user-id <id> [--redirect-url <url>] [--integration-id <id>] [--v3]
 async function generateLink(opts) {
-  const { app, userId, redirectUrl, integrationId, useV3 } = opts;
+  const { app, userId, redirectUrl, integrationId } = opts;
   const resolvedApp = resolveAppName(app);
 
-  // If no integration ID given, find one for the app
+  if (!userId) {
+    throw new Error("--user-id is required for --generate");
+  }
+
+  // If no auth config ID is given, find one for the app. The option is
+  // still named --integration-id for CLI compatibility with the old v1 flow.
   let intId = integrationId;
   if (!intId) {
     const configs = await listConfigs(resolvedApp);
@@ -88,72 +107,64 @@ async function generateLink(opts) {
         `No integration found for app "${resolvedApp}". Run --list-configs to see available integrations.`
       );
     }
-    intId = configs[0].id;
+    const config = configs.find((c) => c.status !== "DISABLED") || configs[0];
+    intId = config.id;
     process.stderr.write(
-      `Using integration: ${configs[0].name} (${intId})\n`
+      `Using auth config: ${config.name} (${intId})\n`
     );
   }
 
-  // Use v3 endpoint if requested or if integration ID is nanoid format (ac_xxx)
-  if (useV3 || (intId && /^ac_/.test(intId))) {
-    return generateLinkV3({ authConfigId: intId, userId, redirectUrl });
-  }
-
-  // v1 endpoint — requires data: {} in body
-  const body = {
-    integrationId: intId,
-    data: {},
-    redirectUri: redirectUrl || undefined,
-  };
-  if (userId) body.userUuid = userId;
-
-  const data = await api("POST", "/api/v1/connectedAccounts", body);
-  return {
-    connectionStatus: data.connectionStatus,
-    connectedAccountId: data.id,
-    redirectUrl: data.redirectUrl,
-    integrationId: intId,
-  };
+  return generateLinkV3({ authConfigId: intId, userId, redirectUrl });
 }
 
-// v3 endpoint: POST /api/v3/connected_accounts/link
+// v3 endpoint: POST /api/v3.1/connected_accounts/link
 async function generateLinkV3(opts) {
   const { authConfigId, userId, redirectUrl } = opts;
   const body = {
     auth_config_id: authConfigId,
+    user_id: userId,
   };
-  if (userId) body.entity_id = userId;
-  if (redirectUrl) body.redirect_url = redirectUrl;
+  if (redirectUrl) body.callback_url = redirectUrl;
 
-  const data = await api("POST", "/api/v3/connected_accounts/link", body);
+  const data = await api("POST", `${COMPOSIO_API_PREFIX}/connected_accounts/link`, body);
   return {
     connectionStatus: data.status || "INITIATED",
-    connectedAccountId: data.id || data.connected_account_id,
+    connectedAccountId: data.connected_account_id || data.id,
     redirectUrl: data.redirect_url || data.url,
+    linkToken: data.link_token,
+    expiresAt: data.expires_at,
     authConfigId: authConfigId,
   };
 }
 
 // --check --id <connected_account_id>
 async function checkConnection(id) {
-  const data = await api("GET", `/api/v1/connectedAccounts/${id}`);
+  const data = await api("GET", `${COMPOSIO_API_PREFIX}/connected_accounts/${id}`);
   return {
     id: data.id,
-    status: data.connectionStatus || data.status,
-    app: data.appName || data.app_name,
-    createdAt: data.createdAt || data.created_at,
-    updatedAt: data.updatedAt || data.updated_at,
+    status: data.status || data.connectionStatus,
+    app: data.toolkit?.slug || data.appName || data.app_name,
+    authConfigId: data.auth_config?.id,
+    userId: data.user_id,
+    createdAt: data.created_at || data.createdAt,
+    updatedAt: data.updated_at || data.updatedAt,
   };
 }
 
 // --list
 async function listConnected() {
-  const data = await api("GET", "/api/v1/connectedAccounts?showActiveOnly=false");
-  const items = (data.items || data).map((c) => ({
+  const params = new URLSearchParams({
+    limit: "1000",
+    account_type: "ALL",
+  });
+  const data = await api("GET", `${COMPOSIO_API_PREFIX}/connected_accounts?${params}`);
+  const items = itemsFrom(data).map((c) => ({
     id: c.id,
-    status: c.connectionStatus || c.status,
-    app: c.appName || c.app_name,
-    createdAt: c.createdAt || c.created_at,
+    status: c.status || c.connectionStatus,
+    app: c.toolkit?.slug || c.appName || c.app_name,
+    authConfigId: c.auth_config?.id,
+    userId: c.user_id,
+    createdAt: c.created_at || c.createdAt,
   }));
   return items;
 }
@@ -163,8 +174,8 @@ function usage() {
   --list-configs [--app <name>]           List integrations (auth configs)
   --generate --app <name> --user-id <id>  Generate a connection link
     [--redirect-url <url>]
-    [--integration-id <id>]
-    [--v3]                                Use v3 endpoint (auto if ac_ ID)
+    [--integration-id <auth_config_id>]   Existing flag name; expects ac_ auth config ID
+    [--v3]                                Accepted for backwards compatibility (v3.1 is always used)
   --check --id <ca_id>                    Check connection status
   --refresh --id <ca_id>                  Trigger token refresh (v3)
   --list                                  List all connected accounts
@@ -222,7 +233,7 @@ async function main() {
         process.stderr.write("Error: --id is required for --refresh\n");
         process.exit(1);
       }
-      result = await api("POST", `/api/v3/connected_accounts/${args.id}/refresh`, {});
+      result = await api("POST", `${COMPOSIO_API_PREFIX}/connected_accounts/${args.id}/refresh`, {});
       break;
     case "list":
       result = await listConnected();
@@ -232,7 +243,6 @@ async function main() {
   }
 
   console.log(JSON.stringify(result, null, 2));
-  process.exit(0);
 }
 
 main().catch((err) => {

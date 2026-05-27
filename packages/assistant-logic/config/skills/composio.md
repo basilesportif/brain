@@ -11,7 +11,7 @@
 
 ## Fast Path (Direct Google API Scripts)
 
-Optimized scripts that extract OAuth tokens from Composio and call Google APIs directly. 3-5x faster than Composio execute calls. **Sub-agents should use these for all read operations.**
+Optimized scripts that call Google APIs through Composio's v3 proxy without exposing OAuth tokens. 3-5x faster than broad Composio execute calls. **Sub-agents should use these for all read operations.**
 
 ### Calendar
 
@@ -220,33 +220,33 @@ Auth header: `x-api-key: $COMPOSIO_API_KEY`
 
 ```bash
 node -e '
-fetch("https://backend.composio.dev/api/v1/connectedAccounts?showActiveOnly=false", {
+fetch("https://backend.composio.dev/api/v3.1/connected_accounts?limit=1000&account_type=ALL", {
   headers: { "x-api-key": process.env.COMPOSIO_API_KEY }
 }).then(r => r.json()).then(d => console.log(JSON.stringify(d, null, 2)))
 '
 ```
 
-### Execute an action (generic)
+### Execute a proxy request (generic)
 
 ```bash
 node -e '
-const [action, accountId, input] = [process.argv[1], process.argv[2], JSON.parse(process.argv[3])];
-fetch(`https://backend.composio.dev/api/v2/actions/${action}/execute`, {
+const [accountId, endpoint, method = "GET"] = process.argv.slice(1);
+fetch("https://backend.composio.dev/api/v3.1/tools/execute/proxy", {
   method: "POST",
   headers: { "x-api-key": process.env.COMPOSIO_API_KEY, "Content-Type": "application/json" },
-  body: JSON.stringify({ connectedAccountId: accountId, input })
+  body: JSON.stringify({ connected_account_id: accountId, endpoint, method })
 }).then(r => r.json()).then(d => console.log(JSON.stringify(d, null, 2)))
-' ACTION_NAME ca_XXXX '{"key":"value"}'
+' ca_XXXX /gmail/v1/users/me/profile GET
 ```
 
 ### Example: get Gmail profile
 
 ```bash
 node -e '
-fetch("https://backend.composio.dev/api/v2/actions/GMAIL_GET_PROFILE/execute", {
+fetch("https://backend.composio.dev/api/v3.1/tools/execute/proxy", {
   method: "POST",
   headers: { "x-api-key": process.env.COMPOSIO_API_KEY, "Content-Type": "application/json" },
-  body: JSON.stringify({ connectedAccountId: "ca_XXXX", input: {} })
+  body: JSON.stringify({ connected_account_id: "ca_XXXX", endpoint: "https://gmail.googleapis.com/gmail/v1/users/me/profile", method: "GET" })
 }).then(r => r.json()).then(d => console.log(JSON.stringify(d, null, 2)))
 '
 ```

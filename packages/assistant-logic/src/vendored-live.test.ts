@@ -47,12 +47,11 @@ test("vendored Composio command can run against a mock base URL without real cre
 
   let sawApiKey = false;
   const server = http.createServer((req, res) => {
-    if (req.url === "/api/v1/integrations" && req.method === "GET") {
+    if (req.url === "/api/v3.1/auth_configs?limit=1000&show_disabled=true&toolkit_slug=gmail" && req.method === "GET") {
       sawApiKey = req.headers["x-api-key"] === "fake-composio-key";
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ items: [
-        { id: "ac_gmail", name: "Gmail", appName: "gmail", authScheme: "OAUTH2", createdAt: "2026-05-26T00:00:00.000Z" },
-        { id: "ac_calendar", name: "Calendar", appName: "googlecalendar", authScheme: "OAUTH2", createdAt: "2026-05-26T00:00:00.000Z" },
+        { id: "ac_gmail", name: "Gmail", toolkit: { slug: "gmail" }, auth_scheme: "OAUTH2", status: "ENABLED", created_at: "2026-05-26T00:00:00.000Z" },
       ] }));
       return;
     }
@@ -71,8 +70,8 @@ test("vendored Composio command can run against a mock base URL without real cre
 
     assert.equal(result.status, 0, result.stderr);
     assert.equal(sawApiKey, true);
-    const parsed = JSON.parse(result.stdout) as Array<{ id: string; name: string; app: string; authScheme: string; createdAt: string }>;
-    assert.deepEqual(parsed, [{ id: "ac_gmail", name: "Gmail", app: "gmail", authScheme: "OAUTH2", createdAt: "2026-05-26T00:00:00.000Z" }]);
+    const parsed = JSON.parse(result.stdout) as Array<{ id: string; name: string; app: string; authScheme: string; status: string; createdAt: string }>;
+    assert.deepEqual(parsed, [{ id: "ac_gmail", name: "Gmail", app: "gmail", authScheme: "OAUTH2", status: "ENABLED", createdAt: "2026-05-26T00:00:00.000Z" }]);
   } finally {
     await close(server).catch(() => undefined);
     fs.rmSync(root, { recursive: true, force: true });
