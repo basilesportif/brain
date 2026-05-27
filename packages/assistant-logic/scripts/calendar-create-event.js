@@ -92,7 +92,91 @@ async function main() {
     body: JSON.stringify(body),
   });
 
-  console.log(JSON.stringify(event, null, 2));
+  const finalEvent = attendees
+    ? event
+    : await clearImplicitSelfAttendee(client, calendarId, event, body);
+
+  console.log(JSON.stringify(finalEvent, null, 2));
+}
+
+async function clearImplicitSelfAttendee(client, calendarId, createdEvent, requestBody) {
+  const eventId =
+    createdEvent?.id ||
+    createdEvent?.event_id ||
+    createdEvent?.response_data?.id ||
+    createdEvent?.response_data?.event_id ||
+    createdEvent?.response_data?.event?.id;
+
+  const resolvedEventId =
+    eventId || (await findCreatedEventId(client, calendarId, requestBody));
+
+  if (!resolvedEventId) {
+    process.stderr.write(
+      "Warning: created event id not found; could not clear implicit self attendee.\n"
+    );
+    return createdEvent;
+  }
+
+  try {
+    return await googleFetch(
+      client,
+      `${GCAL_BASE}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(
+        resolvedEventId
+      )}?sendUpdates=none`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ attendees: [] }),
+      }
+    );
+  } catch (err) {
+    process.stderr.write(
+      `Warning: could not clear implicit self attendee for created event: ${err.message}\n`
+    );
+    return createdEvent;
+  }
+}
+
+async function findCreatedEventId(client, calendarId, requestBody) {
+  const start = new Date(requestBody.start.dateTime || requestBody.start.date);
+  const end = new Date(requestBody.end.dateTime || requestBody.end.date);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
+
+  const timeMin = new Date(start.getTime() - 60 * 60 * 1000).toISOString();
+  const timeMax = new Date(end.getTime() + 60 * 60 * 1000).toISOString();
+  const params = new URLSearchParams({
+    timeMin,
+    timeMax,
+    q: requestBody.summary,
+    singleEvents: "true",
+    orderBy: "startTime",
+    maxResults: "10",
+  });
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const data = await googleFetch(
+      client,
+      `${GCAL_BASE}/calendars/${encodeURIComponent(calendarId)}/events?${params}`
+    );
+    const match = (data.items || [])
+      .filter((ev) => ev.status !== "cancelled")
+      .find((ev) => {
+        const evStart = ev.start?.dateTime || ev.start?.date;
+        return ev.summary === requestBody.summary && sameEventStart(evStart, requestBody.start);
+      });
+    if (match?.id) return match.id;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return null;
+}
+
+function sameEventStart(eventStart, requestedStart) {
+  if (!eventStart) return false;
+  if (requestedStart.date && !requestedStart.dateTime) {
+    return eventStart === requestedStart.date;
+  }
+  const eventMs = new Date(eventStart).getTime();
+  const requestedMs = new Date(requestedStart.dateTime).getTime();
+  return !Number.isNaN(eventMs) && !Number.isNaN(requestedMs) && eventMs === requestedMs;
 }
 
 main().catch((err) => {
