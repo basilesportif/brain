@@ -3,7 +3,7 @@ const { COMPOSIO_BASE, loadComposioConfig } = require("./config");
 /**
  * Historical note: this module used to return OAuth access tokens that
  * scripts then used to hit Google APIs directly. As of April 2026 Composio
- * always returns "REDACTED" for stored tokens on the v3 connected_accounts
+ * always returns "REDACTED" for stored tokens on the v3.1 connected_accounts
  * endpoint, so the direct-token path no longer works.
  *
  * Instead we route every Google API call through Composio's current v3.1
@@ -31,7 +31,7 @@ async function getAccessToken(connectedAccountId, options = {}) {
 }
 
 /**
- * Call a Google API URL via the Composio v2 proxy.
+ * Call a Google API URL via the Composio v3.1 proxy.
  *
  * Signature matches the previous `googleFetch(token, url, options)` — the
  * first argument is now the opaque client returned by `getAccessToken`.
@@ -107,7 +107,7 @@ async function executeMappedGoogleTool(composio, connectedAccountId, url, option
   const mapped = mapGoogleApiToComposioTool(url, options);
   if (!mapped) {
     throw new Error(
-      "Composio proxy is unavailable and no v3 tool mapping exists for this Google API call"
+      "Composio proxy is unavailable and no v3.1 tool mapping exists for this Google API call"
     );
   }
   const data = await composioExecute(mapped.toolSlug, connectedAccountId, mapped.arguments, {
@@ -491,14 +491,14 @@ function parseUrl(rawUrl) {
 }
 
 /**
- * Execute a named Composio action (v3 tools/execute). Useful for calls that
+ * Execute a named Composio action (v3.1 tools/execute). Useful for calls that
  * the proxy can't satisfy (e.g. Composio-managed helpers) or when a caller
  * prefers the action interface.
  */
 async function composioExecute(action, connectedAccountId, input = {}, options = {}) {
   const composio = options.composio || loadComposioConfig(options);
 
-  // Resolve user_id from the connected account — v3 execute requires it.
+  // Resolve user_id from the connected account — v3.1 execute requires it.
   let userId = options.userId;
   if (!userId) {
     const lookup = await fetch(
