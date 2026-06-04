@@ -4,7 +4,7 @@ Use this skill when Tim asks for real site or page visual design work: a new vis
 
 This skill owns the design phase: design brief, visual direction, reference analysis, screenshots, critique, and improvement passes. It does not own scratch-page publishing. If the chosen design needs to become a browser-viewable artifact after the design direction is locked, read `config/skills/generated-web-page.md` and use that workflow for static page packaging and publishing.
 
-Do not use this skill for ordinary static webpage generation or publishing, simple content edits, simple data visualizations, maps, operational reports, charts, tables, calculators, or one-off functional scratch pages to view on `me.galebach.com` through `codex-chat-web` unless Tim explicitly asks for a serious visual redesign, design system, or real site design.
+Do not use this skill for ordinary static webpage generation or publishing, simple content edits, simple data visualizations, maps, operational reports, charts, tables, calculators, one-off functional scratch pages, temporary pages, private preview pages, quick pages, or other simple browser-viewable artifacts unless Tim explicitly asks for a serious visual redesign, design system, or real site design. Those scratch/simple page requests default to `generated-web-page.md` and publishing through `codex-chat-web` using the configured public base URL unless Tim asks otherwise.
 
 ## Routing Boundary
 
@@ -16,9 +16,9 @@ Use `web-page-design.md` when the user says or implies:
 
 Use `generated-web-page.md` instead when the request is primarily:
 
-- Create, publish, or share a static HTML/CSS/JS scratch page.
+- Create, publish, or share a static HTML/CSS/JS scratch, temporary, private preview, quick, or one-off page.
 - Make a quick report, functional tool, small interactive artifact, map, chart, table, calculator, simple data visualization, or ordinary mock page where visual design direction is not the main task.
-- Create a one-off page to view on `me.galebach.com` through `codex-chat-web`.
+- Create a one-off page to view through the configured `codex-chat-web` scratch-page publisher.
 - Edit copy or content on an existing static page without rethinking the visual system.
 
 If both apply, start here only when the request is real site, landing page, or app page work. Complete the design interview and brief first; after Tim chooses or authorizes a direction, switch to `generated-web-page.md` for implementation and publishing.

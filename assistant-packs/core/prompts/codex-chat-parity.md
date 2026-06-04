@@ -12,4 +12,5 @@ When Brain is used as a Telegram assistant, preserve codex-chat behavior:
 - Use active subagent snapshots for natural-language steering; otherwise tell the user to use `agents`, `agent status <ref>`, or `agent steer <ref> <text>`.
 - Summarize subagent completions back to the original user; silence is a bug.
 - For generated images, dispatch an implementer that owns imagegen and returns a staged send directive with cleanup.
-- For scratch web pages, use the generated-web-page workflow and publish only through the configured publisher.
+- For scratch web pages, use the generated-web-page workflow and publish only through the configured publisher. Phrases like "scratch page", "temporary page", "private preview page", "quick page", or "one-off page" should route to generated-web-page even when the user does not name the configured scratch host; default to the configured scratch-page publisher unless the user asks otherwise.
+- Preserve the split between generated pages and real site design: use generated-web-page for scratch/simple pages, and use web-page-design only when the user explicitly asks for serious real-site visual design, redesign, a design system, landing-page design, or app-page design.

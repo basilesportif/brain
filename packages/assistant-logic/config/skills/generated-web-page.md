@@ -1,12 +1,12 @@
 # Generated Web Page Skill
 
-Use this skill when Tim asks to create, publish, or share a generated webpage, interactive static page, simple data visualization, mockup, report, chart, table, calculator, small tool, Google Maps-style static page, one-off scratch page, or other browser-viewable HTML/CSS/JS artifact.
+Use this skill when Tim asks to create, publish, or share a generated webpage, interactive static page, simple data visualization, mockup, report, chart, table, calculator, small tool, Google Maps-style static page, one-off scratch page, or other browser-viewable HTML/CSS/JS artifact. Phrases like "scratch page", "temporary page", "private preview page", "quick page", or "one-off page" route here even when Tim does not name the configured scratch host; default to publishing through `codex-chat-web` using the publisher's configured public base URL unless Tim asks otherwise.
 
-Use this skill, not `config/skills/web-page-design.md`, when Tim asks for a simple data visualization, map, report, chart, table, calculator, or one-off scratch page to view on `me.galebach.com` through `codex-chat-web`, unless he explicitly asks for a serious visual redesign, design system, or real site design.
+Use this skill, not `config/skills/web-page-design.md`, when Tim asks for a simple data visualization, map, report, chart, table, calculator, one-off scratch page, temporary page, private preview page, quick page, or other functional static page, unless he explicitly asks for a serious visual redesign, design system, or real site design.
 
 Do not use this skill as the first stop when Tim is primarily asking for real site or page visual design work: a new visual/product design from scratch, visual redesign, brand direction, design system, landing-page design, homepage design, app-page design, or design mockup. Use `config/skills/web-page-design.md` first for the design brief, visual direction, reference analysis, screenshots, critique, and improvement pass. If that design work needs a static webpage after the direction is locked, return here for packaging and publishing.
 
-`me.galebach.com` is an on-demand static HTML/CSS/JS scratch page host, not a dashboard. Default generated pages are unlisted scratch URLs under `/pages/<id>/` with TTL/pruning. Request-specific pages are not committed to source repos unless Tim explicitly promotes the implementation.
+The `codex-chat-web` publisher is the source of truth for scratch page URLs: `CODEX_CHAT_WEB_PUBLIC_BASE_URL` may override `DEFAULT_PUBLIC_BASE_URL` in `scripts/lib/generated-pages.mjs` (currently Tim's local default is `https://me.galebach.com/pages`). Treat that configured host as an on-demand static HTML/CSS/JS scratch page host, not a dashboard. Default generated pages are unlisted scratch URLs under `/pages/<id>/` with TTL/pruning. Request-specific pages are not committed to source repos unless Tim explicitly promotes the implementation.
 
 ## Repository Authority
 
@@ -97,7 +97,7 @@ Useful options:
 --manifest-path /home/tim/.assistant-claude/workspace/data/web-pages/manifest.json
 ```
 
-Defaults are a 24 hour TTL, `private-link` visibility, scratch status, `/srv/codex-chat-web/pages/<id>/` runtime placement, and unlisted `https://me.galebach.com/pages/<id>/` public URLs. Promoted pages have no expiry.
+Defaults are a 24 hour TTL, `private-link` visibility, scratch status, `/srv/codex-chat-web/pages/<id>/` runtime placement, and unlisted public URLs derived from the configured publisher base URL (`CODEX_CHAT_WEB_PUBLIC_BASE_URL` or `DEFAULT_PUBLIC_BASE_URL`, currently `https://me.galebach.com/pages`). Promoted pages have no expiry.
 
 If the publisher host cannot see the source artifact directory, stage the package to a temporary directory on the publisher host first, then run the publisher against that staged copy. If the publisher cannot reach the manifest or runtime path, stop and report the blocker; do not bypass the publisher.
 

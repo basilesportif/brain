@@ -5,7 +5,9 @@ description: Build, validate, and publish static generated pages through Brain's
 
 # generated-web-page
 
-Use this skill when a user asks Brain to create a one-off static HTML/CSS/JS page, report, visualization, map-style page, calculator, or small browser tool.
+Use this skill when a user asks Brain to create a one-off static HTML/CSS/JS page, report, visualization, map-style page, calculator, or small browser tool. Phrases like "scratch page", "temporary page", "private preview page", "quick page", or "one-off page" route here even when the user does not name a host. Default to the configured scratch-page publisher unless the user asks otherwise.
+
+Use this skill for scratch/simple browser-viewable artifacts, not for serious real-site visual design, visual redesign, design systems, landing-page design, or app-page design. Those real-site design requests should use the web-page-design workflow first when available.
 
 ## Boundaries
 
