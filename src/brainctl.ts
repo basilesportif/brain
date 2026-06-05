@@ -1517,10 +1517,11 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
       area: "projects",
       integration: "native-json-store",
       state: path.join(workspaceRoot, "data", "projects.json"),
-      scripts: ["project-add.js", "project-list.js", "project-view.js", "project-update.js", "project-note.js", "project-resource.js", "project-task.js", "project-delete.js"],
+      scripts: ["project-add.js", "project-list.js", "project-view.js", "project-update.js", "project-note.js", "project-notes-list.js", "project-resource.js", "project-task.js", "project-delete.js"],
       examples: [
         runner("project-add.js", '--name "Tax Strategy 2026"'),
         runner("project-list.js", ""),
+        runner("project-notes-list.js", "--current"),
       ],
     },
     {

@@ -2,7 +2,7 @@
 
 This package is the native Brain home for the assistant-agent-logic workspace parity layer.
 
-Imported source baseline: `/home/tim/pkg/tim/assistant-agent-logic` at commit `60089113e49501fd6f8e11c4e81039d1ced3f4b0`.
+Imported source baseline: `/home/tim/pkg/tim/assistant-agent-logic` at commit `04570bed4e9abe1d9829a48dde6adbe4d2e11a0b`.
 
 Included:
 

@@ -228,7 +228,7 @@ export function buildPrompt(event: EntryPointInboundEvent, workspace: WorkspaceC
       commandWrapper: `pnpm run brainctl workspace run --path ${workspacePath} <script>.js -- <args>`,
       commonScripts: {
         todos: ["todo-add.js", "todo-list.js", "todo-delete.js"],
-        projects: ["project-add.js", "project-list.js", "project-view.js", "project-update.js", "project-note.js", "project-resource.js", "project-task.js", "project-delete.js"],
+        projects: ["project-add.js", "project-list.js", "project-view.js", "project-update.js", "project-note.js", "project-notes-list.js", "project-resource.js", "project-task.js", "project-delete.js"],
         crm: ["crm-add-person.js", "crm-add-business.js", "crm-list-people.js", "crm-list-businesses.js", "crm-view.js", "crm-log.js", "crm-history.js", "crm-follow-ups.js", "crm-resolve.js", "crm-link.js", "crm-unlink.js", "crm-update-person.js", "crm-update-business.js", "crm-missing-fields.js", "crm-pipeline.js", "crm-stale.js", "crm-delete.js"],
         reminders: ["reminder-add.js", "reminder-list.js", "reminder-update.js", "reminder-delete.js", "reminder-check.js"],
         fileSave: ["file-save.js", "file-list.js"],
