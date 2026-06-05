@@ -24,6 +24,7 @@ Mapping:
 - `instructions/skills/finance.md` overlays `config/skills/finance.md`
 - `instructions/skills/calendar-allowlist.md` overlays `config/skills/calendar-allowlist.md`
 - `instructions/skills/crm.md` overlays `config/skills/crm.md`
+- `instructions/skills/conference-lists.md` overlays `config/skills/conference-lists.md`
 - `instructions/skills/betting.md` overlays `config/skills/betting.md`
 - `instructions/skills/dictionary.md` overlays `config/skills/dictionary.md`
 - `instructions/skills/projects.md` overlays `config/skills/projects.md`

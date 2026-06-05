@@ -1,6 +1,6 @@
 # Assistant-agent-logic integration audit
 
-Source audited: `/home/tim/pkg/tim/assistant-agent-logic` at `60089113e49501fd6f8e11c4e81039d1ced3f4b0`.
+Source audited: `/home/tim/pkg/tim/assistant-agent-logic` after the 2026-06-05 parity/concurrency pass.
 
 Goal: Tim can move the codex-chat/assistant-agent-logic setup to Brain without functionality loss while keeping personal data, credentials, OAuth/session tokens, account ids, and live API results in the private workspace only.
 
@@ -13,6 +13,7 @@ Goal: Tim can move the codex-chat/assistant-agent-logic setup to Brain without f
 | CRM | Native TypeScript | `packages/assistant-logic/src/lib/crm-store.ts`, `src/cli/crm-*.ts` | `data/crm.json` |
 | Reminders | Native TypeScript | `packages/assistant-logic/src/lib/reminder-store.ts`, `src/cli/reminder-*.ts` | `data/reminders.json` |
 | File-save | Native TypeScript | `packages/assistant-logic/src/lib/file-save-store.ts`, `src/cli/file-*.ts` | `private/documents/metadata.jsonl` and private document bytes |
+| Conference lists/favorites | Native TypeScript plus vendored script compatibility | `packages/assistant-logic/src/lib/conference-favorite-store.ts`, `src/cli/conference-favorite.ts`, `config/skills/conference-lists.md` | `data/conference-lists/<list-id>/conferences.json` and `manifest.json` in private workspace |
 | Betting | Vendored executable scripts with Brain wrapper | `packages/assistant-logic/scripts/bet-*.js`; run with `brainctl workspace run bet-*.js` | `data/bets.json`; bet entries are private workspace data |
 | Google Calendar and invite allowlist | Vendored executable live scripts with Brain wrapper | `scripts/calendar-*.js`, `scripts/update-calendar-event.js`, `scripts/flag-event.js`, `scripts/fix-football-events.js` | `COMPOSIO_API_KEY` in workspace `.env`; connected account ids/calendars in private `composio.yaml`; state in `data/calendar-allowlist.json`, `seen-invites.json`, `declined-invites-log.json`, `flagged-events.json` |
 | Gmail / generic actionable email | Vendored executable live scripts with Brain wrapper | `scripts/gmail-*.js`, `email-actionable.js`, `urgent-email.js`, `dismiss-email.js` | `COMPOSIO_API_KEY` and Gmail connected account ids in private workspace; email state in `data/seen-emails.json`, `dismissed-emails.json`, `urgent-emails.json` |
@@ -31,6 +32,8 @@ Goal: Tim can move the codex-chat/assistant-agent-logic setup to Brain without f
 
 The former "optional live integrations not ported as scripts" section is closed. The live integrations are now integrated by vendoring the assistant-agent-logic scripts into the Brain monorepo and routing them through `brainctl workspace run` with Brain workspace environment variables. Core JSON stores remain native TypeScript; live integrations remain vendored CommonJS where native conversion would be larger than this pass.
 
+The 2026-06-05 parity pass also aligned JSON-store concurrency behavior across native TypeScript and vendored CommonJS: state writes use unique temporary files, store-level advisory locks, and locked read-modify-write transactions for todo, project, CRM, reminder, and conference favorite/list mutations.
+
 ## Security boundary
 
 Included in Brain:
@@ -46,7 +49,7 @@ Excluded from Brain:
 - `.env`, OAuth/token/session files, Telegram MTProto sessions, ProtonMail Bridge passwords, API keys, account ids that Tim considers private, and live API outputs;
 - private logs/caches/document bytes.
 
-`brainctl workspace scaffold` writes only empty JSON stores and example templates such as `.env.example`, `composio.yaml.example`, `messaging.yaml.example`, `telegram.yaml.example`, and `protonmail.yaml.example`. Operators copy/rename/fill those files inside the private workspace.
+`brainctl workspace scaffold` writes only empty JSON stores and example templates such as `.env.example`, `composio.yaml.example`, `messaging.yaml.example`, `telegram.yaml.example`, and `protonmail.yaml.example`. The in-repo template sources are named `config/workspace-template/*.yaml`; the scaffolded private workspace copies get the `.example` suffix. Operators copy/rename/fill those files inside the private workspace.
 
 ## Verification coverage
 
@@ -54,6 +57,7 @@ Automated Brain checks cover:
 
 - TypeScript build of the native packages and `brainctl` wrapper;
 - no-network native CLI compatibility tests;
+- JSON-store and conference-list concurrent write tests;
 - `brainctl workspace scaffold/status/commands` discovery of native and vendored commands;
 - no-secret vendored betting script execution through `brainctl workspace run` using a temporary private workspace.
 

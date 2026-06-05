@@ -43,38 +43,39 @@ function saveCrmStore(store, options = {}) {
 function addPerson(input, options = {}) {
   const name = (input.name || "").trim();
   if (!name) throw new Error("Name is required");
-  const store = loadCrmStore(options);
-  const now = new Date().toISOString();
-  const resolvedBusinessIds = Array.isArray(input.businessIds) ? input.businessIds : [];
-  const person = {
-    id: generateId("ct"),
-    name,
-    email: (input.email || "").trim() || null,
-    phone: (input.phone || "").trim() || null,
-    company: (input.company || "").trim() || null,
-    title: (input.title || "").trim() || null,
-    tags: Array.isArray(input.tags) ? input.tags : [],
-    businessIds: resolvedBusinessIds,
-    status: input.status || "active",
-    priority: input.priority || "normal",
-    source: (input.source || "").trim() || null,
-    notes: (input.notes || "").trim() || null,
-    lastContactedAt: null,
-    createdAt: now,
-    updatedAt: now,
-  };
+  return getCrmStore(options).transaction((store) => {
+    const now = new Date().toISOString();
+    const resolvedBusinessIds = Array.isArray(input.businessIds) ? input.businessIds : [];
+    const person = {
+      id: generateId("ct"),
+      name,
+      email: (input.email || "").trim() || null,
+      phone: (input.phone || "").trim() || null,
+      company: (input.company || "").trim() || null,
+      title: (input.title || "").trim() || null,
+      tags: Array.isArray(input.tags) ? input.tags : [],
+      businessIds: resolvedBusinessIds,
+      status: input.status || "active",
+      priority: input.priority || "normal",
+      source: (input.source || "").trim() || null,
+      notes: (input.notes || "").trim() || null,
+      lastContactedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
 
-  for (const businessId of resolvedBusinessIds) {
-    const business = store.businesses.find((entry) => entry.id === businessId);
-    if (business && !business.personIds.includes(person.id)) {
-      business.personIds.push(person.id);
-      business.updatedAt = now;
+    for (const businessId of resolvedBusinessIds) {
+      const business = store.businesses.find((entry) => entry.id === businessId);
+      if (business && !business.personIds.includes(person.id)) {
+        business.personIds.push(person.id);
+        business.updatedAt = now;
+      }
     }
-  }
 
-  store.people.push(person);
-  saveCrmStore(store, options);
-  return person;
+    store.people.push(person);
+    store.updatedAt = now;
+    return person;
+  });
 }
 
 function listPeople({ query, status, businessId } = {}, options = {}) {
@@ -100,64 +101,76 @@ function listPeople({ query, status, businessId } = {}, options = {}) {
 }
 
 function updatePerson(id, updates, options = {}) {
-  const store = loadCrmStore(options);
-  const person = store.people.find((entry) => entry.id === id);
-  if (!person) return null;
-  const allowed = [
-    "name",
-    "email",
-    "phone",
-    "company",
-    "title",
-    "tags",
-    "status",
-    "priority",
-    "source",
-    "notes",
-    "businessIds",
-    "lastContactedAt",
-  ];
-  for (const key of allowed) {
-    if (updates[key] !== undefined) {
-      person[key] = updates[key];
+  return getCrmStore(options).transaction((store, tx) => {
+    const person = store.people.find((entry) => entry.id === id);
+    if (!person) {
+      tx.skipSave();
+      return null;
     }
-  }
-  person.updatedAt = new Date().toISOString();
-  saveCrmStore(store, options);
-  return person;
+    const allowed = [
+      "name",
+      "email",
+      "phone",
+      "company",
+      "title",
+      "tags",
+      "status",
+      "priority",
+      "source",
+      "notes",
+      "businessIds",
+      "lastContactedAt",
+    ];
+    for (const key of allowed) {
+      if (updates[key] !== undefined) {
+        person[key] = updates[key];
+      }
+    }
+    const now = new Date().toISOString();
+    person.updatedAt = now;
+    store.updatedAt = now;
+    return person;
+  });
 }
 
 function deletePerson(id, options = {}) {
-  const store = loadCrmStore(options);
-  const index = store.people.findIndex((person) => person.id === id);
-  if (index === -1) return { found: false };
-  const [removed] = store.people.splice(index, 1);
-  for (const business of store.businesses) {
-    business.personIds = business.personIds.filter((personId) => personId !== id);
-  }
-  saveCrmStore(store, options);
-  return { found: true, deleted: { id: removed.id, name: removed.name } };
+  return getCrmStore(options).transaction((store, tx) => {
+    const index = store.people.findIndex((person) => person.id === id);
+    if (index === -1) {
+      tx.skipSave();
+      return { found: false };
+    }
+    const [removed] = store.people.splice(index, 1);
+    const now = new Date().toISOString();
+    for (const business of store.businesses) {
+      business.personIds = business.personIds.filter((personId) => personId !== id);
+      business.updatedAt = now;
+    }
+    store.updatedAt = now;
+    return { found: true, deleted: { id: removed.id, name: removed.name } };
+  });
 }
 
 function addBusiness(input, options = {}) {
   const name = (input.name || "").trim();
   if (!name) throw new Error("Name is required");
-  const store = loadCrmStore(options);
-  const now = new Date().toISOString();
-  const business = {
-    id: generateId("bz"),
-    name,
-    description: (input.description || "").trim() || null,
-    status: input.status || "prospecting",
-    dealValue: input.dealValue != null ? Number(input.dealValue) : null,
-    personIds: [],
-    notes: (input.notes || "").trim() || null,
-    createdAt: now,
-    updatedAt: now,
-  };
-  store.businesses.push(business);
-  saveCrmStore(store, options);
-  return business;
+  return getCrmStore(options).transaction((store) => {
+    const now = new Date().toISOString();
+    const business = {
+      id: generateId("bz"),
+      name,
+      description: (input.description || "").trim() || null,
+      status: input.status || "prospecting",
+      dealValue: input.dealValue != null ? Number(input.dealValue) : null,
+      personIds: [],
+      notes: (input.notes || "").trim() || null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    store.businesses.push(business);
+    store.updatedAt = now;
+    return business;
+  });
 }
 
 function listBusinesses({ query, status } = {}, options = {}) {
@@ -179,30 +192,41 @@ function listBusinesses({ query, status } = {}, options = {}) {
 }
 
 function updateBusiness(id, updates, options = {}) {
-  const store = loadCrmStore(options);
-  const business = store.businesses.find((entry) => entry.id === id);
-  if (!business) return null;
-  const allowed = ["name", "description", "status", "dealValue", "notes", "personIds"];
-  for (const key of allowed) {
-    if (updates[key] !== undefined) {
-      business[key] = updates[key];
+  return getCrmStore(options).transaction((store, tx) => {
+    const business = store.businesses.find((entry) => entry.id === id);
+    if (!business) {
+      tx.skipSave();
+      return null;
     }
-  }
-  business.updatedAt = new Date().toISOString();
-  saveCrmStore(store, options);
-  return business;
+    const allowed = ["name", "description", "status", "dealValue", "notes", "personIds"];
+    for (const key of allowed) {
+      if (updates[key] !== undefined) {
+        business[key] = updates[key];
+      }
+    }
+    const now = new Date().toISOString();
+    business.updatedAt = now;
+    store.updatedAt = now;
+    return business;
+  });
 }
 
 function deleteBusiness(id, options = {}) {
-  const store = loadCrmStore(options);
-  const index = store.businesses.findIndex((business) => business.id === id);
-  if (index === -1) return { found: false };
-  const [removed] = store.businesses.splice(index, 1);
-  for (const person of store.people) {
-    person.businessIds = person.businessIds.filter((businessId) => businessId !== id);
-  }
-  saveCrmStore(store, options);
-  return { found: true, deleted: { id: removed.id, name: removed.name } };
+  return getCrmStore(options).transaction((store, tx) => {
+    const index = store.businesses.findIndex((business) => business.id === id);
+    if (index === -1) {
+      tx.skipSave();
+      return { found: false };
+    }
+    const [removed] = store.businesses.splice(index, 1);
+    const now = new Date().toISOString();
+    for (const person of store.people) {
+      person.businessIds = person.businessIds.filter((businessId) => businessId !== id);
+      person.updatedAt = now;
+    }
+    store.updatedAt = now;
+    return { found: true, deleted: { id: removed.id, name: removed.name } };
+  });
 }
 
 function addCorrespondence(input, options = {}) {
@@ -210,39 +234,40 @@ function addCorrespondence(input, options = {}) {
   if (!input.type) throw new Error("type is required");
   if (!input.summary) throw new Error("summary is required");
 
-  const store = loadCrmStore(options);
-  const person = store.people.find((entry) => entry.id === input.personId);
-  if (!person) throw new Error(`Person not found: ${input.personId}`);
-  if (input.businessId) {
-    const business = store.businesses.find((entry) => entry.id === input.businessId);
-    if (!business) throw new Error(`Business not found: ${input.businessId}`);
-  }
+  return getCrmStore(options).transaction((store) => {
+    const person = store.people.find((entry) => entry.id === input.personId);
+    if (!person) throw new Error(`Person not found: ${input.personId}`);
+    if (input.businessId) {
+      const business = store.businesses.find((entry) => entry.id === input.businessId);
+      if (!business) throw new Error(`Business not found: ${input.businessId}`);
+    }
 
-  const now = new Date().toISOString();
-  const entryDate = input.date || now;
-  const entry = {
-    id: generateId("co"),
-    personId: input.personId,
-    businessId: input.businessId || null,
-    type: input.type,
-    summary: input.summary.trim(),
-    notes: input.notes ? input.notes.trim() : null,
-    followUpNeeded: !!input.followUpNeeded,
-    followUpDate: input.followUpDate || null,
-    resolved: false,
-    date: entryDate,
-    createdAt: now,
-  };
-  store.correspondence.push(entry);
+    const now = new Date().toISOString();
+    const entryDate = input.date || now;
+    const entry = {
+      id: generateId("co"),
+      personId: input.personId,
+      businessId: input.businessId || null,
+      type: input.type,
+      summary: input.summary.trim(),
+      notes: input.notes ? input.notes.trim() : null,
+      followUpNeeded: !!input.followUpNeeded,
+      followUpDate: input.followUpDate || null,
+      resolved: false,
+      date: entryDate,
+      createdAt: now,
+    };
+    store.correspondence.push(entry);
 
-  const current = person.lastContactedAt;
-  if (!current || entryDate > current) {
-    person.lastContactedAt = entryDate;
-    person.updatedAt = now;
-  }
+    const current = person.lastContactedAt;
+    if (!current || entryDate > current) {
+      person.lastContactedAt = entryDate;
+      person.updatedAt = now;
+    }
 
-  saveCrmStore(store, options);
-  return entry;
+    store.updatedAt = now;
+    return entry;
+  });
 }
 
 function listCorrespondence({ personId, businessId } = {}, options = {}) {
@@ -284,65 +309,75 @@ function listFollowUps({ dueOnly, personId, businessId } = {}, options = {}) {
 }
 
 function resolveFollowUp(id, options = {}) {
-  const store = loadCrmStore(options);
-  const entry = store.correspondence.find((candidate) => candidate.id === id);
-  if (!entry) return null;
-  entry.resolved = true;
-  saveCrmStore(store, options);
-  return entry;
+  return getCrmStore(options).transaction((store, tx) => {
+    const entry = store.correspondence.find((candidate) => candidate.id === id);
+    if (!entry) {
+      tx.skipSave();
+      return null;
+    }
+    entry.resolved = true;
+    store.updatedAt = new Date().toISOString();
+    return entry;
+  });
 }
 
 function linkPersonBusiness(personId, businessId, options = {}) {
-  const store = loadCrmStore(options);
-  const person = store.people.find((entry) => entry.id === personId);
-  if (!person) throw new Error(`Person not found: ${personId}`);
-  const business = store.businesses.find((entry) => entry.id === businessId);
-  if (!business) throw new Error(`Business not found: ${businessId}`);
-  if (!person.businessIds.includes(businessId)) {
-    person.businessIds.push(businessId);
-  }
-  if (!business.personIds.includes(personId)) {
-    business.personIds.push(personId);
-  }
-  const now = new Date().toISOString();
-  person.updatedAt = now;
-  business.updatedAt = now;
-  saveCrmStore(store, options);
-  return {
-    person: { id: person.id, name: person.name },
-    business: { id: business.id, name: business.name },
-  };
+  return getCrmStore(options).transaction((store) => {
+    const person = store.people.find((entry) => entry.id === personId);
+    if (!person) throw new Error(`Person not found: ${personId}`);
+    const business = store.businesses.find((entry) => entry.id === businessId);
+    if (!business) throw new Error(`Business not found: ${businessId}`);
+    if (!person.businessIds.includes(businessId)) {
+      person.businessIds.push(businessId);
+    }
+    if (!business.personIds.includes(personId)) {
+      business.personIds.push(personId);
+    }
+    const now = new Date().toISOString();
+    person.updatedAt = now;
+    business.updatedAt = now;
+    store.updatedAt = now;
+    return {
+      person: { id: person.id, name: person.name },
+      business: { id: business.id, name: business.name },
+    };
+  });
 }
 
 function unlinkPersonBusiness(personId, businessId, options = {}) {
-  const store = loadCrmStore(options);
-  const person = store.people.find((entry) => entry.id === personId);
-  if (!person) throw new Error(`Person not found: ${personId}`);
-  const business = store.businesses.find((entry) => entry.id === businessId);
-  if (!business) throw new Error(`Business not found: ${businessId}`);
-  person.businessIds = person.businessIds.filter((id) => id !== businessId);
-  business.personIds = business.personIds.filter((id) => id !== personId);
-  const now = new Date().toISOString();
-  person.updatedAt = now;
-  business.updatedAt = now;
-  saveCrmStore(store, options);
-  return {
-    person: { id: person.id, name: person.name },
-    business: { id: business.id, name: business.name },
-  };
+  return getCrmStore(options).transaction((store) => {
+    const person = store.people.find((entry) => entry.id === personId);
+    if (!person) throw new Error(`Person not found: ${personId}`);
+    const business = store.businesses.find((entry) => entry.id === businessId);
+    if (!business) throw new Error(`Business not found: ${businessId}`);
+    person.businessIds = person.businessIds.filter((id) => id !== businessId);
+    business.personIds = business.personIds.filter((id) => id !== personId);
+    const now = new Date().toISOString();
+    person.updatedAt = now;
+    business.updatedAt = now;
+    store.updatedAt = now;
+    return {
+      person: { id: person.id, name: person.name },
+      business: { id: business.id, name: business.name },
+    };
+  });
 }
 
 function rescheduleFollowUp(id, newDate, options = {}) {
-  const store = loadCrmStore(options);
-  const entry = store.correspondence.find((candidate) => candidate.id === id);
-  if (!entry) return null;
-  if (!entry.followUpNeeded) {
-    throw new Error("This correspondence has no follow-up to reschedule");
-  }
-  entry.followUpDate = newDate;
-  entry.resolved = false;
-  saveCrmStore(store, options);
-  return entry;
+  return getCrmStore(options).transaction((store, tx) => {
+    const entry = store.correspondence.find((candidate) => candidate.id === id);
+    if (!entry) {
+      tx.skipSave();
+      return null;
+    }
+    if (!entry.followUpNeeded) {
+      throw new Error("This correspondence has no follow-up to reschedule");
+    }
+    entry.followUpDate = newDate;
+    entry.resolved = false;
+    store.updatedAt = new Date().toISOString();
+    return entry;
+  });
 }
 
 function viewPerson(id, options = {}) {
@@ -457,26 +492,34 @@ function deleteById(id, options = {}) {
   if (id.startsWith("ct_")) return deletePerson(id, options);
   if (id.startsWith("bz_")) return deleteBusiness(id, options);
   if (id.startsWith("co_")) {
-    const store = loadCrmStore(options);
-    const index = store.correspondence.findIndex((entry) => entry.id === id);
-    if (index === -1) return { found: false };
-    const [removed] = store.correspondence.splice(index, 1);
-    saveCrmStore(store, options);
-    return {
-      found: true,
-      deleted: { id: removed.id, type: removed.type, summary: removed.summary },
-    };
+    return getCrmStore(options).transaction((store, tx) => {
+      const index = store.correspondence.findIndex((entry) => entry.id === id);
+      if (index === -1) {
+        tx.skipSave();
+        return { found: false };
+      }
+      const [removed] = store.correspondence.splice(index, 1);
+      store.updatedAt = new Date().toISOString();
+      return {
+        found: true,
+        deleted: { id: removed.id, type: removed.type, summary: removed.summary },
+      };
+    });
   }
   return { found: false, error: "Unknown ID prefix" };
 }
 
 function updateCorrespondenceNotes(id, notes, options = {}) {
-  const store = loadCrmStore(options);
-  const entry = store.correspondence.find((candidate) => candidate.id === id);
-  if (!entry) return null;
-  entry.notes = notes ? notes.trim() : null;
-  saveCrmStore(store, options);
-  return entry;
+  return getCrmStore(options).transaction((store, tx) => {
+    const entry = store.correspondence.find((candidate) => candidate.id === id);
+    if (!entry) {
+      tx.skipSave();
+      return null;
+    }
+    entry.notes = notes ? notes.trim() : null;
+    store.updatedAt = new Date().toISOString();
+    return entry;
+  });
 }
 
 module.exports = {
@@ -506,4 +549,5 @@ module.exports = {
   pipelineSummary,
   findDuplicates,
   contactsWithMissingFields,
+
 };

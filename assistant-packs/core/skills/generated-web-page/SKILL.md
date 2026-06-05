@@ -16,6 +16,7 @@ Use this skill for scratch/simple browser-viewable artifacts, not for serious re
 - Do not embed private API keys, tokens, cookies, personal workspace paths, private hostnames, or generated scratch artifacts into source control.
 - Publish only through Brain web publisher tooling or the runtime's configured publisher command; do not hand-copy files into a served pages directory.
 - Use scratch TTL by default. Promote pages only when the user explicitly asks for a durable artifact.
+- For conference map/list pages, update durable conference-list source data first through the configured assistant-logic conference-list workflow, then rebuild/republish from that source. Do not store favorite/shortlist/status decisions only in a scratch page artifact.
 
 ## Workflow
 

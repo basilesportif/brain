@@ -23,7 +23,7 @@ function parseStdout(result: ReturnType<typeof spawnSync>) {
   return JSON.parse(String(result.stdout));
 }
 
-test("native CLI surfaces preserve JSON stdout for todos/projects/CRM/reminders/file-save", () => {
+test("native CLI surfaces preserve JSON stdout for todos/projects/CRM/reminders/file-save/conference favorites", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "brain-assistant-cli-"));
   try {
     const workspace = path.join(root, "workspace");
@@ -73,6 +73,19 @@ test("native CLI surfaces preserve JSON stdout for todos/projects/CRM/reminders/
     const files = parseStdout(runCli(workspace, "file-list.js"));
     assert.equal(files.documents[0].project, "Parity Project");
     assert.equal(files.metadataPath, path.join(workspace, "private", "documents", "metadata.jsonl"));
+
+    const conferenceDir = path.join(workspace, "data", "conference-lists", "conference-map");
+    fs.mkdirSync(conferenceDir, { recursive: true });
+    fs.writeFileSync(path.join(conferenceDir, "conferences.json"), `${JSON.stringify([{ id: "frsa-2026", name: "FRSA 2026" }], null, 2)}\n`);
+    fs.writeFileSync(path.join(conferenceDir, "manifest.json"), `${JSON.stringify({ id: "conference-map", recordCount: 1 }, null, 2)}\n`);
+    const favorite = parseStdout(runCli(workspace, "conference-favorite.js", ["favorite", "frsa-2026", "--note", "Shortlist", "--json"]));
+    assert.equal(favorite.ok, true);
+    const addedConference = parseStdout(runCli(workspace, "conference-favorite.js", ["add", "--list", "conference-map", "--id", "new-conf-2026", "--name", "New Conf 2026", "--data-json", "{\"city\":\"Houston\"}", "--json"]));
+    assert.equal(addedConference.conference.city, "Houston");
+    const conferenceList = parseStdout(runCli(workspace, "conference-favorite.js", ["list", "--list", "conference-map", "--query", "Houston", "--json"]));
+    assert.equal(conferenceList.conferences[0].id, "new-conf-2026");
+    const favorites = parseStdout(runCli(workspace, "conference-favorite.js", ["list-favorites", "--json"]));
+    assert.equal(favorites.favorites[0].favoriteNote, "Shortlist");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

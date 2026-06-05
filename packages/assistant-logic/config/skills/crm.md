@@ -247,6 +247,10 @@ pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" crm-missing-fields
 - Use `crm-view.js` when the user asks about a specific person or business — it gives the full picture in one call.
 - **Never read crm.json directly** — always use the scripts. If you need to search for a person, use `crm-list-people.js --query`. If you need to look up by ID, use `crm-view.js --id`. Direct JSON parsing has caused lookup failures due to wrong key names.
 
+## Routing
+
+Straightforward CRM add/list/view/update/delete/link/follow-up operations are local JSON-backed script calls and may run in the main session with medium effort after reading this skill and any workspace overlay. Dispatch a sub-agent for ambiguous CRM cleanup, multi-step contact enrichment, CRM work that needs email/calendar/message lookup, or anything requiring research/judgment beyond the documented scripts.
+
 ## Contacts Update Workflow
 
 Use this workflow when the user says "update my contacts", "clean up contacts", "fill in missing info", or similar. The goal is to walk through contacts that are missing key information and prompt the user to fill them in.

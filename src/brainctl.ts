@@ -1555,6 +1555,16 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
       ],
     },
     {
+      area: "conference-lists",
+      integration: "native-json-list-files",
+      state: path.join(workspaceRoot, "data", "conference-lists"),
+      scripts: ["conference-favorite.js"],
+      examples: [
+        runner("conference-favorite.js", 'list-favorites'),
+        runner("conference-favorite.js", 'favorite "FRSA 2026" --list conference-map --note "Shortlist"'),
+      ],
+    },
+    {
       area: "betting",
       integration: "vendored-assistant-agent-logic",
       state: path.join(workspaceRoot, "data", "bets.json"),
@@ -1663,7 +1673,7 @@ function renderInstructionsReadme(): string {
     "",
     "Do not use overlays to redefine commands, storage paths, JSON formats, approval requirements, or safety rules.",
     "",
-    "Brain ships native TypeScript commands for todo, projects, CRM, reminders, and file-save.",
+    "Brain ships native TypeScript commands for todo, projects, CRM, reminders, file-save, and conference-list favorites.",
     "Brain also vendors the assistant-agent-logic live-integration command set for Composio/Gmail/Calendar, ProtonMail, finance/Mercury/Plaid, Whoop, Telegram user-client messaging, betting, dictionary, generated web pages, and loop utilities.",
     "Keep personal account IDs, OAuth/API tokens, Telegram sessions, ProtonMail Bridge credentials, and finance/Whoop secrets in this private workspace, not in the Brain repo.",
     "See `docs/assistant-logic-integration-audit.md` and `docs/migration.md` for the integrated/status table and private data migration guidance.",
@@ -2399,7 +2409,7 @@ const ASSISTANT_STATE_STORES: readonly AssistantStateStoreSpec[] = [
   { key: "whoopAuthPlaceholder", relativePath: path.join("data", "whoop-auth.example.json"), arrayRootKeys: [], defaultValue: () => ({ note: "whoop-connect.js writes private OAuth tokens to data/whoop-auth.json; this placeholder contains no token values." }) },
   { key: "protonmailDrafts", relativePath: path.join("data", "protonmail-drafts.json"), rootType: "array", arrayRootKeys: [], defaultValue: () => [] },
 ] as const;
-const ASSISTANT_OVERLAY_SKILLS = ["todo", "projects", "crm", "reminders", "file-save", "repo-registry", "calendar-allowlist", "composio", "finance", "messaging", "protonmail", "betting", "dictionary", "generated-web-page", "loops", "mercury", "whoop", "web-page-design"] as const;
+const ASSISTANT_OVERLAY_SKILLS = ["todo", "projects", "crm", "reminders", "file-save", "conference-lists", "repo-registry", "calendar-allowlist", "composio", "finance", "messaging", "protonmail", "betting", "dictionary", "generated-web-page", "loops", "mercury", "whoop", "web-page-design"] as const;
 const ASSISTANT_OVERLAY_PROMPTS = ["email-reply-preferences", "bet-entry-preferences"] as const;
 const SETUP_PROGRESS_FILE = "setup-progress.json";
 const LOCAL_SETUP_CONTEXT_RELATIVE_PATH = path.join("private", "setup-context.json");

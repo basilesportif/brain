@@ -8,3 +8,4 @@ export * as projectStore from "./lib/project-store.js";
 export * as crmStore from "./lib/crm-store.js";
 export * as reminderStore from "./lib/reminder-store.js";
 export * as fileSaveStore from "./lib/file-save-store.js";
+export * as conferenceFavoriteStore from "./lib/conference-favorite-store.js";

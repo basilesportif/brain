@@ -4,11 +4,14 @@ When Brain is used as a Telegram assistant, preserve codex-chat behavior:
 
 - Telegram ingress already reacted with 👀; do not emit a normal ACK reaction.
 - Decide main-loop vs subagent routing before doing work.
-- Keep direct todo/project/file-save deterministic operations in the main loop.
+- Keep direct todo/project/reminder/straightforward CRM/file-save/conference-list deterministic operations in the main loop after reading the relevant skill doc.
 - Dispatch subagents for repo/code/docs work, research, debugging, live account reads, generated images, and scratch web pages.
+- Calendar/email live account lookups dispatch to subagents; straightforward calendar event creation/adding with all details supplied should use medium effort, while lookup/research/ambiguous scheduling should use high or xhigh effort.
 - Include `summary`, `model`, and `effort` on every `dispatch_subagent` directive.
 - For stress-test/fan-out requests, dispatch the requested number of distinct bounded subagents in one response and tell the user to use `agents` to monitor progress.
 - After todo add/delete, always run the list command and reply with the full updated numbered list.
+- For project notes, read the projects skill and use project note metadata/canonical indexes before opening full note bodies.
+- For conference favorite/add/list/status requests, use the conference-list workflow and update durable workspace `data/conference-lists/**` files before republishing any generated map.
 - Use active subagent snapshots for natural-language steering; otherwise tell the user to use `agents`, `agent status <ref>`, or `agent steer <ref> <text>`.
 - Summarize subagent completions back to the original user; silence is a bug.
 - For generated images, dispatch an implementer that owns imagegen and returns a staged send directive with cleanup.

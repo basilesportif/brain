@@ -16,7 +16,9 @@ Private data/secrets were not read. Credential-dependent parity means the code p
 | Skills and behavior-pack rules | Supported | Runtime prompt builder in `packages/runtime-core/src/runtime.ts`; portable pack in `assistant-packs/core`; assistant-agent skill resources in `packages/assistant-logic/config/skills` | `packages/runtime-core/src/runtime.test.ts`; `brainctl pack validate` | None for static validation; workspace overlays private |
 | Assistant-agent-logic scripts/resources | Supported | Vendored scripts in `packages/assistant-logic/scripts`; resources/templates in `packages/assistant-logic/config` | `diff -qr` against source shows only Brain path/safety adaptations plus generated CommonJS package marker; `brainctl workspace commands/status/run` | Live integrations need private `.env`, account ids, sessions, OAuth tokens |
 | Workspace JSON stores: todos, projects, CRM, reminders | Supported natively | `packages/assistant-logic/src/lib/*-store.ts`; CLI wrappers; workspace scaffold in `src/brainctl.ts` | `pnpm run check`; `brainctl workspace scaffold/status/run` | Private workspace JSON data only |
+| JSON-store concurrency hardening | Supported after follow-up parity pass | `packages/assistant-logic/src/lib/json-store.ts` plus vendored `scripts/lib/json-store.js`; todo/project/CRM/reminder mutators use locked transactions | JSON-store concurrency tests; native and vendored script import checks | None |
 | File-save / PDF attach | Supported natively | `packages/assistant-logic/src/lib/file-save-store.ts`; `file-save.js`; prompt and skill guidance | CLI compatibility tests; git-ignore destination guard | Source attachments and private saved bytes stay outside repo |
+| Conference lists/favorites | Supported after follow-up parity pass | `packages/assistant-logic/src/lib/conference-favorite-store.ts`, `src/cli/conference-favorite.ts`, vendored `scripts/conference-favorite.js`, `config/skills/conference-lists.md` | Conference favorite store tests; CLI compatibility test | Private workspace `data/conference-lists/**` |
 | Telegram bot ingress/egress | Supported with guarded live mode | `entrypoints/telegram/src/index.ts`; `brainctl run/start --entrypoint telegram` | Telegram adapter tests; `brainctl entrypoint check`; `brainctl validate live --run-safe` | Bot token, paired users/chats, download/transcription files are private |
 | Telegram send-path allowlist | Supported after this audit | `TelegramEntrypointAdapterOptions.allowedSendRoots`; `brainctl run/start` wires artifact/download/private-document roots | `entrypoints/telegram/src/index.test.ts` refuses sends outside configured roots | No; configured roots are metadata paths |
 | Telegram voice/audio/video transcription | Supported as injectable seam | `entrypoints/telegram/src/transcription.ts`; OpenAI command/API seam in `src/brainctl.ts` | Entry-point transcription tests; metadata-only secret checks | OpenAI API key and private audio files |
@@ -50,6 +52,13 @@ Private data/secrets were not read. Credential-dependent parity means the code p
 3. Hardened runtime log redaction so secret-looking text in log messages is redacted, not just structured raw payloads.
 4. Added codex-chat-web compatible web-publisher env aliases and remote runtime-host publish/prune support in Brain's web package/CLI.
 5. Added explicit stress/fan-out subagent prompt guidance.
+
+## Follow-up parity fixes on 2026-06-05
+
+1. Aligned JSON-store locking/atomic-write behavior across native TypeScript and vendored CommonJS.
+2. Added durable conference-list/favorite workflow support with atomic locked writes, skill guidance, and Brain command catalog coverage.
+3. Updated generated scratch-page guidance to derive URLs from the configured publisher base URL and to republish conference maps from durable list data.
+4. Clarified project-note metadata-index-first navigation and calendar/reminder/CRM routing guidance.
 
 ## Areas intentionally credential-dependent
 

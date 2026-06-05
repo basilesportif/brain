@@ -12,9 +12,11 @@ function createStateStore(key, options = {}) {
     defaultValue: options.defaultValue,
     label: descriptor.label,
     onLoad: options.onLoad,
+    lock: options.lock,
   });
 }
 
 module.exports = {
   createStateStore,
+
 };

@@ -53,6 +53,8 @@ For Decisive Outcomes / IT Consulting generated pages, use the Native Node-inspi
 
 The current IT Consulting project notes already contain the canonical Decisive Outcomes visual direction, Native Node token extraction, Conference Map guidance, and FRSA industry brief content. Use those project notes as source context when available, but keep generated scratch page implementations outside durable repos unless Tim promotes them.
 
+For conference map/list pages, update durable source data first under `workspace/data/conference-lists/<list-id>/conferences.json` using `config/skills/conference-lists.md` when Tim is asking to favorite, shortlist, flag, reprioritize, add, or remove conference records. Republished scratch pages must be rebuilt from that durable source; do not encode favorite/list decisions only in a generated page artifact.
+
 ## Google Maps API Key
 
 For Google Maps-style pages, the assistant runtime host stores the browser Maps JavaScript API key in:

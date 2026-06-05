@@ -88,7 +88,7 @@ Returns JSON with any triggered reminders. Used by the `reminder-check` loop.
 
 ## Routing
 
-All reminder operations (add, list, update, delete) should run directly in the main session — do **not** dispatch a sub-agent. Use **Sonnet medium** effort. Reminder operations are fast, deterministic, and don't benefit from backgrounding.
+All reminder operations (add, list, update, delete) should run directly in the main session with medium effort after reading this skill and any workspace overlay — do **not** dispatch a sub-agent unless the request is ambiguous or bundled into a larger multi-step task. Reminder operations are fast, deterministic, and don't benefit from backgrounding.
 
 ## Interaction Rules
 

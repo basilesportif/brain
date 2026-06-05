@@ -43,6 +43,7 @@ for (const f of [
   "config/TELEGRAM.md",
   "config/SEARCH.md",
   "config/skills/composio.md",
+  "config/skills/conference-lists.md",
   "config/skills/dictionary.md",
   "config/skills/messaging.md",
   "config/skills/protonmail.md",
@@ -70,6 +71,7 @@ for (const f of [
   "config/workspace-template/.gitignore",
   "config/workspace-template/instructions/README.md",
   "config/workspace-template/instructions/skills/composio.md",
+  "config/workspace-template/instructions/skills/conference-lists.md",
   "config/workspace-template/instructions/skills/messaging.md",
   "config/workspace-template/instructions/skills/protonmail.md",
   "config/workspace-template/instructions/skills/file-save.md",
@@ -92,6 +94,7 @@ if (fs.existsSync(templateSkillsDir)) {
 console.log("\n4. Script references in skill docs");
 const skillDocs = [
   "config/skills/composio.md",
+  "config/skills/conference-lists.md",
   "config/skills/dictionary.md",
   "config/skills/messaging.md",
   "config/skills/protonmail.md",
@@ -160,6 +163,7 @@ const overlayRefs = [
   ["CLAUDE.md", "workspace/instructions/skills/file-save.md"],
   ["CLAUDE.md", "workspace/instructions/prompts/email-reply-preferences.md"],
   ["config/skills/composio.md", "workspace/instructions/skills/composio.md"],
+  ["config/skills/conference-lists.md", "workspace/instructions/skills/conference-lists.md"],
   ["config/skills/messaging.md", "workspace/instructions/skills/messaging.md"],
   ["config/skills/protonmail.md", "workspace/instructions/skills/protonmail.md"],
   ["config/skills/protonmail.md", "workspace/instructions/prompts/email-reply-preferences.md"],

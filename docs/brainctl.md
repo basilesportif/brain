@@ -212,7 +212,7 @@ pnpm run brainctl workspace run --path ~/.brain/workspace telegram-unread.js
 
 No external `assistant-agent-logic` checkout is required. The legacy `--assistant-repo` flag is accepted only as a deprecated no-op. The wrapper prefers native compiled `dist/cli/*.js` commands for core stores and falls back to vendored `packages/assistant-logic/scripts/*` for live integrations.
 
-`workspace scaffold` writes empty stores and example templates only. Copy/fill `.env.example`, `composio.yaml.example`, `messaging.yaml.example`, `telegram.yaml.example`, and `protonmail.yaml.example` inside the private workspace; never commit filled credentials, OAuth tokens, Telegram sessions, ProtonMail Bridge passwords, finance tokens, WHOOP tokens, live API output, or private logs.
+`workspace scaffold` writes empty stores and example templates only. Copy/fill `.env.example`, `composio.yaml.example`, `messaging.yaml.example`, `telegram.yaml.example`, and `protonmail.yaml.example` inside the private workspace; the source templates in the repo are `config/workspace-template/*.yaml`, while scaffolded private copies get the `.example` suffix. Never commit filled credentials, OAuth tokens, Telegram sessions, ProtonMail Bridge passwords, finance tokens, WHOOP tokens, live API output, or private logs.
 
 Run `brainctl workspace commands --path <workspace>` to list the full command catalog and whether each command resolves to a native or vendored implementation.
 

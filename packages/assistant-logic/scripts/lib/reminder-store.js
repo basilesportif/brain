@@ -53,59 +53,76 @@ function saveStore(store, options = {}) {
 function addReminder(title, schedule, options = {}) {
   const normalizedTitle = (title || "").trim();
   if (!normalizedTitle) throw new Error("Title is required");
-  const store = loadStore(options);
-  const now = new Date().toISOString();
-  const reminder = {
-    id: generateId(),
-    title: normalizedTitle,
-    schedule,
-    enabled: true,
-    lastTriggeredAt: null,
-    createdAt: now,
-    updatedAt: now,
-  };
-  store.reminders.push(reminder);
-  saveStore(store, options);
-  return reminder;
+  return getReminderStore(options).transaction((store) => {
+    const now = new Date().toISOString();
+    const reminder = {
+      id: generateId(),
+      title: normalizedTitle,
+      schedule,
+      enabled: true,
+      lastTriggeredAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    store.reminders.push(reminder);
+    store.updatedAt = now;
+    return reminder;
+  });
 }
 
 function updateReminder(id, fields, options = {}) {
-  const store = loadStore(options);
-  const reminder = store.reminders.find((r) => r.id === id);
-  if (!reminder) return { found: false };
-  const allowed = ["title", "schedule", "enabled"];
-  for (const key of allowed) {
-    if (fields[key] !== undefined) {
-      reminder[key] = fields[key];
+  return getReminderStore(options).transaction((store, tx) => {
+    const reminder = store.reminders.find((r) => r.id === id);
+    if (!reminder) {
+      tx.skipSave();
+      return { found: false };
     }
-  }
-  reminder.updatedAt = new Date().toISOString();
-  saveStore(store, options);
-  return { found: true, reminder };
+    const allowed = ["title", "schedule", "enabled"];
+    for (const key of allowed) {
+      if (fields[key] !== undefined) {
+        reminder[key] = fields[key];
+      }
+    }
+    const now = new Date().toISOString();
+    reminder.updatedAt = now;
+    store.updatedAt = now;
+    return { found: true, reminder };
+  });
 }
 
 function removeReminder(id, options = {}) {
-  const store = loadStore(options);
-  const index = store.reminders.findIndex((r) => r.id === id);
-  if (index === -1) return { found: false };
-  const [removed] = store.reminders.splice(index, 1);
-  saveStore(store, options);
-  return { found: true, deleted: { id: removed.id, title: removed.title } };
+  return getReminderStore(options).transaction((store, tx) => {
+    const index = store.reminders.findIndex((r) => r.id === id);
+    if (index === -1) {
+      tx.skipSave();
+      return { found: false };
+    }
+    const [removed] = store.reminders.splice(index, 1);
+    store.updatedAt = new Date().toISOString();
+    return { found: true, deleted: { id: removed.id, title: removed.title } };
+  });
 }
 
 function removeReminderByTitle(titleQuery, options = {}) {
-  const store = loadStore(options);
-  const lowerQuery = titleQuery.toLowerCase();
-  const matches = store.reminders.filter((r) =>
-    r.title.toLowerCase().includes(lowerQuery)
-  );
-  if (matches.length === 0) return { found: false, matches: [] };
-  if (matches.length > 1) return { found: false, ambiguous: true, matches };
-  const target = matches[0];
-  const index = store.reminders.findIndex((r) => r.id === target.id);
-  store.reminders.splice(index, 1);
-  saveStore(store, options);
-  return { found: true, deleted: { id: target.id, title: target.title } };
+  return getReminderStore(options).transaction((store, tx) => {
+    const lowerQuery = titleQuery.toLowerCase();
+    const matches = store.reminders.filter((r) =>
+      r.title.toLowerCase().includes(lowerQuery)
+    );
+    if (matches.length === 0) {
+      tx.skipSave();
+      return { found: false, matches: [] };
+    }
+    if (matches.length > 1) {
+      tx.skipSave();
+      return { found: false, ambiguous: true, matches };
+    }
+    const target = matches[0];
+    const index = store.reminders.findIndex((r) => r.id === target.id);
+    store.reminders.splice(index, 1);
+    store.updatedAt = new Date().toISOString();
+    return { found: true, deleted: { id: target.id, title: target.title } };
+  });
 }
 
 function listReminders({ enabled, query } = {}, options = {}) {
@@ -308,16 +325,21 @@ function matchesCronField(expr, value, min, max) {
 }
 
 function markTriggered(id, options = {}) {
-  const store = loadStore(options);
-  const reminder = store.reminders.find((r) => r.id === id);
-  if (!reminder) return { found: false };
-  reminder.lastTriggeredAt = new Date().toISOString();
-  // Auto-disable one-time reminders
-  if (reminder.schedule.type === "once") {
-    reminder.enabled = false;
-  }
-  saveStore(store, options);
-  return { found: true, reminder };
+  return getReminderStore(options).transaction((store, tx) => {
+    const reminder = store.reminders.find((r) => r.id === id);
+    if (!reminder) {
+      tx.skipSave();
+      return { found: false };
+    }
+    const now = new Date().toISOString();
+    reminder.lastTriggeredAt = now;
+    // Auto-disable one-time reminders
+    if (reminder.schedule.type === "once") {
+      reminder.enabled = false;
+    }
+    store.updatedAt = now;
+    return { found: true, reminder };
+  });
 }
 
 /**
@@ -363,4 +385,5 @@ module.exports = {
   isDue,
   markTriggered,
   describeSchedule,
+
 };
