@@ -195,7 +195,7 @@ Use `--title` for fuzzy matching against upcoming calendar events, or `--event` 
 
 The cron skill `workspace/skills/flagged-event-check.md` sends periodic Telegram reminders for active (non-snoozed) flagged events.
 
-> **Routing guidance:** For simple email queries (today's emails, recent inbox), run directly in the main session via Bash. For complex queries requiring judgment (actionable emails, summarizing threads, drafting replies), dispatch a sub-agent with Opus high.
+> **Routing guidance:** For simple email queries (today's emails, recent inbox), run directly in the main session via Bash. For straightforward calendar event creation/adding with the needed details supplied and no external lookup, use medium effort when dispatching. For complex queries requiring judgment (actionable emails, summarizing threads, drafting replies), calendar/email lookup, or calendar creation that requires research/external-data lookup, use high effort. For ambiguous scheduling or otherwise risky scheduling, use xhigh effort.
 
 All scripts output JSON to stdout. Run from the project root.
 

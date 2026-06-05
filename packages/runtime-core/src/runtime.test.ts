@@ -62,6 +62,8 @@ test("buildPrompt exposes private workspace paths and codex-chat parity behavior
   assert.match(prompt, /include the full updated numbered todo list/);
   assert.match(prompt, /project-resource\.js/);
   assert.match(prompt, /calendar\/email\/Gmail\/Composio live account lookup should dispatch a subagent/);
+  assert.match(prompt, /effort medium for mechanical scoped edits and straightforward calendar event creation\/adding/);
+  assert.match(prompt, /high for normal research\/inspection\/account lookup including calendar\/email lookup/);
   assert.match(prompt, /File-save\/PDF attach/);
   assert.match(prompt, /Generated images/);
   assert.match(prompt, /Scratch web pages \/ codex-chat-web/);

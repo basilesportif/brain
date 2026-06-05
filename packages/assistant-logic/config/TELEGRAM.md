@@ -82,8 +82,9 @@ Anything involving reasoning, investigation, summarizing, recommendations, multi
 The top-level loop must choose the sub-agent model and effort explicitly for the task. Do not rely on a default. Use this rubric unless the user explicitly requests a different model/effort:
 
 - Mechanical, well-scoped code/docs edits with clear instructions and low blast radius: `gpt-5.5`, `medium`.
-- Normal research, repo inspection, and non-trivial analysis: `gpt-5.5`, `high`.
-- Risky, ambiguous, debugging, architecture, multi-step, cross-module, deploy-sensitive, or high-stakes tasks: `gpt-5.5`, `xhigh`.
+- Straightforward calendar event creation/adding where the user supplied the needed details and no external lookup is required: `gpt-5.5`, `medium`.
+- Normal research, repo inspection, calendar/email lookup, external-data lookup, calendar creation that requires research/external-data lookup, and non-trivial analysis: `gpt-5.5`, `high`.
+- Risky, ambiguous scheduling, debugging, architecture, multi-step, cross-module, deploy-sensitive, or high-stakes tasks: `gpt-5.5`, `xhigh`.
 - Simple deterministic work: main loop, with explicit main-loop model/effort disclosure.
 
 For codex-chat, dispatch with a `dispatch_subagent` directive that includes `summary`, `model`, and `effort`. Codex-chat will send the visible dispatch status and register the job for `agents` / `subagents`.
