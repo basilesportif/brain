@@ -93,6 +93,7 @@ All reminder operations (add, list, update, delete) should run directly in the m
 ## Interaction Rules
 
 - When adding: require a title and schedule type. Default timezone is `America/New_York`.
+- Reminder notifications should fire at the requested reminder time. For one-time reminders, use the exact intended notification datetime with `--once`; do not move it earlier as if it were a calendar-event travel/prep alert.
 - When listing: display a numbered list (1., 2., 3.) with title and human-readable schedule (e.g. "daily at 9:00 AM", "every Friday at 5:00 PM"). Do **not** show internal IDs (e.g. `rm_abc123`) to the user — they are for internal use only. When the user refers to a reminder by number, map it back to the internal ID from the last listing.
 - When the user asks to delete without specifying an ID: use `--title` with a substring. If the script exits 2 (ambiguous), show the matches and ask the user which one to delete.
 - Only ask for confirmation when the match is ambiguous. Single matches proceed without confirmation.
