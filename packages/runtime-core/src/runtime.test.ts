@@ -29,6 +29,88 @@ test("BrainRuntime turns provider final text into origin-routed outbound action"
   assert.deepEqual(result.subagentJobIds, []);
 });
 
+test("BrainRuntime serializes concurrent direct turns on one provider session", async () => {
+  const enteredFirst = deferred<void>();
+  const releaseFirst = deferred<void>();
+  const order: string[] = [];
+  let active = 0;
+  let maxActive = 0;
+  const runtime = new BrainRuntime({
+    workspaceId: "personal",
+    workspace: {
+      workspacePath: "/tmp/personal",
+      primaryEntrypointId: "telegram-main",
+      enabledEntrypoints: { "telegram-main": { kind: "telegram", enabled: true } },
+    },
+    provider: new FakeProviderAdapter(async function* (turn) {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      order.push(`start:${turn.inboundEvent.id}`);
+      if (turn.inboundEvent.id === "evt_serial_1") {
+        enteredFirst.resolve();
+        await releaseFirst.promise;
+      }
+      yield { type: "final", text: `done ${turn.inboundEvent.id}` };
+      order.push(`end:${turn.inboundEvent.id}`);
+      active -= 1;
+    }),
+  });
+
+  const first = runtime.handleInboundEvent({
+    id: "evt_serial_1",
+    kind: "message",
+    workspaceId: "personal",
+    entrypoint: { entrypointId: "telegram-main", channelKind: "telegram" },
+    text: "first",
+    receivedAt: "2026-05-21T00:00:00.000Z",
+  });
+  await enteredFirst.promise;
+  const second = runtime.handleInboundEvent({
+    id: "evt_serial_2",
+    kind: "message",
+    workspaceId: "personal",
+    entrypoint: { entrypointId: "telegram-main", channelKind: "telegram" },
+    text: "second",
+    receivedAt: "2026-05-21T00:00:00.000Z",
+  });
+  await Promise.resolve();
+  assert.deepEqual(order, ["start:evt_serial_1"]);
+
+  releaseFirst.resolve();
+  await Promise.all([first, second]);
+  assert.equal(maxActive, 1);
+  assert.deepEqual(order, ["start:evt_serial_1", "end:evt_serial_1", "start:evt_serial_2", "end:evt_serial_2"]);
+});
+
+test("BrainRuntime skips duplicate idempotency keys within a runtime", async () => {
+  const runtime = new BrainRuntime({
+    workspaceId: "personal",
+    workspace: {
+      workspacePath: "/tmp/personal",
+      primaryEntrypointId: "telegram-main",
+      enabledEntrypoints: { "telegram-main": { kind: "telegram", enabled: true } },
+    },
+    provider: new FakeProviderAdapter([{
+      type: "final",
+      text: '```brain-actions\n{"version":1,"actions":[{"type":"send_text","text":"once","idempotencyKey":"same-key"},{"type":"send_text","text":"twice","idempotencyKey":"same-key"}]}\n```',
+    }]),
+  });
+
+  const result = await runtime.handleInboundEvent({
+    id: "evt_idem",
+    kind: "message",
+    workspaceId: "personal",
+    entrypoint: { entrypointId: "telegram-main", channelKind: "telegram" },
+    text: "duplicate directives",
+    receivedAt: "2026-05-21T00:00:00.000Z",
+  });
+
+  const texts = result.actions
+    .filter((action) => action.type === "send_text")
+    .map((action) => action.type === "send_text" ? action.text : "");
+  assert.deepEqual(texts, ["once"]);
+});
+
 test("buildPrompt exposes private workspace paths and codex-chat parity behavior rules", () => {
   const prompt = buildPrompt({
     id: "evt_projects",
@@ -290,4 +372,14 @@ class DirectiveProviderSession implements ProviderSession {
       text: '```brain-actions\n{"version":1,"actions":[{"type":"dispatch_subagent","profile":"implementer","prompt":"Do a child task","summary":"child","model":"gpt-5.5","effort":"high","idempotencyKey":"child-1"}]}\n```',
     };
   }
+}
+
+function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T | PromiseLike<T>) => void; reject: (reason?: unknown) => void } {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }

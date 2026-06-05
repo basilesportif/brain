@@ -44,6 +44,8 @@ export interface BuildPromptOptions {
 
 export class BrainRuntime {
   private session?: ProviderSession;
+  private turnQueue: Promise<void> = Promise.resolve();
+  private readonly seenActionKeys = new Map<string, number>();
 
   constructor(private readonly options: BrainRuntimeOptions) {}
 
@@ -70,6 +72,10 @@ export class BrainRuntime {
   }
 
   async handleInboundEvent(event: EntryPointInboundEvent, handleOptions: BrainRuntimeHandleOptions = {}): Promise<RuntimeTurnResult> {
+    return this.runExclusiveTurn(() => this.handleInboundEventLocked(event, handleOptions));
+  }
+
+  private async handleInboundEventLocked(event: EntryPointInboundEvent, handleOptions: BrainRuntimeHandleOptions = {}): Promise<RuntimeTurnResult> {
     if (event.workspaceId !== this.options.workspaceId) {
       throw new Error(`Inbound event workspace mismatch: ${event.workspaceId} !== ${this.options.workspaceId}`);
     }
@@ -133,6 +139,7 @@ export class BrainRuntime {
     subagentJobIds: string[],
     controlResults: RuntimeControlResult[],
   ): Promise<BrainOutboundAction[]> {
+    if (this.claimDuplicateAction(action)) return [];
     const routed = routeOutboundToOrigin(event, action);
     if (routed.type === "dispatch_subagent" && this.options.subagents) {
       const jobId = await this.options.subagents.dispatch({
@@ -184,6 +191,42 @@ export class BrainRuntime {
   private async buildTurnPrompt(event: EntryPointInboundEvent): Promise<string> {
     const activeSubagents = await this.options.subagents?.activeSnapshot?.(12).catch(() => undefined);
     return buildPrompt(event, this.options.workspace, { activeSubagents });
+  }
+
+  private async runExclusiveTurn<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.turnQueue;
+    let release: () => void = () => undefined;
+    this.turnQueue = previous.then(() => new Promise<void>((resolve) => {
+      release = resolve;
+    }));
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  private claimDuplicateAction(action: BrainOutboundAction): boolean {
+    const key = action.idempotencyKey;
+    if (!key) return false;
+    this.pruneSeenActionKeys();
+    if (this.seenActionKeys.has(key)) return true;
+    this.seenActionKeys.set(key, Date.now());
+    while (this.seenActionKeys.size > 5_000) {
+      const oldest = this.seenActionKeys.keys().next().value;
+      if (!oldest) break;
+      this.seenActionKeys.delete(oldest);
+    }
+    return false;
+  }
+
+  private pruneSeenActionKeys(): void {
+    const cutoff = Date.now() - 24 * 60 * 60_000;
+    for (const [key, seenAt] of this.seenActionKeys) {
+      if (seenAt >= cutoff) break;
+      this.seenActionKeys.delete(key);
+    }
   }
 }
 
