@@ -40,6 +40,8 @@ pnpm run brainctl config validate examples/config/runtime.yaml
 pnpm run brainctl secrets check --config examples/config/runtime.yaml
 pnpm run brainctl stack status --workspace personal
 pnpm run brainctl stack plan --workspace personal
+pnpm run brainctl stack apply --workspace personal
+pnpm run brainctl stack apply --workspace personal --executor mock --approve --approve-data --approve-config --approve-service --approve-health --metadata-file /tmp/brain-deployments.json
 pnpm run brainctl backup plan --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl backup init --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl backup init --config examples/config/runtime.yaml --workspace personal --apply
@@ -146,29 +148,64 @@ Secret refs are checked only by env/file existence, mode, and byte size.
 
 ## Control-plane servant stack
 
-`stack status` and `stack plan` are dry-run/no-network commands for the
-production architecture where Brain manages the `codex-chat` servant runtime
-stack instead of replacing it:
+`stack status`, `stack plan`, and `stack apply` are the control-plane commands
+for the production architecture where Brain manages the `codex-chat` servant
+runtime stack instead of replacing it:
 
 ```bash
 pnpm run brainctl stack status --workspace personal
 pnpm run brainctl stack plan --workspace personal
+pnpm run brainctl stack apply --workspace personal
 pnpm run brainctl stack status --registry /path/to/index.yaml --setup-context /path/to/setup-context.json
 ```
 
 The status command resolves repo-registry entries for `codex-chat`,
 `assistant-agent-logic` (or the legacy `assistant-claude` alias), and
 `assistant-agent-data`; it also resolves deploy host, SSH identity, service
-name, env/config paths, env-var names, and health-check commands from
-`codex-chat` app metadata and local setup context. Secret checks are represented
-only as metadata plans such as `stat` or quiet env-key checks; values are always
-redacted.
+name, env/config paths, env-var names, health-check commands, and the canonical
+deployment metadata ledger from `codex-chat` app metadata and local setup
+context. Secret checks are represented only as metadata plans such as `stat` or
+quiet env-key checks; values are always redacted.
+
+Deployment metadata is canonical on the Brain/control-plane host, under:
+
+```text
+<brain-workspace-root>/state/control-plane/deployments.json
+```
+
+For the current remote Brain workspace that is:
+
+```text
+/home/brain/.brain/workspace/state/control-plane/deployments.json
+```
+
+The schema is `kind: brain.control-plane.deployments`, `version: 1`, with a
+`deployments[]` list keyed by IDs such as `personal:production:codex-chat`.
+Records include servant stack status, repo paths/remotes, approved executor
+metadata, config/env placeholders, health status, and `secretValuesStored:
+false`. Repo-registry and local notes are secondary pointers, not deployment
+status authority.
 
 The plan command renders, but does not run, the first servant-stack flow:
 clone/update `codex-chat`, clone/update `assistant-agent-logic`, prompt/validate
 `assistant-agent-data`/workspace, render `codex-chat` config/env, install/start
-the `codex-chat` service, and run health checks. It blocks boundary violations
-such as nesting `assistant-agent-logic` under `codex-chat`.
+the `codex-chat` service, record deployment metadata, and run health checks. It
+blocks boundary violations such as nesting `assistant-agent-logic` under
+`codex-chat`.
+
+`stack apply` is dry-run unless explicitly approved. Approval gates are:
+
+- `--approve`: git/build/metadata execution gate.
+- `--approve-data`: assistant-agent-data clone/init/validation gate.
+- `--approve-config`: config/env template write gate; secret values remain
+  placeholders only.
+- `--approve-service`: systemd install/enable/start gate.
+- `--approve-health`: live/read-only health check gate.
+
+Executors are `dry-run`, `mock`, `local`, and `ssh`. Use `mock` with
+`--metadata-file` for tests/rehearsals. Use `ssh` only after reviewing the
+rendered action list; it runs approved commands via the resolved SSH identity and
+redacts stdout/stderr before output.
 
 Setup is resumable across Codex sessions. `brainctl setup` writes a
 metadata-only private progress file at

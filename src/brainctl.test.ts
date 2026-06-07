@@ -1334,6 +1334,7 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
         assistantData: { workspacePath: string; promptRequired: boolean; migrationPlaceholder: string };
         servicePaths: { deployHost: string; sshIdentity: string; envFile: string; configPath: string; setupContextConfigPath: string };
         secretMetadataChecks: Array<{ kind: string; value: string; metadataOnly: boolean; plannedCheck: string }>;
+        deploymentMetadata: { canonical: { sourceOfTruth: string; path: string; relativePath: string; note: string }; read: { attempted: boolean; plannedReadCommand: string }; localProjectNotesAreSecondary: boolean };
         repoBoundaries: { ok: boolean; policy: string[] };
         missing: string[];
       };
@@ -1361,6 +1362,13 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
     assert.equal(statusJson.details.servicePaths.setupContextConfigPath, "/srv/brain/workspace/config/runtime.yaml");
     assert.equal(statusJson.details.repoBoundaries.ok, true);
     assert.ok(statusJson.details.repoBoundaries.policy.some((line) => /codex-chat is the servant runtime/.test(line)));
+    assert.equal(statusJson.details.deploymentMetadata.canonical.sourceOfTruth, "remote-brain-workspace");
+    assert.equal(statusJson.details.deploymentMetadata.canonical.path, "/srv/brain/workspace/state/control-plane/deployments.json");
+    assert.equal(statusJson.details.deploymentMetadata.canonical.relativePath, "state/control-plane/deployments.json");
+    assert.match(statusJson.details.deploymentMetadata.canonical.note, /repo-registry\/local notes are secondary/);
+    assert.equal(statusJson.details.deploymentMetadata.read.attempted, false);
+    assert.match(statusJson.details.deploymentMetadata.read.plannedReadCommand, /ssh brain@brain\.example\.test/);
+    assert.equal(statusJson.details.deploymentMetadata.localProjectNotesAreSecondary, true);
     assert.deepEqual(statusJson.details.missing, []);
     assert.ok(statusJson.details.secretMetadataChecks.every((check) => check.value === "redacted" && check.metadataOnly));
     assert.ok(statusJson.details.secretMetadataChecks.some((check) => check.plannedCheck.includes("stat -c") && check.plannedCheck.includes("/etc/codex-chat/env")));
@@ -1378,7 +1386,7 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
         networkAccess: boolean;
         sideEffects: string;
         secretValuesPrinted: boolean;
-        plan: { mode: string; steps: Array<{ id: string; commands?: string[]; prompts?: string[]; migrationPlaceholder?: string; target?: Record<string, string>; status?: string }>; forbidden: string[] };
+        plan: { mode: string; steps: Array<{ id: string; commands?: string[]; prompts?: string[]; migrationPlaceholder?: string; target?: Record<string, string>; status?: string; renderedEnvPreview?: string }>; execution: { actions: Array<{ id: string; executor: string; displayCommand?: string }> }; forbidden: string[] };
       };
     };
     assert.equal(planJson.ok, true);
@@ -1393,9 +1401,186 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
     assert.ok(steps.get("assistant-data-workspace")?.prompts?.some((prompt) => /pull existing private repo/.test(prompt)));
     assert.match(steps.get("assistant-data-workspace")?.migrationPlaceholder ?? "", /do not auto-migrate/);
     assert.ok(steps.get("render-codex-chat-config-env")?.target?.envFile);
+    assert.doesNotMatch(steps.get("render-codex-chat-config-env")?.renderedEnvPreview ?? "", new RegExp(secretValue));
     assert.ok(steps.get("install-start-codex-chat-service")?.commands?.some((command) => /systemctl enable --now codex-chat\.service/.test(command)));
+    assert.ok(steps.get("record-deployment-metadata")?.target?.path.includes("state/control-plane/deployments.json"));
     assert.ok(steps.get("health-check-codex-chat")?.commands?.some((command) => /codex-chat health --json/.test(command)));
+    assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "clone-update-codex-chat-deploy" && action.executor === "ssh" && /ssh codex@app\.example\.test/.test(action.displayCommand ?? "")));
+    assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "assistant-agent-data-clone-or-init-placeholder" && action.executor === "local" && !/ssh /.test(action.displayCommand ?? "")));
     assert.ok(planJson.details.plan.forbidden.some((line) => /Do not vendor or merge/.test(line)));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brainctl stack plan renders local executor actions for local control-plane targets", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-stack-local-"));
+  try {
+    const brainRepo = path.join(root, "brain");
+    const assistantData = path.join(root, "assistant-agent-data");
+    const codexChat = path.join(root, "codex-chat");
+    const assistantLogic = path.join(root, "assistant-agent-logic");
+    const registry = path.join(root, "registry.yaml");
+    const setupContext = path.join(root, "setup-context.json");
+    const workspaceRoot = path.join(root, "workspace");
+    await mkdir(brainRepo, { recursive: true });
+    await mkdir(assistantData, { recursive: true });
+    await writeFile(registry, stackRegistryFixture({
+      assistantData,
+      assistantLogicPath: assistantLogic,
+      codexHost: "local",
+      codexPath: codexChat,
+      deployHost: "local",
+      deployPath: codexChat,
+      sshIdentity: "",
+      envFile: path.join(root, "codex-chat.env"),
+      configPath: path.join(root, "codex-chat.yaml"),
+    }));
+    await writeFile(setupContext, `${JSON.stringify({
+      version: 1,
+      target: "local",
+      workspace: "personal",
+      workspaceRoot,
+      repoPath: brainRepo,
+      configPath: path.join(workspaceRoot, "config", "runtime.yaml"),
+      secretValuesStored: false,
+    }, null, 2)}\n`);
+
+    const plan = spawnBrainctl(["stack", "plan", "--registry", registry, "--repo", brainRepo, "--setup-context", setupContext, "--workspace", "personal"]);
+    assert.equal(plan.status, 0, plan.stderr);
+    const parsed = JSON.parse(plan.stdout) as { details: { status: { deploymentMetadata: { canonical: { sourceOfTruth: string; path: string } } }; plan: { execution: { actions: Array<{ id: string; executor: string; displayCommand?: string }> } } } };
+    assert.equal(parsed.details.status.deploymentMetadata.canonical.sourceOfTruth, "local-brain-workspace");
+    assert.equal(parsed.details.status.deploymentMetadata.canonical.path, `${workspaceRoot}/state/control-plane/deployments.json`);
+    assert.ok(parsed.details.plan.execution.actions.some((action) => action.id === "clone-update-codex-chat-source" && action.executor === "local" && !/ssh /.test(action.displayCommand ?? "")));
+    assert.ok(parsed.details.plan.execution.actions.some((action) => action.id === "install-codex-chat-systemd" && action.executor === "local" && !/ssh /.test(action.displayCommand ?? "")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brainctl stack apply defaults to dry-run, enforces approval gates, and writes redacted deployment metadata through mock executor", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-stack-apply-"));
+  try {
+    const brainRepo = path.join(root, "brain");
+    const assistantData = path.join(root, "assistant-agent-data");
+    const registry = path.join(root, "registry.yaml");
+    const setupContext = path.join(root, "setup-context.json");
+    const metadataFile = path.join(root, "offline", "deployments.json");
+    await mkdir(brainRepo, { recursive: true });
+    await mkdir(assistantData, { recursive: true });
+    await writeFile(registry, stackRegistryFixture({ assistantData }));
+    await writeFile(setupContext, `${JSON.stringify({
+      version: 1,
+      target: "remote",
+      workspace: "personal",
+      workspaceRoot: "/srv/brain/workspace",
+      sshHost: "brain.example.test",
+      sshUser: "brain",
+      serviceUser: "brain",
+      repoPath: "/srv/brain/control-plane",
+      configPath: "/srv/brain/workspace/config/runtime.yaml",
+      secretValuesStored: false,
+    }, null, 2)}\n`);
+
+    const secretValue = "super-secret-stack-apply-value";
+    const dryRun = spawnBrainctl(["stack", "apply", "--registry", registry, "--repo", brainRepo, "--setup-context", setupContext, "--workspace", "personal", "--executor", "mock", "--metadata-file", metadataFile], {
+      TELEGRAM_BOT_TOKEN: secretValue,
+    });
+    assert.equal(dryRun.status, 0, dryRun.stderr);
+    assert.doesNotMatch(dryRun.stdout, new RegExp(secretValue));
+    const dryRunJson = JSON.parse(dryRun.stdout) as { details: { executor: { dryRun: boolean; effective: string }; approvalGates: Array<{ gate: string; approved: boolean }>; metadataWrite?: unknown; actionResults: Array<{ status: string; reason?: string }> } };
+    assert.equal(dryRunJson.details.executor.dryRun, true);
+    assert.equal(dryRunJson.details.executor.effective, "dry-run");
+    assert.equal(dryRunJson.details.approvalGates.find((gate) => gate.gate === "apply")?.approved, false);
+    assert.ok(dryRunJson.details.actionResults.some((result) => result.status === "skipped" && /approval gate/.test(result.reason ?? "")));
+    assert.equal(dryRunJson.details.metadataWrite, undefined);
+    await assert.rejects(stat(metadataFile));
+
+    const apply = spawnBrainctl([
+      "stack", "apply",
+      "--registry", registry,
+      "--repo", brainRepo,
+      "--setup-context", setupContext,
+      "--workspace", "personal",
+      "--executor", "mock",
+      "--metadata-file", metadataFile,
+      "--approve",
+      "--approve-data",
+      "--approve-config",
+      "--approve-service",
+      "--approve-health",
+      "--now", "2026-06-07T00:00:00.000Z",
+    ], {
+      TELEGRAM_BOT_TOKEN: secretValue,
+      OPENAI_API_KEY: "sk-stack-apply-secret-value-must-not-print",
+    });
+    assert.equal(apply.status, 0, apply.stderr);
+    assert.doesNotMatch(apply.stdout, new RegExp(secretValue));
+    assert.doesNotMatch(apply.stdout, /sk-stack-apply-secret-value-must-not-print/);
+    const applyJson = JSON.parse(apply.stdout) as { details: { executor: { dryRun: boolean; effective: string }; metadataWrite: { ok: boolean; path: string; canonicalPath: string; deployments: Array<{ id: string; status: string }> }; actionResults: Array<{ status: string }> } };
+    assert.equal(applyJson.details.executor.dryRun, false);
+    assert.equal(applyJson.details.executor.effective, "mock");
+    assert.ok(applyJson.details.actionResults.every((result) => result.status === "mocked" || result.status === "handled-by-metadata-writer"));
+    assert.equal(applyJson.details.metadataWrite.ok, true);
+    assert.equal(applyJson.details.metadataWrite.path, metadataFile);
+    assert.equal(applyJson.details.metadataWrite.canonicalPath, "/srv/brain/workspace/state/control-plane/deployments.json");
+    assert.deepEqual(applyJson.details.metadataWrite.deployments, [{ id: "personal:production:codex-chat", status: "healthy", updatedAt: "2026-06-07T00:00:00.000Z" }]);
+    assert.equal((await stat(metadataFile)).mode & 0o777, 0o600);
+
+    const storeText = await readFile(metadataFile, "utf8");
+    assert.doesNotMatch(storeText, new RegExp(secretValue));
+    assert.doesNotMatch(storeText, /sk-stack-apply-secret-value-must-not-print/);
+    const store = JSON.parse(storeText) as {
+      version: number;
+      kind: string;
+      canonical: { sourceOfTruth: string; path: string; relativePath: string };
+      secretValuesStored: boolean;
+      deployments: Array<{ id: string; status: string; secretValuesStored: boolean; config: { envVars: Array<{ name: string; value: string; metadataOnly: boolean }>; renderedEnvPreview: string }; health: { status: string } }>;
+    };
+    assert.equal(store.version, 1);
+    assert.equal(store.kind, "brain.control-plane.deployments");
+    assert.equal(store.canonical.sourceOfTruth, "remote-brain-workspace");
+    assert.equal(store.canonical.path, "/srv/brain/workspace/state/control-plane/deployments.json");
+    assert.equal(store.canonical.relativePath, "state/control-plane/deployments.json");
+    assert.equal(store.secretValuesStored, false);
+    assert.equal(store.deployments[0]?.id, "personal:production:codex-chat");
+    assert.equal(store.deployments[0]?.status, "healthy");
+    assert.equal(store.deployments[0]?.secretValuesStored, false);
+    assert.equal(store.deployments[0]?.health.status, "passed");
+    assert.ok(store.deployments[0]?.config.envVars.every((envVar) => envVar.value === "redacted" && envVar.metadataOnly));
+    assert.match(store.deployments[0]?.config.renderedEnvPreview ?? "", /<redacted:set-on-server>/);
+
+    const status = spawnBrainctl(["stack", "status", "--registry", registry, "--repo", brainRepo, "--setup-context", setupContext, "--workspace", "personal", "--metadata-file", metadataFile]);
+    assert.equal(status.status, 0, status.stderr);
+    const statusJson = JSON.parse(status.stdout) as { details: { deploymentMetadata: { read: { attempted: boolean; present: boolean; validation: { ok: boolean } }; deployments: Array<{ id: string; status: string; serviceName: string; deployHost: string }> } } };
+    assert.equal(statusJson.details.deploymentMetadata.read.attempted, true);
+    assert.equal(statusJson.details.deploymentMetadata.read.present, true);
+    assert.equal(statusJson.details.deploymentMetadata.read.validation.ok, true);
+    assert.deepEqual(statusJson.details.deploymentMetadata.deployments, [{ id: "personal:production:codex-chat", stack: "codex-chat", workspace: "personal", environment: "production", status: "healthy", updatedAt: "2026-06-07T00:00:00.000Z", serviceName: "codex-chat.service", deployHost: "app.example.test" }]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brainctl stack status validates deployment metadata schema", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-stack-metadata-schema-"));
+  try {
+    const brainRepo = path.join(root, "brain");
+    const assistantData = path.join(root, "assistant-agent-data");
+    const registry = path.join(root, "registry.yaml");
+    const metadataFile = path.join(root, "deployments.json");
+    await mkdir(brainRepo, { recursive: true });
+    await mkdir(assistantData, { recursive: true });
+    await writeFile(registry, stackRegistryFixture({ assistantData }));
+    await writeFile(metadataFile, `${JSON.stringify({ version: 2, kind: "wrong", secretValuesStored: true, deployments: [{ id: "bad", stack: "codex-chat", status: "healthy", secretValuesStored: true }] }, null, 2)}\n`);
+
+    const status = spawnBrainctl(["stack", "status", "--registry", registry, "--repo", brainRepo, "--metadata-file", metadataFile]);
+    assert.equal(status.status, 1, status.stderr);
+    const parsed = JSON.parse(status.stdout) as { details: { deploymentMetadata: { read: { validation: { ok: boolean; issues: string[] } } }; missing: string[] } };
+    assert.equal(parsed.details.deploymentMetadata.read.validation.ok, false);
+    assert.ok(parsed.details.deploymentMetadata.read.validation.issues.some((issue) => /version must be 1/.test(issue)));
+    assert.ok(parsed.details.deploymentMetadata.read.validation.issues.some((issue) => /secretValuesStored must be false/.test(issue)));
+    assert.ok(parsed.details.missing.some((issue) => /deployment metadata store invalid/.test(issue)));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1484,16 +1669,33 @@ function testRuntimeConfig(workspace: string, backupRepo: string, options: { com
   ].join("\n");
 }
 
-function stackRegistryFixture(options: { assistantData: string; assistantLogicPath?: string }): string {
+function stackRegistryFixture(options: {
+  assistantData: string;
+  assistantLogicPath?: string;
+  codexHost?: string;
+  codexPath?: string;
+  deployHost?: string;
+  deployPath?: string;
+  sshIdentity?: string;
+  envFile?: string;
+  configPath?: string;
+}): string {
   const assistantLogicPath = options.assistantLogicPath ?? "/srv/src/assistant-agent-logic";
+  const codexHost = options.codexHost ?? "dev.example.test";
+  const codexPath = options.codexPath ?? "/srv/src/codex-chat";
+  const deployHost = options.deployHost ?? "app.example.test";
+  const deployPath = options.deployPath ?? "/srv/codex-chat";
+  const sshIdentity = options.sshIdentity ?? "codex@app.example.test";
+  const envFile = options.envFile ?? "/etc/codex-chat/env";
+  const configPath = options.configPath ?? "/etc/codex-chat/config.yaml";
   return [
     "version: 1",
     `controller_root: ${JSON.stringify(path.dirname(options.assistantData))}`,
     "repos:",
     "  codex-chat:",
     "    alias: codex-chat",
-    "    host: dev.example.test",
-    "    path: /srv/src/codex-chat",
+    `    host: ${JSON.stringify(codexHost)}`,
+    `    path: ${JSON.stringify(codexPath)}`,
     "    repo_name: codex-chat",
     "    default_branch: main",
     "    current_branch: main",
@@ -1504,18 +1706,18 @@ function stackRegistryFixture(options: { assistantData: string; assistantLogicPa
     "        environments:",
     "          production:",
     "            source:",
-    "              host: dev.example.test",
-    "              path: /srv/src/codex-chat",
+    `              host: ${JSON.stringify(codexHost)}`,
+    `              path: ${JSON.stringify(codexPath)}`,
     "              branch: main",
     "              remote_url: git@github.com:example/codex-chat.git",
     "            deploy:",
-    "              host: app.example.test",
-    "              path: /srv/codex-chat",
+    `              host: ${JSON.stringify(deployHost)}`,
+    `              path: ${JSON.stringify(deployPath)}`,
     "              service: codex-chat.service",
     "              runtime_user: codex",
-    "              ssh_identity: codex@app.example.test",
-    "              env_file: /etc/codex-chat/env",
-    "              config_path: /etc/codex-chat/config.yaml",
+    ...(sshIdentity ? [`              ssh_identity: ${JSON.stringify(sshIdentity)}`] : []),
+    `              env_file: ${JSON.stringify(envFile)}`,
+    `              config_path: ${JSON.stringify(configPath)}`,
     "              env_vars:",
     "                - TELEGRAM_BOT_TOKEN",
     "                - OPENAI_API_KEY",

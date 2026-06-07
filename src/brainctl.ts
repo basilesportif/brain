@@ -216,10 +216,11 @@ operations.command("validate")
 
 const stack = program.command("stack").description("Control-plane inspection and no-network plans for the servant runtime stack");
 stack.command("status")
-  .description("Resolve codex-chat, assistant-agent-logic, assistant-agent-data/workspace, and service metadata from the repo registry without contacting hosts.")
+  .description("Resolve codex-chat, assistant-agent-logic, assistant-agent-data/workspace, service metadata, and remote deployment metadata without contacting hosts.")
   .option("--registry <path>", "repo-registry index.yaml path")
   .option("--repo <path>", "Brain control-plane checkout path used to find ignored setup context", process.cwd())
   .option("--setup-context <path>", "explicit setup-context.json path")
+  .option("--metadata-file <path>", "local/offline deployment metadata file to read instead of the canonical remote path")
   .option("--workspace <id>", "workspace id", DEFAULT_WORKSPACE_ID)
   .option("--environment <name>", "codex-chat app environment", "production")
   .action(async (options) => exitWith(await stackStatusCommand(options)));
@@ -228,9 +229,27 @@ stack.command("plan")
   .option("--registry <path>", "repo-registry index.yaml path")
   .option("--repo <path>", "Brain control-plane checkout path used to find ignored setup context", process.cwd())
   .option("--setup-context <path>", "explicit setup-context.json path")
+  .option("--metadata-file <path>", "local/offline deployment metadata file to read instead of the canonical remote path")
   .option("--workspace <id>", "workspace id", DEFAULT_WORKSPACE_ID)
   .option("--environment <name>", "codex-chat app environment", "production")
   .action(async (options) => exitWith(await stackPlanCommand(options)));
+stack.command("apply")
+  .description("Apply the servant stack with explicit approval gates. Defaults to dry-run and supports mock/local/ssh executors.")
+  .option("--registry <path>", "repo-registry index.yaml path")
+  .option("--repo <path>", "Brain control-plane checkout path used to find ignored setup context", process.cwd())
+  .option("--setup-context <path>", "explicit setup-context.json path")
+  .option("--metadata-file <path>", "local/offline deployment metadata file to write/read for tests or local-only control planes")
+  .option("--workspace <id>", "workspace id", DEFAULT_WORKSPACE_ID)
+  .option("--environment <name>", "codex-chat app environment", "production")
+  .option("--executor <kind>", "executor kind: dry-run, mock, local, or ssh", "dry-run")
+  .option("--dry-run", "force dry-run planning even when approval flags are supplied")
+  .option("--approve", "approve non-secret git/build/metadata execution for this run")
+  .option("--approve-data", "approve assistant-agent-data clone/init/validation actions")
+  .option("--approve-config", "approve writing codex-chat config/env templates with secret placeholders only")
+  .option("--approve-service", "approve systemd service install/start actions")
+  .option("--approve-health", "approve live/read-only health verification actions")
+  .option("--now <iso>", "timestamp to record in deployment metadata")
+  .action(async (options) => exitWith(await stackApplyCommand(options)));
 
 const web = program.command("web").description("Generated static web page validation and publisher commands");
 web.command("setup")
@@ -811,8 +830,23 @@ interface StackCommandOptions {
   registry?: string;
   repo?: string;
   setupContext?: string;
+  metadataFile?: string;
   workspace: string;
   environment: string;
+}
+
+type StackExecutorKind = "dry-run" | "mock" | "local" | "ssh";
+type StackApprovalGate = "apply" | "data" | "config" | "service" | "health";
+
+interface StackApplyOptions extends StackCommandOptions {
+  executor?: string;
+  dryRun?: boolean;
+  approve?: boolean;
+  approveData?: boolean;
+  approveConfig?: boolean;
+  approveService?: boolean;
+  approveHealth?: boolean;
+  now?: string;
 }
 
 interface RepoRegistryIndex {
@@ -849,6 +883,7 @@ interface StackRepoResolution {
 }
 
 interface StackStatusDetails {
+  workspaceId: string;
   role: string;
   dryRun: true;
   networkAccess: false;
@@ -893,11 +928,139 @@ interface StackStatusDetails {
     setupContextConfigPath?: string;
   };
   secretMetadataChecks: Array<Record<string, unknown>>;
+  deploymentMetadata: StackDeploymentMetadataStatus;
   repoBoundaries: ReturnType<typeof analyzeStackRepoBoundaries>;
   missing: string[];
 }
 
+interface StackDeploymentMetadataStatus {
+  canonical: {
+    sourceOfTruth: "remote-brain-workspace" | "local-brain-workspace";
+    host?: string;
+    sshIdentity?: string;
+    workspaceRoot: string;
+    path: string;
+    relativePath: string;
+    schema: {
+      kind: typeof DEPLOYMENT_METADATA_KIND;
+      version: typeof DEPLOYMENT_METADATA_VERSION;
+    };
+    note: string;
+  };
+  localReadOverride?: string;
+  read: {
+    attempted: boolean;
+    present: boolean;
+    path: string;
+    metadata?: Awaited<ReturnType<typeof fileMetadata>>;
+    validation: DeploymentMetadataValidation;
+    plannedReadCommand?: string;
+  };
+  deployments: Array<{
+    id: string;
+    stack: string;
+    workspace: string;
+    environment: string;
+    status: string;
+    updatedAt: string;
+    serviceName?: string;
+    deployHost?: string;
+  }>;
+  secretValuesStored: false;
+  localProjectNotesAreSecondary: true;
+}
+
+interface DeploymentMetadataValidation {
+  ok: boolean;
+  issues: string[];
+}
+
+interface DeploymentMetadataStore {
+  version: 1;
+  kind: typeof DEPLOYMENT_METADATA_KIND;
+  updatedAt: string;
+  canonical: {
+    sourceOfTruth: "remote-brain-workspace" | "local-brain-workspace";
+    workspaceRoot: string;
+    path: string;
+    relativePath: string;
+  };
+  deployments: DeploymentMetadataRecord[];
+  secretValuesStored: false;
+}
+
+interface DeploymentMetadataRecord {
+  id: string;
+  stack: "codex-chat";
+  workspace: string;
+  environment: string;
+  status: "planned" | "blocked" | "partially_applied" | "applied" | "healthy" | "failed";
+  updatedAt: string;
+  source: "brainctl stack apply";
+  controlPlane: Pick<StackRepoResolution, "host" | "path" | "repoName">;
+  servantRuntime: {
+    repoName: string;
+    sourceHost: string;
+    sourcePath: string;
+    deployHost?: string;
+    deployPath?: string;
+    branch?: string;
+    remoteUrl?: string;
+    serviceName?: string;
+    runtimeUser?: string;
+  };
+  assistantLogic: Pick<StackRepoResolution, "host" | "path" | "repoName" | "branch" | "remoteUrl">;
+  assistantData: Pick<StackRepoResolution, "host" | "path" | "repoName" | "branch" | "remoteUrl"> & {
+    promptRequired: boolean;
+    migrationStatus: "placeholder";
+  };
+  config: {
+    configPath?: string;
+    envFile?: string;
+    envVars: Array<{ name: string; value: "redacted"; metadataOnly: true }>;
+    renderedConfigPreview: string;
+    renderedEnvPreview: string;
+  };
+  health: {
+    status: "not_run" | "planned" | "passed" | "failed";
+    checks: Array<{ kind: string; command: string }>;
+  };
+  approvals: Record<StackApprovalGate, boolean>;
+  executor: {
+    requested: StackExecutorKind;
+    effective: StackExecutorKind;
+    dryRun: boolean;
+    networkAccess: boolean;
+  };
+  lastPlan: {
+    actionCount: number;
+    approvedActionCount: number;
+    executedActionCount: number;
+    failedActionCount: number;
+  };
+  secretValuesStored: false;
+}
+
+interface StackExecutorAction {
+  id: string;
+  title: string;
+  phase: "preflight" | "git" | "assistant-data" | "config" | "systemd" | "health" | "metadata";
+  executor: "local" | "ssh" | "operator-prompt" | "metadata-file";
+  requiredGate: StackApprovalGate;
+  hostIdentity?: string;
+  command?: string;
+  displayCommand?: string;
+  writesMetadata?: boolean;
+  metadataOnly?: boolean;
+  secretValuesPrinted: false;
+  approved: boolean;
+  sideEffectsIfExecuted: string;
+}
+
 const DEFAULT_REPO_REGISTRY_INDEX = "/home/tim/.assistant-claude/workspace/.claude/repo-registry/index.yaml";
+const DEPLOYMENT_METADATA_VERSION = 1 as const;
+const DEPLOYMENT_METADATA_KIND = "brain.control-plane.deployments" as const;
+const DEPLOYMENT_METADATA_RELATIVE_PATH = "state/control-plane/deployments.json";
 const STACK_REQUIRED_ALIASES = {
   codexChat: ["codex-chat"],
   assistantLogic: ["assistant-agent-logic", "assistant-claude"],
@@ -930,6 +1093,88 @@ async function stackPlanCommand(options: StackCommandOptions): Promise<CliResult
       networkAccess: false,
       sideEffects: "none",
       secretValuesPrinted: false,
+    },
+  };
+}
+
+async function stackApplyCommand(options: StackApplyOptions): Promise<CliResult> {
+  const executor = normalizeStackExecutor(options.executor);
+  if (!executor) {
+    return { ok: false, summary: "stack apply executor must be dry-run, mock, local, or ssh", details: { supported: ["dry-run", "mock", "local", "ssh"] } };
+  }
+  const status = await resolveStackStatus(options);
+  const approvals = stackApprovals(options);
+  const dryRun = Boolean(options.dryRun || !approvals.apply || executor === "dry-run");
+  const effectiveExecutor: StackExecutorKind = dryRun ? "dry-run" : executor;
+  const plan = renderStackNoNetworkPlan(status);
+  const actions = renderStackExecutorActions(status, approvals);
+  const canApply = status.missing.length === 0 && status.repoBoundaries.ok;
+  const blockedReason = canApply ? undefined : "unresolved stack status prerequisites or repo-boundary violations";
+
+  const actionResults: Array<Record<string, unknown>> = [];
+  if (!dryRun && canApply) {
+    for (const action of actions) {
+      const result = await executeStackAction(action, {
+        executor: effectiveExecutor,
+        metadataFile: options.metadataFile,
+      });
+      actionResults.push(result);
+    }
+  } else {
+    for (const action of actions) {
+      actionResults.push({
+        id: action.id,
+        phase: action.phase,
+        status: action.approved && canApply ? "planned" : "skipped",
+        reason: !canApply ? blockedReason : action.approved ? "dry-run default; no executor side effects" : `approval gate not enabled: ${action.requiredGate}`,
+        command: action.displayCommand,
+        secretValuesPrinted: false,
+      });
+    }
+  }
+
+  let metadataWrite: Record<string, unknown> | undefined;
+  if (!dryRun && canApply) {
+    const record = stackDeploymentRecord(status, {
+      approvals,
+      requestedExecutor: executor,
+      effectiveExecutor,
+      dryRun,
+      actionCount: actions.length,
+      approvedActionCount: actions.filter((action) => action.approved).length,
+      executedActionCount: actionResults.filter((result) => result.status === "succeeded" || result.status === "mocked").length,
+      failedActionCount: actionResults.filter((result) => result.status === "failed").length,
+      now: options.now,
+      healthApproved: approvals.health,
+    });
+    metadataWrite = await writeStackDeploymentMetadata(status, record, { executor: effectiveExecutor, metadataFile: options.metadataFile });
+  }
+
+  const failedActions = actionResults.filter((result) => result.status === "failed");
+  const summary = dryRun
+    ? "stack apply plan ready (dry run; pass --approve with an executor to run)"
+    : failedActions.length > 0 || metadataWrite?.ok === false
+      ? "stack apply attempted with failures; deployment metadata records the attempted status where possible"
+      : "stack apply completed through approved executor gates";
+  return {
+    ok: canApply && (dryRun || (failedActions.length === 0 && metadataWrite?.ok !== false)),
+    summary,
+    details: {
+      status,
+      plan,
+      executor: {
+        requested: executor,
+        effective: effectiveExecutor,
+        dryRun,
+        networkAccess: !dryRun && effectiveExecutor === "ssh",
+      },
+      approvalGates: stackApprovalGateDetails(approvals),
+      actions,
+      actionResults,
+      metadataWrite,
+      sideEffects: dryRun ? "none" : effectiveExecutor === "mock" ? "mock executor plus local/offline metadata write only" : "approved executor actions only",
+      secretValuesPrinted: false,
+      blockedReason,
     },
   };
 }
@@ -987,6 +1232,11 @@ async function resolveStackStatus(options: StackCommandOptions): Promise<StackSt
     setupContextConfigPath: setupContext.context?.configPath,
   };
   const secretMetadataChecks = stackSecretMetadataChecks(envVars, envFile, sshIdentity);
+  const deploymentMetadata = await readStackDeploymentMetadataStatus({
+    workspace: options.workspace,
+    setupContext,
+    metadataFile: options.metadataFile,
+  });
   const repoBoundaries = analyzeStackRepoBoundaries([controlPlane, servantRuntime, assistantLogicResolution, assistantDataResolution]);
   const missing = [
     ...registry.issues,
@@ -997,10 +1247,12 @@ async function resolveStackStatus(options: StackCommandOptions): Promise<StackSt
     ...(!deployPath ? ["codex-chat deploy path missing from registry"] : []),
     ...(!serviceName ? ["codex-chat service name missing from registry"] : []),
     ...(!envFile ? ["codex-chat env file path missing from registry"] : []),
+    ...(!deploymentMetadata.read.validation.ok ? deploymentMetadata.read.validation.issues.map((issue) => `deployment metadata store invalid: ${issue}`) : []),
     ...repoBoundaries.issues,
   ];
 
   return {
+    workspaceId: options.workspace,
     role: "Brain control plane manages the codex-chat servant runtime stack; Brain's own runtime remains experimental/lab.",
     dryRun: true,
     networkAccess: false,
@@ -1020,9 +1272,207 @@ async function resolveStackStatus(options: StackCommandOptions): Promise<StackSt
     assistantData: assistantDataResolution,
     servicePaths,
     secretMetadataChecks,
+    deploymentMetadata,
     repoBoundaries,
     missing,
   };
+}
+
+function normalizeStackExecutor(value: string | undefined): StackExecutorKind | undefined {
+  const normalized = (value ?? "dry-run").trim();
+  return normalized === "dry-run" || normalized === "mock" || normalized === "local" || normalized === "ssh" ? normalized : undefined;
+}
+
+function stackApprovals(options: StackApplyOptions): Record<StackApprovalGate, boolean> {
+  return {
+    apply: Boolean(options.approve),
+    data: Boolean(options.approve && options.approveData),
+    config: Boolean(options.approve && options.approveConfig),
+    service: Boolean(options.approve && options.approveService),
+    health: Boolean(options.approve && options.approveHealth),
+  };
+}
+
+function stackApprovalGateDetails(approvals: Record<StackApprovalGate, boolean>): Array<Record<string, unknown>> {
+  return [
+    { gate: "apply", approved: approvals.apply, unlocks: ["repo preflight", "git clone/update", "build", "deployment metadata write"], requiredFlag: "--approve" },
+    { gate: "data", approved: approvals.data, unlocks: ["assistant-agent-data clone/init/validation placeholders"], requiredFlag: "--approve --approve-data" },
+    { gate: "config", approved: approvals.config, unlocks: ["codex-chat config/env template writes without secret values"], requiredFlag: "--approve --approve-config" },
+    { gate: "service", approved: approvals.service, unlocks: ["systemd service install/enable/start"], requiredFlag: "--approve --approve-service" },
+    { gate: "health", approved: approvals.health, unlocks: ["live health verification commands"], requiredFlag: "--approve --approve-health" },
+  ];
+}
+
+async function readStackDeploymentMetadataStatus(input: {
+  workspace: string;
+  setupContext: Awaited<ReturnType<typeof readStackSetupContext>>;
+  metadataFile?: string;
+}): Promise<StackDeploymentMetadataStatus> {
+  const context = input.setupContext.context;
+  const workspaceRoot = context?.workspaceRoot ?? defaultWorkspaceRoot(input.workspace);
+  const canonicalPath = deploymentMetadataPath(workspaceRoot);
+  const canonicalSourceOfTruth = context?.target === "remote" ? "remote-brain-workspace" as const : "local-brain-workspace" as const;
+  const canonicalHost = context?.target === "remote" ? context.sshHost : undefined;
+  const canonicalSshIdentity = context?.target === "remote" ? sshIdentityFromSetupContext(context) : undefined;
+  const localPath = input.metadataFile ? path.resolve(input.metadataFile) : canonicalSourceOfTruth === "local-brain-workspace" ? path.resolve(canonicalPath) : undefined;
+  const plannedReadCommand = canonicalSourceOfTruth === "remote-brain-workspace"
+    ? remotePlanCommand(canonicalSshIdentity, `test -r ${shellPathArg(canonicalPath)} && python3 -m json.tool ${shellPathArg(canonicalPath)} >/dev/null`)
+    : `test -r ${shellPathArg(canonicalPath)} && python3 -m json.tool ${shellPathArg(canonicalPath)} >/dev/null`;
+  if (!localPath) {
+    return {
+      canonical: {
+        sourceOfTruth: canonicalSourceOfTruth,
+        host: canonicalHost,
+        sshIdentity: canonicalSshIdentity,
+        workspaceRoot,
+        path: canonicalPath,
+        relativePath: DEPLOYMENT_METADATA_RELATIVE_PATH,
+        schema: { kind: DEPLOYMENT_METADATA_KIND, version: DEPLOYMENT_METADATA_VERSION },
+        note: "Deployment metadata is canonical on the Brain/control-plane host under the private workspace state; repo-registry/local notes are secondary link maps.",
+      },
+      read: {
+        attempted: false,
+        present: false,
+        path: canonicalPath,
+        validation: { ok: true, issues: [] },
+        plannedReadCommand,
+      },
+      deployments: [],
+      secretValuesStored: false,
+      localProjectNotesAreSecondary: true,
+    };
+  }
+
+  const metadata = await fileMetadata(localPath);
+  if (!metadata.present) {
+    return {
+      canonical: {
+        sourceOfTruth: canonicalSourceOfTruth,
+        host: canonicalHost,
+        sshIdentity: canonicalSshIdentity,
+        workspaceRoot,
+        path: canonicalPath,
+        relativePath: DEPLOYMENT_METADATA_RELATIVE_PATH,
+        schema: { kind: DEPLOYMENT_METADATA_KIND, version: DEPLOYMENT_METADATA_VERSION },
+        note: "Deployment metadata is canonical on the Brain/control-plane host under the private workspace state; repo-registry/local notes are secondary link maps.",
+      },
+      localReadOverride: input.metadataFile ? localPath : undefined,
+      read: {
+        attempted: true,
+        present: false,
+        path: localPath,
+        metadata,
+        validation: { ok: true, issues: [] },
+        plannedReadCommand,
+      },
+      deployments: [],
+      secretValuesStored: false,
+      localProjectNotesAreSecondary: true,
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(await readFile(localPath, "utf8")) as unknown;
+    const validation = validateDeploymentMetadataStore(parsed);
+    const store = validation.ok ? parsed as DeploymentMetadataStore : undefined;
+    return {
+      canonical: {
+        sourceOfTruth: canonicalSourceOfTruth,
+        host: canonicalHost,
+        sshIdentity: canonicalSshIdentity,
+        workspaceRoot,
+        path: canonicalPath,
+        relativePath: DEPLOYMENT_METADATA_RELATIVE_PATH,
+        schema: { kind: DEPLOYMENT_METADATA_KIND, version: DEPLOYMENT_METADATA_VERSION },
+        note: "Deployment metadata is canonical on the Brain/control-plane host under the private workspace state; repo-registry/local notes are secondary link maps.",
+      },
+      localReadOverride: input.metadataFile ? localPath : undefined,
+      read: {
+        attempted: true,
+        present: true,
+        path: localPath,
+        metadata,
+        validation,
+        plannedReadCommand,
+      },
+      deployments: (store?.deployments ?? []).map((deployment) => ({
+        id: deployment.id,
+        stack: deployment.stack,
+        workspace: deployment.workspace,
+        environment: deployment.environment,
+        status: deployment.status,
+        updatedAt: deployment.updatedAt,
+        serviceName: deployment.servantRuntime.serviceName,
+        deployHost: deployment.servantRuntime.deployHost,
+      })),
+      secretValuesStored: false,
+      localProjectNotesAreSecondary: true,
+    };
+  } catch (error) {
+    return {
+      canonical: {
+        sourceOfTruth: canonicalSourceOfTruth,
+        host: canonicalHost,
+        sshIdentity: canonicalSshIdentity,
+        workspaceRoot,
+        path: canonicalPath,
+        relativePath: DEPLOYMENT_METADATA_RELATIVE_PATH,
+        schema: { kind: DEPLOYMENT_METADATA_KIND, version: DEPLOYMENT_METADATA_VERSION },
+        note: "Deployment metadata is canonical on the Brain/control-plane host under the private workspace state; repo-registry/local notes are secondary link maps.",
+      },
+      localReadOverride: input.metadataFile ? localPath : undefined,
+      read: {
+        attempted: true,
+        present: true,
+        path: localPath,
+        metadata,
+        validation: { ok: false, issues: [`could not parse deployment metadata JSON: ${errorMessage(error)}`] },
+        plannedReadCommand,
+      },
+      deployments: [],
+      secretValuesStored: false,
+      localProjectNotesAreSecondary: true,
+    };
+  }
+}
+
+function deploymentMetadataPath(workspaceRoot: string): string {
+  return path.posix.join(workspaceRoot.replaceAll("\\", "/"), DEPLOYMENT_METADATA_RELATIVE_PATH);
+}
+
+function validateDeploymentMetadataStore(value: unknown): DeploymentMetadataValidation {
+  const issues: string[] = [];
+  if (!isRecord(value)) return { ok: false, issues: ["store is not an object"] };
+  if (value.version !== DEPLOYMENT_METADATA_VERSION) issues.push(`version must be ${DEPLOYMENT_METADATA_VERSION}`);
+  if (value.kind !== DEPLOYMENT_METADATA_KIND) issues.push(`kind must be ${DEPLOYMENT_METADATA_KIND}`);
+  if (value.secretValuesStored !== false) issues.push("secretValuesStored must be false");
+  if (!isRecord(value.canonical)) issues.push("canonical must be an object");
+  if (!Array.isArray(value.deployments)) issues.push("deployments must be an array");
+  const seen = new Set<string>();
+  for (const [index, deployment] of (Array.isArray(value.deployments) ? value.deployments : []).entries()) {
+    if (!isRecord(deployment)) {
+      issues.push(`deployments[${index}] must be an object`);
+      continue;
+    }
+    const id = asString(deployment.id);
+    if (!id) issues.push(`deployments[${index}].id is required`);
+    else if (seen.has(id)) issues.push(`duplicate deployment id: ${id}`);
+    else seen.add(id);
+    if (deployment.stack !== "codex-chat") issues.push(`deployments[${index}].stack must be codex-chat`);
+    if (!["planned", "blocked", "partially_applied", "applied", "healthy", "failed"].includes(asString(deployment.status) ?? "")) {
+      issues.push(`deployments[${index}].status is unsupported`);
+    }
+    if (deployment.secretValuesStored !== false) issues.push(`deployments[${index}].secretValuesStored must be false`);
+    const config = asRecord(deployment.config);
+    const envVars = Array.isArray(config?.envVars) ? config.envVars : [];
+    for (const [envIndex, envVar] of envVars.entries()) {
+      const envRecord = asRecord(envVar);
+      if (envRecord?.value !== "redacted" || envRecord.metadataOnly !== true) {
+        issues.push(`deployments[${index}].config.envVars[${envIndex}] must be metadata-only/redacted`);
+      }
+    }
+  }
+  return { ok: issues.length === 0, issues };
 }
 
 async function loadRepoRegistry(registryPath: string): Promise<{ path: string; present: boolean; index?: RepoRegistryIndex; issues: string[] }> {
@@ -1166,6 +1616,239 @@ function stackSecretMetadataChecks(envVars: string[], envFile: string | undefine
   ];
 }
 
+function renderCodexChatEnvPreview(status: StackStatusDetails): string {
+  const envVars = status.servantRuntime.deploy.envVars;
+  return [
+    "# codex-chat service environment template rendered by Brain.",
+    "# Fill secret values on the remote server only; Brain never stores or prints them.",
+    ...envVars.map((name) => `${name}=<redacted:set-on-server>`),
+    "",
+  ].join("\n");
+}
+
+function renderCodexChatConfigPreview(status: StackStatusDetails): string {
+  return YAML.stringify({
+    version: 1,
+    service: "codex-chat",
+    workspace: status.setupContext.context?.workspaceRoot ?? status.assistantData.workspacePath,
+    assistantLogicPath: status.assistantLogic.path,
+    assistantDataPath: status.assistantData.path,
+    controlPlane: {
+      metadataPath: status.deploymentMetadata.canonical.path,
+      metadataCanonical: status.deploymentMetadata.canonical.sourceOfTruth,
+    },
+    secrets: {
+      envFile: status.servantRuntime.deploy.envFile,
+      envVars: status.servantRuntime.deploy.envVars.map((name) => ({ name, value: "redacted", metadataOnly: true })),
+    },
+  }).trimEnd();
+}
+
+function renderSystemdServicePreview(status: StackStatusDetails): string {
+  const serviceName = status.servantRuntime.deploy.serviceName ?? "codex-chat.service";
+  const workingDirectory = status.servantRuntime.deploy.path ?? status.servantRuntime.path;
+  const runtimeUser = status.servantRuntime.deploy.runtimeUser ?? DEFAULT_SERVICE_USER;
+  const envFile = status.servantRuntime.deploy.envFile;
+  return [
+    "[Unit]",
+    `Description=${serviceName}`,
+    "After=network-online.target",
+    "Wants=network-online.target",
+    "",
+    "[Service]",
+    `User=${runtimeUser}`,
+    `WorkingDirectory=${workingDirectory}`,
+    ...(envFile ? [`EnvironmentFile=${envFile}`] : []),
+    "ExecStart=/usr/bin/env pnpm start",
+    "Restart=on-failure",
+    "RestartSec=5s",
+    "",
+    "[Install]",
+    "WantedBy=multi-user.target",
+    "",
+  ].join("\n");
+}
+
+function renderStackExecutorActions(status: StackStatusDetails, approvals: Record<StackApprovalGate, boolean>): StackExecutorAction[] {
+  const servant = status.servantRuntime;
+  const logic = status.assistantLogic;
+  const data = status.assistantData;
+  const deploy = servant.deploy;
+  const deployPath = deploy.path ?? servant.path;
+  const sourceIdentity = sshIdentityFromHost(servant.host, undefined);
+  const deployIdentity = deploy.sshIdentity ?? sshIdentityFromHost(deploy.host, deploy.runtimeUser);
+  const logicIdentity = sshIdentityFromHost(logic.host, undefined);
+  const dataIdentity = sshIdentityFromHost(data.host, undefined);
+  const serviceName = deploy.serviceName ?? "codex-chat.service";
+  const envFile = deploy.envFile;
+  const configPath = deploy.configPath ?? status.servicePaths.setupContextConfigPath;
+  const configPreview = renderCodexChatConfigPreview(status);
+  const envPreview = renderCodexChatEnvPreview(status);
+  const systemdPreview = renderSystemdServicePreview(status);
+  const action = (input: Omit<StackExecutorAction, "approved" | "displayCommand" | "secretValuesPrinted">): StackExecutorAction => ({
+    ...input,
+    approved: approvals[input.requiredGate],
+    displayCommand: input.command ? remotePlanCommand(input.hostIdentity, input.command) : undefined,
+    secretValuesPrinted: false,
+  });
+  return [
+    action({
+      id: "repo-boundary-preflight",
+      title: "Validate repository boundaries before execution.",
+      phase: "preflight",
+      executor: "local",
+      requiredGate: "apply",
+      command: "true # repo-boundary preflight already resolved by brainctl stack status",
+      metadataOnly: true,
+      sideEffectsIfExecuted: "no filesystem/network changes",
+    }),
+    action({
+      id: "clone-update-codex-chat-source",
+      title: "Clone/update codex-chat source checkout.",
+      phase: "git",
+      executor: sourceIdentity ? "ssh" : "local",
+      requiredGate: "apply",
+      hostIdentity: sourceIdentity,
+      command: renderGitCloneOrUpdateShell({ path: servant.path, remoteUrl: servant.remoteUrl, branch: servant.branch }),
+      sideEffectsIfExecuted: "would clone/fetch/pull codex-chat source checkout only",
+    }),
+    ...(deployPath !== servant.path ? [action({
+      id: "clone-update-codex-chat-deploy",
+      title: "Clone/update codex-chat deploy checkout.",
+      phase: "git",
+      executor: deployIdentity ? "ssh" : "local",
+      requiredGate: "apply",
+      hostIdentity: deployIdentity,
+      command: renderGitCloneOrUpdateShell({ path: deployPath, remoteUrl: servant.remoteUrl, branch: servant.branch }),
+      sideEffectsIfExecuted: "would clone/fetch/pull codex-chat deploy checkout only",
+    })] : []),
+    action({
+      id: "build-codex-chat",
+      title: "Install dependencies and build codex-chat.",
+      phase: "git",
+      executor: deployIdentity ? "ssh" : "local",
+      requiredGate: "apply",
+      hostIdentity: deployIdentity,
+      command: `cd ${shellPathArg(deployPath)} && pnpm install --frozen-lockfile && pnpm run build`,
+      sideEffectsIfExecuted: "would install dependencies and build codex-chat",
+    }),
+    action({
+      id: "clone-update-assistant-agent-logic",
+      title: "Clone/update assistant-agent-logic separately.",
+      phase: "git",
+      executor: logicIdentity ? "ssh" : "local",
+      requiredGate: "apply",
+      hostIdentity: logicIdentity,
+      command: renderGitCloneOrUpdateShell({ path: logic.path, remoteUrl: logic.remoteUrl, branch: logic.branch }),
+      sideEffectsIfExecuted: "would clone/fetch/pull assistant-agent-logic only; never vendored into Brain or codex-chat",
+    }),
+    action({
+      id: "validate-assistant-agent-logic",
+      title: "Validate assistant-agent-logic checkout metadata.",
+      phase: "git",
+      executor: logicIdentity ? "ssh" : "local",
+      requiredGate: "apply",
+      hostIdentity: logicIdentity,
+      command: `test -d ${shellPathArg(`${logic.path}/.git`)} && git -C ${shellPathArg(logic.path)} status --short --branch`,
+      metadataOnly: true,
+      sideEffectsIfExecuted: "git metadata validation only",
+    }),
+    action({
+      id: "assistant-agent-data-prompt",
+      title: "Prompt/validate assistant-agent-data before private data use.",
+      phase: "assistant-data",
+      executor: "operator-prompt",
+      requiredGate: "data",
+      command: `printf '%s\\n' ${shellArg("Choose pull existing private repo, initialize new private repo, or validate current assistant-agent-data workspace; migration remains explicit/manual.")}`,
+      sideEffectsIfExecuted: "operator-approved private data decision only",
+    }),
+    action({
+      id: "assistant-agent-data-clone-or-init-placeholder",
+      title: "Clone/init assistant-agent-data placeholder.",
+      phase: "assistant-data",
+      executor: dataIdentity ? "ssh" : "local",
+      requiredGate: "data",
+      hostIdentity: dataIdentity,
+      command: data.remoteUrl
+        ? renderGitCloneOrUpdateShell({ path: data.path, remoteUrl: data.remoteUrl, branch: data.branch })
+        : `mkdir -p ${shellPathArg(data.path)} && test -d ${shellPathArg(`${data.path}/.git`)} || git -C ${shellPathArg(data.path)} init -b ${shellArg(data.branch ?? "main")}`,
+      sideEffectsIfExecuted: "would clone or initialize assistant-agent-data only after data approval; migration placeholder only",
+    }),
+    ...(configPath ? [action({
+      id: "render-codex-chat-config-env",
+      title: "Render codex-chat config and env template without secret values.",
+      phase: "config",
+      executor: deployIdentity ? "ssh" : "local",
+      requiredGate: "config",
+      hostIdentity: deployIdentity,
+      command: renderConfigEnvWriteShell({ configPath, configPreview, envFile, envPreview }),
+      sideEffectsIfExecuted: "would write codex-chat config and env template placeholders only; no secret values",
+    })] : []),
+    action({
+      id: "install-codex-chat-systemd",
+      title: "Install/enable/start codex-chat systemd service.",
+      phase: "systemd",
+      executor: deployIdentity ? "ssh" : "local",
+      requiredGate: "service",
+      hostIdentity: deployIdentity,
+      command: renderSystemdInstallShell({ serviceName, unit: systemdPreview }),
+      sideEffectsIfExecuted: "would install service unit, reload systemd, enable and start codex-chat",
+    }),
+    ...((deploy.healthChecks.length > 0 ? deploy.healthChecks : [{ kind: "systemd", command: `systemctl status ${shellArg(serviceName)} --no-pager` }]).map((check, index) => action({
+      id: `health-check-${index + 1}`,
+      title: `Run health check: ${check.kind}`,
+      phase: "health",
+      executor: deployIdentity ? "ssh" : "local",
+      requiredGate: "health",
+      hostIdentity: deployIdentity,
+      command: check.command,
+      metadataOnly: true,
+      sideEffectsIfExecuted: "read-only health verification",
+    }))),
+    action({
+      id: "record-deployment-metadata",
+      title: "Record deployment metadata in canonical Brain workspace/control-plane state.",
+      phase: "metadata",
+      executor: "metadata-file",
+      requiredGate: "apply",
+      writesMetadata: true,
+      command: `merge deployment record into ${status.deploymentMetadata.canonical.path}`,
+      sideEffectsIfExecuted: "writes deployment metadata with redacted secret refs only",
+    }),
+  ];
+}
+
+function renderGitCloneOrUpdateShell(input: { path: string; remoteUrl?: string; branch?: string }): string {
+  const branch = input.branch ?? "main";
+  return input.remoteUrl
+    ? `if [ -d ${shellPathArg(`${input.path}/.git`)} ]; then git -C ${shellPathArg(input.path)} fetch --prune origin && git -C ${shellPathArg(input.path)} checkout ${shellArg(branch)} && git -C ${shellPathArg(input.path)} pull --ff-only; else git clone --branch ${shellArg(branch)} ${shellArg(input.remoteUrl)} ${shellPathArg(input.path)}; fi`
+    : `test -d ${shellPathArg(input.path)} && git -C ${shellPathArg(input.path)} status --short --branch`;
+}
+
+function renderConfigEnvWriteShell(input: { configPath: string; configPreview: string; envFile?: string; envPreview: string }): string {
+  const configDir = path.posix.dirname(input.configPath);
+  const commands = [
+    "set -e",
+    `mkdir -p ${shellPathArg(configDir)}`,
+    `umask 077`,
+    `cat > ${shellPathArg(input.configPath)} <<'BRAIN_CODEX_CHAT_CONFIG'\n${input.configPreview}\nBRAIN_CODEX_CHAT_CONFIG`,
+  ];
+  if (input.envFile) {
+    commands.splice(1, 0, `mkdir -p ${shellPathArg(path.posix.dirname(input.envFile))}`);
+    commands.push(`if [ ! -f ${shellPathArg(input.envFile)} ]; then\n  umask 077\n  cat > ${shellPathArg(input.envFile)} <<'BRAIN_CODEX_CHAT_ENV'\n${input.envPreview}\nBRAIN_CODEX_CHAT_ENV\nfi`);
+  }
+  return commands.join("\n");
+}
+
+function renderSystemdInstallShell(input: { serviceName: string; unit: string }): string {
+  return [
+    `cat <<'BRAIN_CODEX_CHAT_SERVICE' | sudo tee ${shellPathArg(`/etc/systemd/system/${input.serviceName}`)} >/dev/null`,
+    input.unit.trimEnd(),
+    "BRAIN_CODEX_CHAT_SERVICE",
+    `sudo systemctl daemon-reload && sudo systemctl enable --now ${shellArg(input.serviceName)}`,
+  ].join("\n");
+}
+
 function renderStackNoNetworkPlan(status: StackStatusDetails) {
   const servant = status.servantRuntime;
   const logic = status.assistantLogic;
@@ -1239,6 +1922,8 @@ function renderStackNoNetworkPlan(status: StackStatusDetails) {
         target: { envFile: deploy.envFile, configPath: deploy.configPath ?? status.servicePaths.setupContextConfigPath },
         envVars: deploy.envVars.map((name) => ({ name, value: "redacted", metadataOnly: true })),
         secretMetadataChecks: status.secretMetadataChecks,
+        renderedConfigPreview: renderCodexChatConfigPreview(status),
+        renderedEnvPreview: renderCodexChatEnvPreview(status),
         templates: [
           "codex-chat service env template with secret placeholders only",
           "codex-chat runtime config template/path binding when configured",
@@ -1257,6 +1942,15 @@ function renderStackNoNetworkPlan(status: StackStatusDetails) {
         sideEffectsIfExecuted: "would install dependencies/build and start systemd service; not executed by this command",
       },
       {
+        id: "record-deployment-metadata",
+        title: "Record/list deployment metadata on the Brain/control-plane host.",
+        target: status.deploymentMetadata.canonical,
+        schema: status.deploymentMetadata.canonical.schema,
+        deployments: status.deploymentMetadata.deployments,
+        plannedReadCommand: status.deploymentMetadata.read.plannedReadCommand,
+        sideEffectsIfExecuted: "would merge a redacted deployment record into the canonical remote metadata store only after explicit apply approval",
+      },
+      {
         id: "health-check-codex-chat",
         title: "Run codex-chat servant runtime health checks.",
         target: { host: deploy.host, sshIdentity: deployIdentity, serviceName },
@@ -1266,12 +1960,300 @@ function renderStackNoNetworkPlan(status: StackStatusDetails) {
         sideEffectsIfExecuted: "health/readiness checks only; not executed by this command",
       },
     ],
+    execution: {
+      dryRunDefault: true,
+      approvalRequired: true,
+      executors: ["dry-run", "mock", "local", "ssh"],
+      approvalGates: stackApprovalGateDetails({ apply: false, data: false, config: false, service: false, health: false }),
+      metadataStore: status.deploymentMetadata.canonical,
+      actions: renderStackExecutorActions(status, { apply: false, data: false, config: false, service: false, health: false }),
+    },
     forbidden: [
       "Do not deploy or mutate remote servers from stack status/plan.",
       "Do not vendor or merge codex-chat, assistant-agent-logic, or assistant-agent-data into Brain.",
       "Do not print secret values; inspect env/secret files by metadata only.",
     ],
   };
+}
+
+async function executeStackAction(action: StackExecutorAction, input: { executor: StackExecutorKind; metadataFile?: string }): Promise<Record<string, unknown>> {
+  if (!action.approved) {
+    return {
+      id: action.id,
+      phase: action.phase,
+      status: "skipped",
+      reason: `approval gate not enabled: ${action.requiredGate}`,
+      command: action.displayCommand,
+      secretValuesPrinted: false,
+    };
+  }
+  if (action.writesMetadata) {
+    return {
+      id: action.id,
+      phase: action.phase,
+      status: "handled-by-metadata-writer",
+      command: action.command,
+      secretValuesPrinted: false,
+    };
+  }
+  if (input.executor === "mock") {
+    return {
+      id: action.id,
+      phase: action.phase,
+      status: "mocked",
+      executor: "mock",
+      command: action.displayCommand,
+      sideEffects: "none (mocked)",
+      secretValuesPrinted: false,
+    };
+  }
+  if (!action.command) {
+    return {
+      id: action.id,
+      phase: action.phase,
+      status: "succeeded",
+      executor: input.executor,
+      sideEffects: action.sideEffectsIfExecuted,
+      secretValuesPrinted: false,
+    };
+  }
+  if (action.executor === "ssh" && input.executor !== "ssh") {
+    return {
+      id: action.id,
+      phase: action.phase,
+      status: "failed",
+      reason: "remote action requires --executor ssh",
+      command: action.displayCommand,
+      secretValuesPrinted: false,
+    };
+  }
+  const result = action.executor === "ssh" && action.hostIdentity
+    ? spawnSync("ssh", [action.hostIdentity, action.command], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 })
+    : spawnSync("bash", ["-lc", action.command], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
+  return {
+    id: action.id,
+    phase: action.phase,
+    status: (result.status ?? 1) === 0 ? "succeeded" : "failed",
+    exitCode: result.status,
+    command: action.displayCommand,
+    stdout: redactSecrets(String(result.stdout ?? "")),
+    stderr: redactSecrets(String(result.stderr ?? "")),
+    secretValuesPrinted: false,
+  };
+}
+
+function stackDeploymentRecord(status: StackStatusDetails, input: {
+  approvals: Record<StackApprovalGate, boolean>;
+  requestedExecutor: StackExecutorKind;
+  effectiveExecutor: StackExecutorKind;
+  dryRun: boolean;
+  actionCount: number;
+  approvedActionCount: number;
+  executedActionCount: number;
+  failedActionCount: number;
+  now?: string;
+  healthApproved: boolean;
+}): DeploymentMetadataRecord {
+  const updatedAt = input.now ?? new Date().toISOString();
+  const stackStatus: DeploymentMetadataRecord["status"] = input.failedActionCount > 0
+    ? "failed"
+    : input.dryRun
+      ? "planned"
+      : input.approvals.health
+        ? "healthy"
+        : input.approvals.service
+          ? "applied"
+          : "partially_applied";
+  return {
+    id: deploymentRecordId(status),
+    stack: "codex-chat",
+    workspace: status.workspaceId,
+    environment: status.servantRuntime.appEnvironment,
+    status: stackStatus,
+    updatedAt,
+    source: "brainctl stack apply",
+    controlPlane: {
+      host: status.controlPlane.host,
+      path: status.controlPlane.path,
+      repoName: status.controlPlane.repoName,
+    },
+    servantRuntime: {
+      repoName: status.servantRuntime.repoName,
+      sourceHost: status.servantRuntime.host,
+      sourcePath: status.servantRuntime.path,
+      deployHost: status.servantRuntime.deploy.host,
+      deployPath: status.servantRuntime.deploy.path,
+      branch: status.servantRuntime.branch,
+      remoteUrl: status.servantRuntime.remoteUrl,
+      serviceName: status.servantRuntime.deploy.serviceName,
+      runtimeUser: status.servantRuntime.deploy.runtimeUser,
+    },
+    assistantLogic: {
+      host: status.assistantLogic.host,
+      path: status.assistantLogic.path,
+      repoName: status.assistantLogic.repoName,
+      branch: status.assistantLogic.branch,
+      remoteUrl: status.assistantLogic.remoteUrl,
+    },
+    assistantData: {
+      host: status.assistantData.host,
+      path: status.assistantData.path,
+      repoName: status.assistantData.repoName,
+      branch: status.assistantData.branch,
+      remoteUrl: status.assistantData.remoteUrl,
+      promptRequired: status.assistantData.promptRequired,
+      migrationStatus: "placeholder",
+    },
+    config: {
+      configPath: status.servantRuntime.deploy.configPath ?? status.servicePaths.setupContextConfigPath,
+      envFile: status.servantRuntime.deploy.envFile,
+      envVars: status.servantRuntime.deploy.envVars.map((name) => ({ name, value: "redacted", metadataOnly: true })),
+      renderedConfigPreview: renderCodexChatConfigPreview(status),
+      renderedEnvPreview: renderCodexChatEnvPreview(status),
+    },
+    health: {
+      status: input.failedActionCount > 0 ? "failed" : input.healthApproved && !input.dryRun ? "passed" : input.healthApproved ? "planned" : "not_run",
+      checks: status.servantRuntime.deploy.healthChecks,
+    },
+    approvals: input.approvals,
+    executor: {
+      requested: input.requestedExecutor,
+      effective: input.effectiveExecutor,
+      dryRun: input.dryRun,
+      networkAccess: !input.dryRun && input.effectiveExecutor === "ssh",
+    },
+    lastPlan: {
+      actionCount: input.actionCount,
+      approvedActionCount: input.approvedActionCount,
+      executedActionCount: input.executedActionCount,
+      failedActionCount: input.failedActionCount,
+    },
+    secretValuesStored: false,
+  };
+}
+
+function deploymentRecordId(status: StackStatusDetails): string {
+  return `${status.workspaceId}:${status.servantRuntime.appEnvironment}:codex-chat`;
+}
+
+async function writeStackDeploymentMetadata(status: StackStatusDetails, record: DeploymentMetadataRecord, input: { executor: StackExecutorKind; metadataFile?: string }): Promise<Record<string, unknown>> {
+  const canonical = status.deploymentMetadata.canonical;
+  if (input.executor === "mock" || input.executor === "local") {
+    const localPath = input.metadataFile
+      ? path.resolve(input.metadataFile)
+      : canonical.sourceOfTruth === "local-brain-workspace"
+        ? path.resolve(canonical.path)
+        : undefined;
+    if (!localPath) {
+      return {
+        ok: false,
+        path: canonical.path,
+        error: "local/mock metadata writes for a remote canonical store require --metadata-file",
+        secretValuesStored: false,
+      };
+    }
+    const store = await mergeDeploymentMetadataStore(localPath, canonical, record);
+    return {
+      ok: store.validation.ok,
+      executor: input.executor,
+      path: localPath,
+      canonicalPath: canonical.path,
+      deployments: store.store?.deployments.map((deployment) => ({ id: deployment.id, status: deployment.status, updatedAt: deployment.updatedAt })) ?? [],
+      validation: store.validation,
+      secretValuesStored: false,
+    };
+  }
+
+  if (input.executor === "ssh") {
+    const command = renderRemoteMetadataMergeShell(canonical.path, canonical, record);
+    const result = canonical.sshIdentity
+      ? spawnSync("ssh", [canonical.sshIdentity, command], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 })
+      : spawnSync("bash", ["-lc", command], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
+    return {
+      ok: (result.status ?? 1) === 0,
+      executor: input.executor,
+      path: canonical.path,
+      command: remotePlanCommand(canonical.sshIdentity, command),
+      exitCode: result.status,
+      stdout: redactSecrets(String(result.stdout ?? "")),
+      stderr: redactSecrets(String(result.stderr ?? "")),
+      secretValuesStored: false,
+    };
+  }
+
+  return { ok: false, error: "metadata writer was called in dry-run mode", secretValuesStored: false };
+}
+
+async function mergeDeploymentMetadataStore(filePath: string, canonical: StackDeploymentMetadataStatus["canonical"], record: DeploymentMetadataRecord): Promise<{ store?: DeploymentMetadataStore; validation: DeploymentMetadataValidation }> {
+  await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  let store: DeploymentMetadataStore = {
+    version: DEPLOYMENT_METADATA_VERSION,
+    kind: DEPLOYMENT_METADATA_KIND,
+    updatedAt: record.updatedAt,
+    canonical: {
+      sourceOfTruth: canonical.sourceOfTruth,
+      workspaceRoot: canonical.workspaceRoot,
+      path: canonical.path,
+      relativePath: canonical.relativePath,
+    },
+    deployments: [],
+    secretValuesStored: false,
+  };
+  const existing = await fileMetadata(filePath);
+  if (existing.present) {
+    try {
+      const parsed = JSON.parse(await readFile(filePath, "utf8")) as unknown;
+      const validation = validateDeploymentMetadataStore(parsed);
+      if (!validation.ok) return { validation };
+      store = parsed as DeploymentMetadataStore;
+    } catch (error) {
+      return { validation: { ok: false, issues: [`could not parse existing deployment metadata: ${errorMessage(error)}`] } };
+    }
+  }
+  store.updatedAt = record.updatedAt;
+  store.canonical = {
+    sourceOfTruth: canonical.sourceOfTruth,
+    workspaceRoot: canonical.workspaceRoot,
+    path: canonical.path,
+    relativePath: canonical.relativePath,
+  };
+  store.secretValuesStored = false;
+  store.deployments = [...store.deployments.filter((deployment) => deployment.id !== record.id), record]
+    .sort((a, b) => a.id.localeCompare(b.id));
+  const validation = validateDeploymentMetadataStore(store);
+  if (!validation.ok) return { store, validation };
+  await writeFile(filePath, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+  await chmod(filePath, 0o600);
+  return { store, validation };
+}
+
+function renderRemoteMetadataMergeShell(metadataPath: string, canonical: StackDeploymentMetadataStatus["canonical"], record: DeploymentMetadataRecord): string {
+  const script = [
+    "import json, pathlib",
+    `p = pathlib.Path(${JSON.stringify(metadataPath)})`,
+    "p.parent.mkdir(parents=True, exist_ok=True)",
+    `incoming = json.loads(${JSON.stringify(JSON.stringify(record))})`,
+    `canonical = json.loads(${JSON.stringify(JSON.stringify({
+      sourceOfTruth: canonical.sourceOfTruth,
+      workspaceRoot: canonical.workspaceRoot,
+      path: canonical.path,
+      relativePath: canonical.relativePath,
+    }))})`,
+    `base = {"version": ${DEPLOYMENT_METADATA_VERSION}, "kind": ${JSON.stringify(DEPLOYMENT_METADATA_KIND)}, "updatedAt": incoming["updatedAt"], "canonical": canonical, "deployments": [], "secretValuesStored": False}`,
+    "try:",
+    "    current = json.loads(p.read_text()) if p.exists() else base",
+    "except Exception:",
+    "    current = base",
+    "deployments = [d for d in current.get('deployments', []) if isinstance(d, dict) and d.get('id') != incoming['id']]",
+    "deployments.append(incoming)",
+    "deployments.sort(key=lambda d: d.get('id', ''))",
+    "current.update(base)",
+    "current['deployments'] = deployments",
+    "p.write_text(json.dumps(current, indent=2, sort_keys=False) + '\\n')",
+    "p.chmod(0o600)",
+    `print(json.dumps({"ok": True, "path": ${JSON.stringify(metadataPath)}, "deployment": incoming["id"]}))`,
+  ].join("\n");
+  return `umask 077 && python3 - <<'BRAIN_DEPLOYMENT_METADATA'\n${script}\nBRAIN_DEPLOYMENT_METADATA`;
 }
 
 function analyzeStackRepoBoundaries(repos: Array<Pick<StackRepoResolution, "role" | "host" | "path" | "present">>) {
@@ -1332,11 +2314,7 @@ function normalizeRegistryHost(value: string): string {
 }
 
 function renderGitCloneOrUpdateCommand(input: { hostIdentity?: string; path: string; remoteUrl?: string; branch?: string }): string {
-  const branch = input.branch ?? "main";
-  const command = input.remoteUrl
-    ? `if [ -d ${shellPathArg(`${input.path}/.git`)} ]; then git -C ${shellPathArg(input.path)} fetch --prune origin && git -C ${shellPathArg(input.path)} checkout ${shellArg(branch)} && git -C ${shellPathArg(input.path)} pull --ff-only; else git clone --branch ${shellArg(branch)} ${shellArg(input.remoteUrl)} ${shellPathArg(input.path)}; fi`
-    : `test -d ${shellPathArg(input.path)} && git -C ${shellPathArg(input.path)} status --short --branch`;
-  return remotePlanCommand(input.hostIdentity, command);
+  return remotePlanCommand(input.hostIdentity, renderGitCloneOrUpdateShell(input));
 }
 
 function remotePlanCommand(identity: string | undefined, command: string): string {
