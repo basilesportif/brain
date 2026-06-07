@@ -91,3 +91,65 @@ test("sanitizer formats reminders, calendar, and email JSON without raw internal
   assert.match(emails, /Emails:\n1\. Jane <jane@example.com> — Hello/);
   assert.doesNotMatch(emails, /\{/);
 });
+
+test("formats project detail commands without collapsing them to saved summaries", () => {
+  const projectView = formatAssistantCommandOutput({
+    script: "project-view.js",
+    stdout: {
+      ok: true,
+      project: {
+        id: "pj_abc123abc123abcd",
+        name: "Launch Site",
+        description: "Refresh landing page",
+        status: "active",
+        targetDate: "2026-07-01",
+        notes: [{ id: "pn_abc123abc123abcd", createdAt: "2026-06-07T00:00:00.000Z", updatedAt: "2026-06-07T00:00:00.000Z", text: "Kickoff note", metadata: { title: "Kickoff", summary: "Scope and owners" } }],
+        resources: [{ label: "Brief", url: "https://example.com/brief" }],
+      },
+      linkedPeople: [{ id: "ct_abc123abc123abcd", name: "Jane Roe", email: "jane@example.com", status: "active" }],
+      linkedBusinesses: [{ id: "bz_abc123abc123abcd", name: "Acme", status: "prospecting", dealValue: 12000 }],
+      openTasks: [{ id: "pt_abc123abc123abcd", title: "Draft copy", status: "open" }],
+      linkedTodos: [{ id: "td_abc123abc123abcd", title: "Book kickoff", createdAt: "x", updatedAt: "x" }],
+    },
+  });
+  assert.match(projectView ?? "", /^Project: Launch Site/m);
+  assert.match(projectView ?? "", /People:\n1\. Jane Roe/);
+  assert.match(projectView ?? "", /Notes:\n1\. Kickoff — Scope and owners/);
+  assert.doesNotMatch(projectView ?? "", /Project saved|pj_|pn_|ct_|bz_|pt_|createdAt|updatedAt|\{/);
+
+  const notes = formatAssistantCommandOutput({
+    script: "project-notes-list.js",
+    stdout: { ok: true, count: 1, notes: [{ projectId: "pj_abc123abc123abcd", projectName: "Launch Site", noteId: "pn_abc123abc123abcd", createdAt: "x", updatedAt: "x", metadata: { title: "Canonical brief", kind: "canonical-index", category: "website", summary: "Current source of truth", tags: ["website"] } }] },
+  });
+  assert.equal(notes, "Project notes:\n1. Canonical brief — Launch Site — canonical-index — website — Current source of truth — tags: website");
+  assert.doesNotMatch(notes ?? "", /pj_|pn_|createdAt|updatedAt|\{/);
+});
+
+test("formats CRM detail commands without raw IDs or vague saved messages", () => {
+  const crmView = formatAssistantCommandOutput({
+    script: "crm-view.js",
+    stdout: {
+      ok: true,
+      person: { id: "ct_abc123abc123abcd", name: "Jane Roe", email: "jane@example.com", company: "Acme", title: "CEO", status: "active", priority: "high", notes: "Met at expo", createdAt: "x", updatedAt: "x" },
+      businesses: [{ id: "bz_abc123abc123abcd", name: "Acme", status: "prospecting", dealValue: 12000 }],
+      correspondence: [{ id: "co_abc123abc123abcd", type: "email", summary: "Intro sent", date: "2026-06-07", followUpNeeded: true, followUpDate: "2026-06-14", createdAt: "x" }],
+      pendingFollowUps: [{ id: "co_abc123abc123abcd", type: "email", summary: "Intro sent", date: "2026-06-07", followUpNeeded: true, followUpDate: "2026-06-14", createdAt: "x" }],
+    },
+  });
+  assert.match(crmView ?? "", /^CRM person: Jane Roe/m);
+  assert.match(crmView ?? "", /Businesses:\n1\. Acme/);
+  assert.match(crmView ?? "", /Pending follow-ups:\n1\. Intro sent/);
+  assert.doesNotMatch(crmView ?? "", /CRM person saved|ct_|bz_|co_|createdAt|updatedAt|\{/);
+
+  const history = formatAssistantCommandOutput({ script: "crm-history.js", stdout: { ok: true, count: 1, correspondence: [{ id: "co_abc123abc123abcd", type: "call", summary: "Discovery call", date: "2026-06-07", personName: "Jane Roe", notes: "Good fit", createdAt: "x" }] } });
+  assert.equal(history, "CRM history:\n1. Discovery call — 2026-06-07 — call — Jane Roe\n   Notes: Good fit");
+  assert.doesNotMatch(history ?? "", /co_|createdAt|\{/);
+
+  const followUps = formatAssistantCommandOutput({ script: "crm-follow-ups.js", stdout: { ok: true, count: 1, followUps: [{ id: "co_abc123abc123abcd", type: "email", summary: "Send proposal", date: "2026-06-07", personName: "Jane Roe", followUpNeeded: true, followUpDate: "2026-06-14", createdAt: "x" }] } });
+  assert.match(followUps ?? "", /^CRM follow-ups:\n1\. Send proposal/m);
+  assert.doesNotMatch(followUps ?? "", /co_|createdAt|\{/);
+
+  const logged = formatAssistantCommandOutput({ script: "crm-log.js", stdout: { ok: true, correspondence: { id: "co_abc123abc123abcd", type: "email", summary: "Sent deck", followUpNeeded: true, followUpDate: "2026-06-14", date: "2026-06-07", createdAt: "x" } } });
+  assert.equal(logged, "Logged CRM email: Sent deck\nDate: 2026-06-07\nFollow-up: 2026-06-14");
+  assert.doesNotMatch(logged ?? "", /co_|createdAt|\{/);
+});
