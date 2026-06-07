@@ -44,7 +44,7 @@ Deployment docs and private notes should define:
 - Node/pnpm and optional Bun/Docker requirements.
 - Provider auth boundaries for Codex provider/app-server and Claude Code
   SDK/subagents.
-- Telegram first-entrypoint bootstrap, bot token storage, and first-user admin pairing.
+- Telegram first-entrypoint bootstrap, bot token storage, and capped first-user admin pairing.
 - Process manager choice (`systemd`, Docker, or both).
 - Reverse proxy/TLS and firewall recommendations. Polling-mode Telegram needs
   outbound HTTPS only; webhook or web preview needs inbound HTTPS.
@@ -58,8 +58,8 @@ can be configured later after Telegram admin pairing is working.
 
 ## Current Brain SSH target
 
-The current Brain production SSH-in identity is `brain@204.168.209.41`.
-Treat `root@204.168.209.41` as bootstrap/root access only when a separate
+The current Brain production SSH-in identity is `brain@178.104.221.223`.
+Treat `root@178.104.221.223` as bootstrap/root access only when a separate
 privileged context is needed. Normal post-bootstrap setup/status/deployment
 commands should use the non-root `brain` service user, with source checkout
 `/home/brain/brain`, workspace parent `/home/brain/.brain`, private workspace

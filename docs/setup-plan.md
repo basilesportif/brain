@@ -243,9 +243,11 @@ config/secrets/log paths, and command lists unless the user asks for details or
    systemctl` install/enable/start.
 10. Optional follow-up: which Telegram admin bootstrap should be used? Default:
    first-user pairing,
-   where the first Telegram user/chat to message the newly configured bot is
-   persisted as the paired/admin identity in private state. Use a user-supplied
-   explicit allowlist or optional `/pair` code only if requested.
+   where up to two distinct Telegram user/chat pairs that message the newly
+   configured bot are persisted as paired/admin identities in private state.
+   Pairing closes after the configured maximum is reached; set the maximum to
+   one when deliberately preserving a single-admin deployment. Use a
+   user-supplied explicit allowlist or optional `/pair` code only if requested.
 11. Optional follow-up: should voice/audio transcription be enabled for Telegram attachments?
    Default: no. If yes, use `transcription.provider: openai`, store the OpenAI
    key only as a private ref such as `env:OPENAI_API_KEY` or `file:/...`, choose
@@ -394,9 +396,10 @@ on private workspace knowledge.
   store. Never commit it, print it, echo it, leave it in shell history, or
   include it in setup summaries/logs.
 - Admin pairing defaults to first-user pairing: after the bot token is configured
-  and the service starts, the first Telegram user/chat to message the bot is
-  persisted under private `state/telegram-pairing` as the paired/admin identity.
-  Raw IDs stay private.
+  and the service starts, up to two distinct Telegram user/chat pairs that
+  message the bot are persisted under private `state/telegram-pairing` as exact
+  paired/admin identities. Pairing closes after the max is reached; raw IDs stay
+  private.
 - Advanced paths remain supported when deliberately chosen: a user-provided
   explicit admin allowlist or an optional one-time `/pair <code>` flow.
 - Once paired, the Telegram entrypoint should be able to receive setup commands
@@ -513,8 +516,8 @@ on private workspace knowledge.
 Remote setup should be user-confirmed and should not deploy live services unless
 explicitly requested.
 
-Current Brain remote metadata: use `brain@204.168.209.41` as the future normal
-SSH target / SSH-in identity. Keep `root@204.168.209.41` only as
+Current Brain remote metadata: use `brain@178.104.221.223` as the future normal
+SSH target / SSH-in identity. Keep `root@178.104.221.223` only as
 bootstrap/root access if a privileged bootstrap context is needed. The expected
 remote checkout is `/home/brain/brain`, the workspace parent is
 `/home/brain/.brain`, and the private workspace is

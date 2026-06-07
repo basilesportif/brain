@@ -18,6 +18,7 @@ export interface OperationsPlanInput {
   telegramTokenFile?: string;
   telegramPollingState?: string;
   telegramPairingState?: string;
+  telegramMaxAdminPairs?: number;
 }
 
 export interface OperationsPlan {
@@ -56,6 +57,9 @@ export function createOperationsPlan(input: OperationsPlanInput): OperationsPlan
   const telegramTokenFile = path.resolve(input.telegramTokenFile ?? path.join(path.dirname(stateRoot), "secrets", "telegram-bot-token"));
   const telegramPollingState = path.resolve(input.telegramPollingState ?? path.join(stateRoot, "telegram-offset.json"));
   const telegramPairingState = path.resolve(input.telegramPairingState ?? path.join(stateRoot, "telegram-pairing"));
+  const telegramMaxAdminPairs = Number.isSafeInteger(input.telegramMaxAdminPairs) && (input.telegramMaxAdminPairs ?? 0) > 0
+    ? input.telegramMaxAdminPairs as number
+    : 2;
   const pnpm = shellWord(input.pnpmBinary ?? "pnpm");
   const brainctl = `${pnpm} --dir ${shellWord(repoPath)} run brainctl`;
   const runtimeCommand = [
@@ -81,6 +85,8 @@ export function createOperationsPlan(input: OperationsPlanInput): OperationsPlan
       telegramPollingState,
       "--telegram-pairing-state",
       telegramPairingState,
+      "--telegram-max-admin-pairs",
+      String(telegramMaxAdminPairs),
     ] : []),
   ];
 

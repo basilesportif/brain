@@ -146,10 +146,11 @@ test("brainctl operations and live validation commands are non-mutating by defau
     await writeFile(path.join(pairingState, "telegram_chats.json"), `${JSON.stringify([{ chatId: "123" }])}\n`);
     const entrypoint = spawnBrainctl(["entrypoint", "check", "telegram", "--workspace", "personal", "--pairing-state", pairingState]);
     assert.equal(entrypoint.status, 0, entrypoint.stderr);
-    const entrypointJson = JSON.parse(entrypoint.stdout) as { ok: boolean; details: { pairing: { users: number; chats: number; codePresent: boolean; rawIdentifiersPrinted: boolean } } };
+    const entrypointJson = JSON.parse(entrypoint.stdout) as { ok: boolean; details: { pairing: { adminPairs: number; users: number; chats: number; codePresent: boolean; rawIdentifiersPrinted: boolean } } };
     assert.equal(entrypointJson.ok, true);
     assert.deepEqual(entrypointJson.details.pairing, {
       stateDir: pairingState,
+      adminPairs: 1,
       users: 1,
       chats: 1,
       codePresent: false,
@@ -472,6 +473,7 @@ test("brainctl setup telegram-token-script writes a syntax-checked one-use secre
     assert.equal((await stat(tokenFile)).mode & 0o777, 0o600);
     assert.equal((await stat(adapterConfig)).mode & 0o777, 0o600);
     assert.match(await readFile(adapterConfig, "utf8"), new RegExp(`"tokenRef": "file:${escapeRegExp(tokenFile)}"`));
+    assert.match(await readFile(adapterConfig, "utf8"), /"maxAdminPairs": 2/);
     assert.doesNotMatch(await readFile(serviceEnv, "utf8"), new RegExp(token));
     assert.doesNotMatch(await readFile(secretsEnv, "utf8"), new RegExp(token));
     assert.match(await readFile(serviceEnv, "utf8"), new RegExp(`TELEGRAM_BOT_TOKEN_FILE=${escapeRegExp(tokenFile)}`));

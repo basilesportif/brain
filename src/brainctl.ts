@@ -116,6 +116,7 @@ program.command("start")
   .option("--polling-state <path>", "Telegram polling offset state path")
   .option("--telegram-pairing", "use optional one-time /pair code bootstrap instead of default first-user pairing")
   .option("--telegram-pairing-state <dir>", "directory for Telegram paired identity state")
+  .option("--telegram-max-admin-pairs <n>", "maximum distinct Telegram admin user/chat pairs for first-user pairing", parseNumberOption)
   .option("--telegram-downloads", "download Telegram attachments to the private artifact directory before provider turns")
   .option("--telegram-download-dir <path>", "directory for downloaded Telegram attachments")
   .option("--telegram-transcription-command <cmd>", "private command used to transcribe local voice/audio/video files; receives file path as argv[1]")
@@ -146,6 +147,7 @@ program.command("run")
   .option("--polling-state <path>", "Telegram polling offset state path")
   .option("--telegram-pairing", "use optional one-time /pair code bootstrap instead of default first-user pairing")
   .option("--telegram-pairing-state <dir>", "directory for Telegram paired identity state")
+  .option("--telegram-max-admin-pairs <n>", "maximum distinct Telegram admin user/chat pairs for first-user pairing", parseNumberOption)
   .option("--telegram-downloads", "download Telegram attachments to the private artifact directory before provider turns")
   .option("--telegram-download-dir <path>", "directory for downloaded Telegram attachments")
   .option("--telegram-transcription-command <cmd>", "private command used to transcribe local voice/audio/video files; receives file path as argv[1]")
@@ -520,6 +522,7 @@ interface SupervisorRunCommandOptions {
   pollingState?: string;
   telegramPairing?: boolean;
   telegramPairingState?: string;
+  telegramMaxAdminPairs?: number;
   telegramDownloads?: boolean;
   telegramDownloadDir?: string;
   telegramTranscriptionCommand?: string;
@@ -569,6 +572,7 @@ async function startCommand(options: SupervisorRunCommandOptions & { foreground?
         logPath: paths.logPath,
         liveTelegramPolling: Boolean(options.telegramPolling),
         telegramBootstrapPairing: options.telegramPairing ? "optional /pair code" : "first-user",
+        telegramMaxAdminPairs: telegramMaxAdminPairsOption(options),
         telegramTranscription: publicTelegramTranscriptionRuntime(telegramTranscriptionRuntime(selection.runtime, options)),
         automationFile: options.automationFile ? path.resolve(options.automationFile) : undefined,
         deployment: "not performed",
@@ -3547,8 +3551,9 @@ function liveValidationWizard(
       step: "first-user-pairing",
       title: "Optional follow-up: first-user pairing.",
       actions: [
-        "After the service is running with the private Telegram token, send the bot its first Telegram message.",
-        "That first user/chat becomes paired admin state by default and is persisted only in private Brain state.",
+        "After the service is running with the private Telegram token, send the bot messages from the intended admin chat(s).",
+        "By default up to two distinct user/chat pairs become paired admin state and are persisted only in private Brain state.",
+        "Use --telegram-max-admin-pairs 1 when deliberately preserving a single-admin deployment.",
         "If a token was ever pasted into a repo, chat, or log, revoke it in @BotFather with /revoke before starting live polling.",
       ],
     },
@@ -3778,6 +3783,7 @@ async function createCliEntrypoint(selection: ResolvedSupervisorRuntime, options
     pairing: {
       enabled: true,
       mode: options.telegramPairing ? "code" : "first-user",
+      maxAdminPairs: telegramMaxAdminPairsOption(options),
       store: new FileTelegramPairingStore(pairingState),
     },
     attachmentHandling: needsTelegramAttachmentParity || needsTelegramDownloads || transcriber ? {
@@ -3787,6 +3793,11 @@ async function createCliEntrypoint(selection: ResolvedSupervisorRuntime, options
       transcriptionFailureMode: "codex-chat",
     } : undefined,
   });
+}
+
+function telegramMaxAdminPairsOption(options: Pick<SupervisorRunCommandOptions, "telegramMaxAdminPairs">): number {
+  const max = options.telegramMaxAdminPairs ?? 2;
+  return Number.isSafeInteger(max) && max > 0 ? max : 1;
 }
 
 function telegramAllowedSendRoots(selection: ResolvedSupervisorRuntime, paths: { stateRoot: string; artifactRoot: string }, downloadDir: string): string[] {
@@ -4876,7 +4887,8 @@ cat > "$adapter_config" <<JSON
   "tokenRef": "file:$token_file",
   "pollingState": "$workspace/state/telegram-offset.json",
   "pairingState": "$workspace/state/telegram-pairing",
-  "adminBootstrap": "first-user"
+  "adminBootstrap": "first-user",
+  "maxAdminPairs": 2
 }
 JSON
 chmod 600 "$adapter_config"
@@ -5489,7 +5501,7 @@ function setupResumeWizard(details: {
       evidence: [
         details.transcription?.enabled ? "OpenAI transcription is configured." : "OpenAI transcription can be enabled after the base Telegram flow works.",
         details.webPublishing?.enabled ? "Web publishing is configured." : "Web publishing can be configured after the service path is stable.",
-        "First-user pairing happens after the service starts with the Telegram token; raw user/chat IDs stay private.",
+        "First-user pairing happens after the service starts with the Telegram token; up to two raw user/chat pairs stay private and pairing closes after the cap.",
       ],
       resumePrompt: "Handle first-user pairing, OpenAI transcription, web publishing, or backup tuning only when requested or when the base setup is ready.",
     },
@@ -5925,9 +5937,10 @@ async function entrypointCheckCommand(entrypointId: string, options: { workspace
 
 async function telegramPairingStateMetadata(stateDir: string): Promise<Record<string, unknown>> {
   const store = new FileTelegramPairingStore(stateDir);
-  const [users, chats, code] = await Promise.all([store.listUsers(), store.listChats(), store.readPairingCode()]);
+  const [users, chats, identities, code] = await Promise.all([store.listUsers(), store.listChats(), store.listIdentities(), store.readPairingCode()]);
   return {
     stateDir,
+    adminPairs: identities.filter((identity) => identity.isAdmin !== false).length,
     users: users.length,
     chats: chats.length,
     codePresent: Boolean(code),

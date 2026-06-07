@@ -240,8 +240,11 @@ config/secrets/log paths, and command lists unless the user asks for details or
    - keep the service stopped/pending if Codex auth or private secrets are not
      ready.
 10. Optional follow-up: first-user pairing/admin bootstrap?
-   - default: first-user pairing after service start, where the first Telegram
-     user/chat to message the newly configured bot becomes paired/admin state,
+   - default: first-user pairing after service start, where up to two distinct
+     Telegram user/chat pairs that message the newly configured bot become
+     paired/admin state and pairing closes after the configured max,
+   - cap first-user pairing at one admin pair when deliberately preserving a
+     single-admin deployment,
    - user supplies an explicit admin allowlist privately,
    - optional advanced one-time `/pair <code>` flow,
    - not ready; leave pairing pending.
@@ -424,8 +427,10 @@ The initial Telegram setup is successful when:
   must never be committed, chatted, logged, printed, echoed, or left in shell
   history.
 - Admin pairing defaults to first-user pairing with private
-  `state/telegram-pairing` persistence; an explicit private admin allowlist or
-  optional `/pair` code is used only when requested.
+  `state/telegram-pairing` persistence for up to two exact admin user/chat
+  pairs; cap it at one when deliberately preserving a single-admin deployment.
+  An explicit private admin allowlist or optional `/pair` code is used only when
+  requested.
 - The setup summary explains that future integrations can be configured through
   Telegram after admin pairing.
 - No Composio or third-party integration token is required.
@@ -438,8 +443,9 @@ Prefer polling for the first bootstrap because it needs only outbound HTTPS.
 Webhook mode, reverse proxy, TLS, firewall rules, generated pages, and web
 preview are optional follow-up setup.
 
-After Brain starts with the token, the user should send the bot its first
-Telegram message to complete first-user pairing. If the token is ever leaked,
+After Brain starts with the token, the intended admin chat(s) should message the
+bot to complete first-user pairing. By default up to two distinct user/chat
+pairs can pair, and pairing closes after the cap. If the token is ever leaked,
 tell the user to rotate it immediately in `@BotFather` with `/revoke`, update
 the private Brain secret, restart Brain, and verify setup checks still report
 only redacted token metadata.

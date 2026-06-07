@@ -36,11 +36,12 @@ The setup docs and skills should be readable by Codex or Claude Code itself so a
   `pnpm run brainctl setup telegram-token-script --path <workspace>`. Run the
   returned command with a TTY so it prompts with hidden input and writes private
   token/config/env files. Never commit, print, echo, log, paste into chat, or
-  leave the token in shell history. After Brain starts, the user sends the bot
-  the first message to complete first-user pairing. If the token leaks, rotate
-  it with BotFather `/revoke`, update the private secret, and restart Brain.
-  Explicit admin
-  allowlists and optional `/pair` code bootstrap remain advanced paths.
+  leave the token in shell history. After Brain starts, up to two distinct
+  admin user/chat pairs can message the bot to complete first-user pairing; the
+  pairing window closes after the configured max, and single-admin deployments
+  can cap it at one. If the token leaks, rotate it with BotFather `/revoke`,
+  update the private secret, and restart Brain. Explicit admin allowlists and
+  optional `/pair` code bootstrap remain advanced paths.
   This should be enough to continue future integration setup through Telegram
   after pairing.
 - Composio and other third-party integrations are optional follow-ups, never

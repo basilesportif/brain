@@ -39,6 +39,7 @@ test("operations plan renders systemd/update/rollback seams without side effects
   assert.match(liveTelegramUnit, /--telegram-polling/);
   assert.match(liveTelegramUnit, /--telegram-token-file \/var\/lib\/brain\/secrets\/telegram-bot-token/);
   assert.match(liveTelegramUnit, /--polling-state \/var\/lib\/brain\/state\/telegram-offset\.json/);
+  assert.match(liveTelegramUnit, /--telegram-max-admin-pairs 2/);
 });
 
 test("guarded live validation plan defaults to no-network checks", () => {

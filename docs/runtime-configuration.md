@@ -239,10 +239,13 @@ Current `codex-chat` behavior should migrate as a single-primary workspace confi
   (for example under workspace `state/telegram-offset.json`). Do not build a
   separate durable turn replay or idempotency store.
 - Telegram first-user pairing is the default adapter-owned bootstrap: when no
-  explicit allowlist or paired identity exists, the first Telegram user/chat to
-  message the bot is persisted as paired/admin state under the configured
-  private state directory. Explicit allowlists and optional one-time
-  `/pair <code>` remain advanced paths. Checks and docs report only
+  explicit allowlist exists and fewer than the configured maximum admin pairs
+  are present, a distinct Telegram user/chat pair that messages the bot is
+  persisted as paired/admin state under the configured private state directory.
+  The default maximum is two exact user/chat pairs; set the max to one for a
+  deployment that should remain single-admin after the first pair. Pairing is
+  not pending after the maximum is reached. Explicit allowlists and optional
+  one-time `/pair <code>` remain advanced paths. Checks and docs report only
   presence/count metadata, not raw IDs or code values.
 - Telegram ingress sends an immediate best-effort `👀` reaction for authorized
   user-originated messages before attachment download/transcription or provider
