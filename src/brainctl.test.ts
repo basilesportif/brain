@@ -1176,11 +1176,13 @@ test("brainctl setup remote-bootstrap rewrites root bootstrap context to service
       "--ssh-alias", "brain-prod",
     ], { PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}` });
     assert.equal(result.status, 0, result.stderr);
-    const parsed = JSON.parse(result.stdout) as { ok: boolean; details: { initialSsh: { destination: string; scope: string }; futureSsh: { destination: string }; localSetupContext: { context: { sshUser: string; bootstrapSshUser: string } }; sshConfig: { wrote: boolean; alias: string } } };
+    const parsed = JSON.parse(result.stdout) as { ok: boolean; details: { initialSsh: { destination: string; scope: string }; futureSsh: { destination: string }; serviceValidationCommand: string; workspaceParent: string; localSetupContext: { context: { sshUser: string; bootstrapSshUser: string } }; sshConfig: { wrote: boolean; alias: string } } };
     assert.equal(parsed.ok, true);
     assert.equal(parsed.details.initialSsh.destination, "root@204.168.209.41");
     assert.equal(parsed.details.initialSsh.scope, "one-time-bootstrap");
     assert.equal(parsed.details.futureSsh.destination, "brain@204.168.209.41");
+    assert.equal(parsed.details.workspaceParent, "/home/brain/.brain");
+    assert.match(parsed.details.serviceValidationCommand, /workspace parent is not writable by brain: \/home\/brain\/\.brain/);
     assert.equal(parsed.details.localSetupContext.context.sshUser, "brain");
     assert.equal(parsed.details.localSetupContext.context.bootstrapSshUser, "root");
     assert.equal(parsed.details.sshConfig.wrote, true);
@@ -1200,6 +1202,16 @@ test("brainctl setup remote-bootstrap rewrites root bootstrap context to service
     assert.doesNotMatch(sshConfigText, /User root/);
 
     const sshLogText = await readFile(sshLog, "utf8");
+    const sshCalls = sshLogText.trim().split("\n").map((line) => JSON.parse(line) as { dest: string; cmd: string; script: string });
+    const bootstrapCall = sshCalls.find((call) => call.dest === "root@204.168.209.41" && call.cmd === "bash -s");
+    assert.ok(bootstrapCall);
+    assert.match(bootstrapCall.script, /workspace_parent='\/home\/brain\/\.brain'/);
+    assert.match(bootstrapCall.script, /install -d -o "\$service_user" -g "\$service_group" -m 700 "\$workspace_parent"/);
+    assert.match(bootstrapCall.script, /chown "\$service_user:\$service_group" "\$workspace_parent" "\$workspace_root"/);
+    assert.match(bootstrapCall.script, /validate_as_service_user "write workspace parent \$workspace_parent" test -w "\$workspace_parent"/);
+    const validationCall = sshCalls.find((call) => call.dest === "brain@204.168.209.41");
+    assert.ok(validationCall);
+    assert.match(validationCall.cmd, /workspace parent is not writable by brain: \/home\/brain\/\.brain/);
     assert.match(sshLogText, /root@204\.168\.209\.41/);
     assert.match(sshLogText, /brain@204\.168\.209\.41/);
     assert.match(sshLogText, /useradd --create-home/);

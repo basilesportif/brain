@@ -508,6 +508,13 @@ on private workspace knowledge.
 Remote setup should be user-confirmed and should not deploy live services unless
 explicitly requested.
 
+Current Brain remote metadata: use `brain@204.168.209.41` as the future normal
+SSH target / SSH-in identity. Keep `root@204.168.209.41` only as
+bootstrap/root access if a privileged bootstrap context is needed. The expected
+remote checkout is `/home/brain/brain`, the workspace parent is
+`/home/brain/.brain`, and the private workspace is
+`/home/brain/.brain/workspace`.
+
 1. Confirm remote mode and show concise defaults, either from the remote-only
    questions above or with:
 

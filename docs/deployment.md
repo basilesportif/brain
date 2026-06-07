@@ -32,6 +32,17 @@ Deployment docs and private notes should define:
 Initial bootstrap must not require Composio or any optional integration. Those
 can be configured later after Telegram admin pairing is working.
 
+## Current Brain SSH target
+
+The current Brain production SSH-in identity is `brain@204.168.209.41`.
+Treat `root@204.168.209.41` as bootstrap/root access only when a separate
+privileged context is needed. Normal post-bootstrap setup/status/deployment
+commands should use the non-root `brain` service user, with source checkout
+`/home/brain/brain`, workspace parent `/home/brain/.brain`, private workspace
+`/home/brain/.brain/workspace`, runtime config
+`/home/brain/.brain/workspace/config/runtime.yaml`, and systemd service
+`brain-personal`.
+
 ## Current safe operations seams
 
 The repository now has CLI seams for deployment automation, but they remain non-deploying by default:

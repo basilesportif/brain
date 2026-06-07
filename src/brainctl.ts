@@ -2473,6 +2473,7 @@ interface RemoteSetupDefaults {
   sshUser: string;
   bootstrapSshUser?: string;
   workspaceRoot: string;
+  workspaceParent: string;
   repoPath: string;
   configPath: string;
 }
@@ -2637,7 +2638,7 @@ async function setupRemoteBootstrapCommand(options: SetupRemoteBootstrapOptions)
   const initialSshUser = options.sshUser || defaults.bootstrapSshUser || defaults.sshUser;
   const initialDestination = remoteSshDestination(options.sshHost, initialSshUser);
   const futureDestination = remoteSshDestination(options.sshHost, defaults.sshUser);
-  const bootstrapScript = renderRemoteBootstrapScript({ serviceUser: defaults.serviceUser, serviceHome: defaults.serviceHome, repoPath: defaults.repoPath, workspaceRoot: defaults.workspaceRoot });
+  const bootstrapScript = renderRemoteBootstrapScript({ serviceUser: defaults.serviceUser, serviceHome: defaults.serviceHome, repoPath: defaults.repoPath, workspaceParent: defaults.workspaceParent, workspaceRoot: defaults.workspaceRoot });
   const bootstrapCommand = `ssh ${shellArg(initialDestination)} 'bash -s'`;
   const serviceValidationCommand = `ssh ${shellArg(futureDestination)} ${shellArg(remoteServiceUserValidationCommand(defaults))}`;
   const context = remoteLocalSetupContext(options, defaults);
@@ -2652,6 +2653,7 @@ async function setupRemoteBootstrapCommand(options: SetupRemoteBootstrapOptions)
         futureSsh: { host: options.sshHost, user: defaults.sshUser, destination: futureDestination },
         serviceUser: defaults.serviceUser,
         repoPath: defaults.repoPath,
+        workspaceParent: defaults.workspaceParent,
         workspaceRoot: defaults.workspaceRoot,
         bootstrapCommand,
         serviceValidationCommand,
@@ -2711,6 +2713,7 @@ async function setupRemoteBootstrapCommand(options: SetupRemoteBootstrapOptions)
       futureSsh: { host: options.sshHost, user: defaults.sshUser, destination: futureDestination },
       serviceUser: defaults.serviceUser,
       repoPath: defaults.repoPath,
+      workspaceParent: defaults.workspaceParent,
       workspaceRoot: defaults.workspaceRoot,
       bootstrapCommand,
       serviceValidationCommand,
@@ -2719,7 +2722,7 @@ async function setupRemoteBootstrapCommand(options: SetupRemoteBootstrapOptions)
       localSetupContext: setupContextWriteSummary(contextWrite, true),
       sshConfig: sshConfigWrite,
       sideEffects: [
-        "created/validated remote service user, sudo access, authorized_keys, checkout/workspace ownership",
+        "created/validated remote service user, sudo access, authorized_keys, checkout/workspace parent/workspace ownership",
         contextWrite.wrote ? "updated ignored local private/setup-context.json to future service-user SSH" : "local setup context was not updated",
         sshConfigWrite?.wrote ? "updated generated SSH config alias to future service-user SSH" : undefined,
       ].filter(Boolean).join("; "),
@@ -2728,7 +2731,7 @@ async function setupRemoteBootstrapCommand(options: SetupRemoteBootstrapOptions)
   };
 }
 
-function renderRemoteBootstrapScript(input: { serviceUser: string; serviceHome: string; repoPath: string; workspaceRoot: string }): string {
+function renderRemoteBootstrapScript(input: { serviceUser: string; serviceHome: string; repoPath: string; workspaceParent: string; workspaceRoot: string }): string {
   return `#!/usr/bin/env bash
 set -euo pipefail
 umask 077
@@ -2736,10 +2739,20 @@ umask 077
 service_user=${shellLiteral(input.serviceUser)}
 service_home=${shellLiteral(input.serviceHome)}
 repo_path=${shellLiteral(input.repoPath)}
+workspace_parent=${shellLiteral(input.workspaceParent)}
 workspace_root=${shellLiteral(input.workspaceRoot)}
 
 run_root() {
   if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi
+}
+
+validate_as_service_user() {
+  local label="$1"
+  shift
+  if ! sudo -iu "$service_user" "$@"; then
+    echo "Brain remote bootstrap validation failed: service user '$service_user' cannot $label. Check ownership/mode for repo_path=$repo_path workspace_parent=$workspace_parent workspace_root=$workspace_root." >&2
+    exit 1
+  fi
 }
 
 if [ "$service_user" = root ]; then service_home=/root; fi
@@ -2774,28 +2787,35 @@ rm -f "$tmp_sudoers"
 run_root visudo -cf "$sudoers_file" >/dev/null
 
 run_root install -d -o "$service_user" -g "$service_group" -m 755 "$repo_path"
+run_root install -d -o "$service_user" -g "$service_group" -m 700 "$workspace_parent"
 run_root install -d -o "$service_user" -g "$service_group" -m 700 "$workspace_root"
 for dir in config secrets state logs tmp artifacts cache private private/documents private/documents/files; do
   mode=700
   case "$dir" in config) mode=755 ;; esac
   run_root install -d -o "$service_user" -g "$service_group" -m "$mode" "$workspace_root/$dir"
 done
+run_root chown "$service_user:$service_group" "$workspace_parent" "$workspace_root"
 run_root chown -R "$service_user:$service_group" "$repo_path" "$workspace_root"
 
-sudo -iu "$service_user" test -r "$authorized_keys"
-sudo -iu "$service_user" test -d "$repo_path"
-sudo -iu "$service_user" test -w "$workspace_root"
+validate_as_service_user "read SSH authorized_keys at $authorized_keys" test -r "$authorized_keys"
+validate_as_service_user "access checkout directory $repo_path" test -d "$repo_path"
+validate_as_service_user "write workspace parent $workspace_parent" test -w "$workspace_parent"
+validate_as_service_user "write workspace root $workspace_root" test -w "$workspace_root"
 echo "Brain remote bootstrap validated for $service_user."
 `;
 }
 
 function remoteServiceUserValidationCommand(defaults: RemoteSetupDefaults): string {
-  return [
-    `test "$(id -un)" = ${shellArg(defaults.sshUser)}`,
-    `test -r ${shellArg(`${defaults.serviceHome}/.ssh/authorized_keys`)}`,
-    `test -d ${shellArg(defaults.repoPath)}`,
-    `test -w ${shellArg(defaults.workspaceRoot)}`,
-  ].join(" && ");
+  const validationScript = [
+    "set -euo pipefail",
+    "fail() { echo \"Brain service-user SSH validation failed: $1\" >&2; exit 1; }",
+    `[ "$(id -un)" = ${shellArg(defaults.sshUser)} ] || fail "expected SSH user ${defaults.sshUser}, got $(id -un)"`,
+    `[ -r ${shellArg(`${defaults.serviceHome}/.ssh/authorized_keys`)} ] || fail "cannot read service-user authorized_keys at ${defaults.serviceHome}/.ssh/authorized_keys"`,
+    `[ -d ${shellArg(defaults.repoPath)} ] || fail "checkout directory is missing or inaccessible: ${defaults.repoPath}"`,
+    `[ -w ${shellArg(defaults.workspaceParent)} ] || fail "workspace parent is not writable by ${defaults.sshUser}: ${defaults.workspaceParent}"`,
+    `[ -w ${shellArg(defaults.workspaceRoot)} ] || fail "workspace root is not writable by ${defaults.sshUser}: ${defaults.workspaceRoot}"`,
+  ].join("\n");
+  return `bash -lc ${shellArg(validationScript)}`;
 }
 
 function sshConfigPlan(options: SetupRemoteBootstrapOptions, defaults: RemoteSetupDefaults) {
@@ -2874,6 +2894,7 @@ function remoteSetupDefaults(options: Pick<SetupDefaultsOptions, "workspace" | "
   const serviceUser = options.serviceUser || DEFAULT_SERVICE_USER;
   const serviceHome = serviceUserHome(serviceUser);
   const workspaceRoot = normalizeRemoteDisplayPath(options.path ?? defaultWorkspaceRootDisplay(options.workspace, serviceHome), serviceHome);
+  const workspaceParent = path.posix.dirname(workspaceRoot);
   const repoPath = `${serviceHome}/brain`;
   const initialSshUser = options.sshUser || "root";
   const usesRootBootstrap = initialSshUser === "root" && serviceUser !== "root";
@@ -2884,6 +2905,7 @@ function remoteSetupDefaults(options: Pick<SetupDefaultsOptions, "workspace" | "
     sshUser: usesRootBootstrap ? serviceUser : initialSshUser,
     bootstrapSshUser: usesRootBootstrap ? initialSshUser : undefined,
     workspaceRoot,
+    workspaceParent,
     repoPath,
     configPath: `${workspaceRoot}/config/runtime.yaml`,
   };
