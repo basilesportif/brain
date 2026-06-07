@@ -94,13 +94,19 @@ pnpm run brainctl setup inspect --config ~/.brain/workspace/config/runtime.yaml 
 ```
 
 `setup defaults` is intentionally concise: by default it shows only the setup
-mode, remote SSH host/user when `--target remote` is selected, source checkout,
+mode, remote SSH host, initial SSH user, future SSH user, source checkout,
 private workspace, initial workspace name, and the core setup flow. For remote
 setup, ask for an SSH IP/DNS host and SSH login username; if no username is
-given, default the SSH login to `root` for bootstrap. Pass `--verbose` only
-when you need derived config/secrets/log paths, service-user details, or
-copyable commands. In remote mode it also writes the ignored local
-`private/setup-context.json` resume pointer unless `--dry-run` is used.
+given, default the initial login to `root` for one-time bootstrap, but persist
+future setup/auth/deploy commands as the non-root service user (default
+`brain`). Pass `--verbose` only when you need derived config/secrets/log paths,
+service-user details, or copyable commands. In remote mode it also writes the
+ignored local `private/setup-context.json` resume pointer unless `--dry-run` is
+used. Use `pnpm run brainctl setup remote-bootstrap --ssh-host <host>
+--ssh-user root --service-user brain` to idempotently create/validate the
+service user, sudo access, authorized keys, `/home/brain/brain`, and
+`/home/brain/.brain/workspace`, then rewrite the local resume context and any
+explicit `--ssh-config/--ssh-alias` entry to `brain@host`.
 
 The normal core setup flow is:
 

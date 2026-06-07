@@ -163,13 +163,14 @@ confirm before making changes.
 
 Ask these questions explicitly. Defaults are suggestions, not assumptions.
 For the first setup confirmation, keep the summary short: show only setup mode,
-remote SSH host/user when remote mode is selected, source checkout path, private
-workspace path, initial workspace name, and the core setup flow. If remote mode
-is selected, ask for the SSH IP/DNS host and SSH login username; default the SSH
-login username to `root` when omitted. Hide implementation plumbing such as
-service user, systemd service name, derived config/secrets/log paths, and
-command lists unless the user asks for details or `brainctl setup defaults
---verbose` is used.
+remote SSH host, initial SSH user, future SSH user, source checkout path,
+private workspace path, initial workspace name, and the core setup flow. If
+remote mode is selected, ask for the SSH IP/DNS host and initial SSH login
+username; default the initial username to `root` when omitted, but keep root
+only for one-time bootstrap and persist future commands as the non-root service
+user. Hide implementation plumbing such as systemd service name, derived
+config/secrets/log paths, and command lists unless the user asks for details or
+`brainctl setup defaults --verbose` is used.
 
 ### Common questions
 
@@ -514,12 +515,13 @@ explicitly requested.
    pnpm run brainctl setup defaults --target remote --workspace personal
    ```
 
-   The defaults ask for the remote SSH host/IP and default the SSH login user
-   to `root` when omitted. They keep `/home/brain/brain` as the source checkout
-   and `/home/brain/.brain/workspace` as the private workspace for the non-root
-   service user. They also create/update ignored local
-   `private/setup-context.json` with non-secret resume metadata so an
-   interrupted setup can survive a later `git pull`.
+   The defaults ask for the remote SSH host/IP and distinguish the initial SSH
+   user from the future SSH user. When the initial user is `root`, root is only
+   a one-time bootstrap identity; the persisted future user is the non-root
+   service user (default `brain`). They keep `/home/brain/brain` as the source
+   checkout and `/home/brain/.brain/workspace` as the private workspace. They
+   also create/update ignored local `private/setup-context.json` with non-secret
+   resume metadata so an interrupted setup can survive a later `git pull`.
 2. Add or reuse a local SSH config entry:
 
    ```sshconfig
@@ -529,8 +531,12 @@ explicitly requested.
        IdentityFile <optional-local-key>
    ```
 
-   If the first connection must use `root`, use the root address only for the
-   bootstrap phase, then switch the alias to the service user.
+   If the first connection must use `root`, use root only for
+   `pnpm run brainctl setup remote-bootstrap --ssh-host <host> --ssh-user root
+   --service-user brain`. That bootstrap creates/validates the service user,
+   sudo access, authorized keys, `/home/brain/brain`, and
+   `/home/brain/.brain/workspace`, then rewrites the local resume context and
+   any generated SSH alias to the service user.
 
 3. Prepare the Ubuntu server using the Brain-owned deployment/self-hosting docs
    in this repository.
@@ -547,8 +553,8 @@ explicitly requested.
    dependencies are needed, then `pnpm run check`.
 6. Ensure the ignored local resume context exists in
    `private/setup-context.json` with only non-secret metadata: target `remote`,
-   workspace name, SSH host/user, remote repo path, remote workspace path, and
-   remote config path. `brainctl setup defaults --target remote` or
+   workspace name, SSH host/future service user, optional one-time bootstrap
+   user, remote repo path, remote workspace path, and remote config path. `brainctl setup defaults --target remote` or
    `brainctl setup --target remote` should have created it before this point;
    rerun one of those commands if it is missing. This lets a later interrupted
    setup inspect remote progress before asking "local or remote?" again.

@@ -47,8 +47,12 @@ Use this skill when a user asks to prepare a fresh Ubuntu host for Brain.
    <name>`). If it points at this remote host, check the remote
    `state/setup-progress.json` metadata and resume from the next incomplete
    step instead of restarting. If no context exists, confirm host label/address
-   and SSH login username; default the SSH login username to `root` if omitted.
-   Then confirm repo path, workspace path, and provider choice. Ask for
+   and SSH login username; default the initial SSH login username to `root` if
+   omitted. Root must be preserved only for one-time bootstrap; after
+   `brainctl setup remote-bootstrap` creates/validates the non-root service
+   user, sudo access, authorized keys, checkout path, and workspace ownership,
+   rewrite local context/SSH alias so future commands use the service user. Then
+   confirm repo path, workspace path, and provider choice. Ask for
    service-user/service details only when needed for bootstrap or when the user
    asks for advanced details.
 2. Install base packages: Git, curl, build tools, certificates, Node, pnpm, and any provider CLI prerequisites the user selected.

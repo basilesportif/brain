@@ -1045,9 +1045,10 @@ test("brainctl setup defaults renders concise remote choices and persists ignore
       };
     };
     assert.equal(parsed.ok, true);
-    assert.deepEqual(parsed.details.decisions.map((item) => item.decision), ["Setup mode", "Remote SSH host", "Remote SSH user", "Source checkout", "Private workspace", "Initial workspace"]);
+    assert.deepEqual(parsed.details.decisions.map((item) => item.decision), ["Setup mode", "Remote SSH host", "Initial remote SSH user", "Future remote SSH user", "Source checkout", "Private workspace", "Initial workspace"]);
     assert.equal(parsed.details.decisions.find((item) => item.decision === "Remote SSH host")?.default, "ask: server IP or DNS name");
-    assert.equal(parsed.details.decisions.find((item) => item.decision === "Remote SSH user")?.default, "root");
+    assert.equal(parsed.details.decisions.find((item) => item.decision === "Initial remote SSH user")?.default, "root");
+    assert.equal(parsed.details.decisions.find((item) => item.decision === "Future remote SSH user")?.default, "brain");
     assert.equal(parsed.details.decisions.find((item) => item.decision === "Source checkout")?.default, "/home/brain/brain");
     assert.equal(parsed.details.decisions.find((item) => item.decision === "Private workspace")?.default, "/home/brain/.brain/workspace");
     assert.deepEqual(parsed.details.setupFlow.coreSteps.map((item) => item.step), ["essential-runtime-choices", "configure-verify-codex-auth", "telegram-connection", "personal-workspace", "private-data-repo", "composio-accounts"]);
@@ -1063,12 +1064,13 @@ test("brainctl setup defaults renders concise remote choices and persists ignore
     assert.doesNotMatch(result.stdout, /serviceUser|serviceName|secretsEnv|runtimeConfig|pnpm caveat|package manager|srv\/brain/);
 
     const contextPath = path.join(root, "private", "setup-context.json");
-    const context = JSON.parse(await readFile(contextPath, "utf8")) as { target: string; workspaceRoot: string; repoPath: string; sshHost?: string; sshUser: string; secretValuesStored: boolean };
+    const context = JSON.parse(await readFile(contextPath, "utf8")) as { target: string; workspaceRoot: string; repoPath: string; sshHost?: string; sshUser: string; bootstrapSshUser?: string; secretValuesStored: boolean };
     assert.equal(context.target, "remote");
     assert.equal(context.workspaceRoot, "/home/brain/.brain/workspace");
     assert.equal(context.repoPath, "/home/brain/brain");
     assert.equal(context.sshHost, undefined);
-    assert.equal(context.sshUser, "root");
+    assert.equal(context.sshUser, "brain");
+    assert.equal(context.bootstrapSshUser, "root");
     assert.equal(context.secretValuesStored, false);
     assert.equal((await stat(contextPath)).mode & 0o777, 0o600);
 
@@ -1076,7 +1078,8 @@ test("brainctl setup defaults renders concise remote choices and persists ignore
     assert.equal(verbose.status, 0, verbose.stderr);
     const verboseJson = JSON.parse(verbose.stdout) as { details: { decisions: Array<{ decision: string; default: string }>; advanced: { ssh: { host: string; user: string }; serviceUser: string; serviceName: string; paths: { runtimeConfig: string; secretsEnv: string } } } };
     assert.equal(verboseJson.details.decisions.find((item) => item.decision === "Remote SSH host")?.default, "203.0.113.10");
-    assert.equal(verboseJson.details.decisions.find((item) => item.decision === "Remote SSH user")?.default, "ubuntu");
+    assert.equal(verboseJson.details.decisions.find((item) => item.decision === "Initial remote SSH user")?.default, "ubuntu");
+    assert.equal(verboseJson.details.decisions.find((item) => item.decision === "Future remote SSH user")?.default, "ubuntu");
     assert.deepEqual(verboseJson.details.advanced.ssh, { host: "203.0.113.10", user: "ubuntu" });
     assert.equal(verboseJson.details.advanced.serviceUser, "brain");
     assert.equal(verboseJson.details.advanced.serviceName, "brain-personal");
@@ -1136,6 +1139,81 @@ test("brainctl setup --target remote writes only local resume context and not re
     assert.equal(parsed.details.localSetupContext.context.sshUser, "ubuntu");
     assert.match(parsed.details.sideEffects, /setup-context\.json/);
     await assert.rejects(stat(remoteWorkspace));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brainctl setup remote-bootstrap rewrites root bootstrap context to service-user SSH", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-setup-remote-bootstrap-"));
+  try {
+    await initRepoWithPrivateIgnore(root);
+    const bin = path.join(root, "bin");
+    const sshLog = path.join(root, "ssh-log.jsonl");
+    const sshConfig = path.join(root, "ssh-config");
+    await mkdir(bin, { recursive: true });
+    await writeFile(path.join(bin, "ssh"), [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      `log=${shellTestLiteral(sshLog)}`,
+      "dest=${1:-}",
+      "cmd=${2:-}",
+      "script=''",
+      'if [ "$cmd" = "bash -s" ]; then script=$(cat); fi',
+      `printf '{"dest":%s,"cmd":%s,"script":%s}\\n' "$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$dest")" "$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$cmd")" "$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$script")" >> "$log"`,
+      "",
+    ].join("\n"), { mode: 0o700 });
+    await chmod(path.join(bin, "ssh"), 0o700);
+
+    const result = spawnBrainctl([
+      "setup", "remote-bootstrap",
+      "--workspace", "personal",
+      "--repo", root,
+      "--ssh-host", "204.168.209.41",
+      "--ssh-user", "root",
+      "--service-user", "brain",
+      "--ssh-config", sshConfig,
+      "--ssh-alias", "brain-prod",
+    ], { PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}` });
+    assert.equal(result.status, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout) as { ok: boolean; details: { initialSsh: { destination: string; scope: string }; futureSsh: { destination: string }; localSetupContext: { context: { sshUser: string; bootstrapSshUser: string } }; sshConfig: { wrote: boolean; alias: string } } };
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.details.initialSsh.destination, "root@204.168.209.41");
+    assert.equal(parsed.details.initialSsh.scope, "one-time-bootstrap");
+    assert.equal(parsed.details.futureSsh.destination, "brain@204.168.209.41");
+    assert.equal(parsed.details.localSetupContext.context.sshUser, "brain");
+    assert.equal(parsed.details.localSetupContext.context.bootstrapSshUser, "root");
+    assert.equal(parsed.details.sshConfig.wrote, true);
+    assert.equal(parsed.details.sshConfig.alias, "brain-prod");
+
+    const context = JSON.parse(await readFile(path.join(root, "private", "setup-context.json"), "utf8")) as { sshHost: string; sshUser: string; bootstrapSshUser: string; repoPath: string; workspaceRoot: string };
+    assert.equal(context.sshHost, "204.168.209.41");
+    assert.equal(context.sshUser, "brain");
+    assert.equal(context.bootstrapSshUser, "root");
+    assert.equal(context.repoPath, "/home/brain/brain");
+    assert.equal(context.workspaceRoot, "/home/brain/.brain/workspace");
+
+    const sshConfigText = await readFile(sshConfig, "utf8");
+    assert.match(sshConfigText, /Host brain-prod/);
+    assert.match(sshConfigText, /HostName 204\.168\.209\.41/);
+    assert.match(sshConfigText, /User brain/);
+    assert.doesNotMatch(sshConfigText, /User root/);
+
+    const sshLogText = await readFile(sshLog, "utf8");
+    assert.match(sshLogText, /root@204\.168\.209\.41/);
+    assert.match(sshLogText, /brain@204\.168\.209\.41/);
+    assert.match(sshLogText, /useradd --create-home/);
+    assert.match(sshLogText, /authorized_keys/);
+    assert.match(sshLogText, /\/home\/brain\/brain/);
+    assert.match(sshLogText, /\/home\/brain\/\.brain\/workspace/);
+
+    const status = spawnBrainctl(["setup", "status", "--repo", root, "--workspace", "personal"]);
+    assert.equal(status.status, 0, status.stderr);
+    const statusJson = JSON.parse(status.stdout) as { details: { resumeProbe: { command: string; sshUser: string; bootstrapSshUser: string } } };
+    assert.match(statusJson.details.resumeProbe.command, /ssh brain@204\.168\.209\.41/);
+    assert.doesNotMatch(statusJson.details.resumeProbe.command, /root@204\.168\.209\.41/);
+    assert.equal(statusJson.details.resumeProbe.sshUser, "brain");
+    assert.equal(statusJson.details.resumeProbe.bootstrapSshUser, "root");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

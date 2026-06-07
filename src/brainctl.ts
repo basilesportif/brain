@@ -38,12 +38,14 @@ program
 
 program.command("setup")
   .description("Create a private workspace directory scaffold without writing secrets.")
-  .argument("[mode]", "optional mode: defaults, inspect, status, reset, telegram-token-script, or codex-auth-script")
+  .argument("[mode]", "optional mode: defaults, remote-bootstrap, inspect, status, reset, telegram-token-script, or codex-auth-script")
   .option("--workspace <name>", "workspace id", DEFAULT_WORKSPACE_ID)
   .option("--target <target>", "defaults target: local or remote")
   .option("--ssh-host <host>", "remote SSH IP/DNS host for setup defaults")
-  .option("--ssh-user <user>", "remote SSH login user for setup defaults; defaults to root in remote mode")
+  .option("--ssh-user <user>", "remote initial SSH login user for setup defaults/bootstrap; defaults to root in remote mode")
   .option("--service-user <user>", "remote non-root service user for defaults", DEFAULT_SERVICE_USER)
+  .option("--ssh-alias <alias>", "optional SSH config Host alias to generate/update after remote bootstrap")
+  .option("--ssh-config <path>", "optional SSH config path to generate/update after remote bootstrap")
   .option("--service-name <name>", "systemd service name for setup status")
   .option("--path <path>", "private workspace path; setup defaults to ~/.brain/workspace for the default workspace, inspect defaults to config workspacePath")
   .option("--config <path>", "runtime YAML/TOML/JSON config to inspect before planning")
@@ -63,6 +65,9 @@ program.command("setup")
     if (mode === "defaults") {
       return exitWith(await setupDefaultsCommand(options));
     }
+    if (mode === "remote-bootstrap") {
+      return exitWith(await setupRemoteBootstrapCommand(options));
+    }
     if (mode === "inspect" || mode === "status") {
       return exitWith(await setupInspectCommand({ ...options, config: options.config ?? "examples/config/runtime.yaml" }));
     }
@@ -75,7 +80,7 @@ program.command("setup")
     if (mode === "codex-auth-script") {
       return exitWith(await setupCodexAuthScriptCommand(options));
     }
-    if (mode) return exitWith({ ok: false, summary: `unknown setup mode: ${mode}`, details: { supported: ["defaults", "inspect", "status", "reset", "telegram-token-script", "codex-auth-script"] } });
+    if (mode) return exitWith({ ok: false, summary: `unknown setup mode: ${mode}`, details: { supported: ["defaults", "remote-bootstrap", "inspect", "status", "reset", "telegram-token-script", "codex-auth-script"] } });
     return exitWith(await setupCommand(options));
   });
 
@@ -2454,6 +2459,8 @@ interface LocalSetupContext {
   updatedAt?: string;
   sshHost?: string;
   sshUser?: string;
+  serviceUser?: string;
+  bootstrapSshUser?: string;
   repoPath?: string;
   configPath?: string;
   secretValuesStored?: false;
@@ -2464,6 +2471,7 @@ interface RemoteSetupDefaults {
   serviceHome: string;
   sshHost?: string;
   sshUser: string;
+  bootstrapSshUser?: string;
   workspaceRoot: string;
   repoPath: string;
   configPath: string;
@@ -2505,6 +2513,16 @@ interface SetupDefaultsOptions {
   repo?: string;
   dryRun?: boolean;
   verbose?: boolean;
+  sshAlias?: string;
+  sshConfig?: string;
+}
+
+interface SetupRemoteBootstrapOptions extends SetupDefaultsOptions {
+  sshHost?: string;
+  sshUser?: string;
+  serviceUser?: string;
+  sshAlias?: string;
+  sshConfig?: string;
 }
 
 interface SetupTelegramTokenScriptOptions {
@@ -2536,6 +2554,7 @@ async function setupDefaultsCommand(options: SetupDefaultsOptions): Promise<CliR
   if (!target) return { ok: false, summary: "setup defaults target must be local or remote", details: { supported: ["local", "remote"] } };
   const remoteDefaults = target === "remote" ? remoteSetupDefaults(options) : undefined;
   const sshUser = remoteDefaults?.sshUser;
+  const bootstrapSshUser = remoteDefaults?.bootstrapSshUser;
   const sshHost = target === "remote" ? (remoteDefaults?.sshHost ?? "ask: server IP or DNS name") : undefined;
   const serviceUser = options.serviceUser || DEFAULT_SERVICE_USER;
   const serviceHome = target === "remote" ? serviceUserHome(serviceUser) : "~";
@@ -2546,7 +2565,8 @@ async function setupDefaultsCommand(options: SetupDefaultsOptions): Promise<CliR
     { decision: "Setup mode", default: target === "remote" ? "Remote Ubuntu server over SSH" : "Local private workspace" },
     ...(target === "remote" ? [
       { decision: "Remote SSH host", default: sshHost },
-      { decision: "Remote SSH user", default: sshUser },
+      { decision: "Initial remote SSH user", default: bootstrapSshUser ?? sshUser },
+      { decision: "Future remote SSH user", default: sshUser },
     ] : []),
     { decision: "Source checkout", default: repoCheckout },
     { decision: "Private workspace", default: workspaceRoot },
@@ -2581,7 +2601,7 @@ async function setupDefaultsCommand(options: SetupDefaultsOptions): Promise<CliR
   if (options.verbose) {
     details.advanced = {
       target,
-      ssh: target === "remote" ? { host: sshHost, user: sshUser } : undefined,
+      ssh: target === "remote" ? { host: sshHost, user: sshUser, bootstrapUser: bootstrapSshUser } : undefined,
       serviceUser: target === "remote" ? serviceUser : undefined,
       serviceName: target === "remote" ? serviceName : undefined,
       paths: {
@@ -2593,6 +2613,7 @@ async function setupDefaultsCommand(options: SetupDefaultsOptions): Promise<CliR
         logs: `${workspaceRoot}/logs`,
       },
       nextCommands: [
+        ...(target === "remote" && bootstrapSshUser ? [`pnpm run brainctl setup remote-bootstrap --workspace ${options.workspace} --ssh-host ${sshHost ?? "<host>"} --ssh-user ${bootstrapSshUser} --service-user ${serviceUser}`] : []),
         `pnpm run brainctl setup --workspace ${options.workspace} --path ${workspaceRoot}`,
         `pnpm run brainctl setup status --config ${workspaceRoot}/config/runtime.yaml --workspace ${options.workspace}`,
       ],
@@ -2606,6 +2627,200 @@ async function setupDefaultsCommand(options: SetupDefaultsOptions): Promise<CliR
       : `${target} setup defaults ready; confirm concise choices or pass --verbose for implementation details`,
     details,
   };
+}
+
+async function setupRemoteBootstrapCommand(options: SetupRemoteBootstrapOptions): Promise<CliResult> {
+  if (!options.sshHost) {
+    return { ok: false, summary: "remote bootstrap needs --ssh-host", details: { workspace: options.workspace, missing: ["ssh-host"], sideEffects: "none" } };
+  }
+  const defaults = remoteSetupDefaults(options);
+  const initialSshUser = options.sshUser || defaults.bootstrapSshUser || defaults.sshUser;
+  const initialDestination = remoteSshDestination(options.sshHost, initialSshUser);
+  const futureDestination = remoteSshDestination(options.sshHost, defaults.sshUser);
+  const bootstrapScript = renderRemoteBootstrapScript({ serviceUser: defaults.serviceUser, serviceHome: defaults.serviceHome, repoPath: defaults.repoPath, workspaceRoot: defaults.workspaceRoot });
+  const bootstrapCommand = `ssh ${shellArg(initialDestination)} 'bash -s'`;
+  const serviceValidationCommand = `ssh ${shellArg(futureDestination)} ${shellArg(remoteServiceUserValidationCommand(defaults))}`;
+  const context = remoteLocalSetupContext(options, defaults);
+
+  if (options.dryRun) {
+    return {
+      ok: true,
+      summary: "remote bootstrap plan ready (dry run)",
+      details: {
+        workspace: options.workspace,
+        initialSsh: { host: options.sshHost, user: initialSshUser, destination: initialDestination },
+        futureSsh: { host: options.sshHost, user: defaults.sshUser, destination: futureDestination },
+        serviceUser: defaults.serviceUser,
+        repoPath: defaults.repoPath,
+        workspaceRoot: defaults.workspaceRoot,
+        bootstrapCommand,
+        serviceValidationCommand,
+        localSetupContext: { context },
+        sshConfig: sshConfigPlan(options, defaults),
+        sideEffects: "none",
+      },
+    };
+  }
+
+  const bootstrap = spawnSync("ssh", [initialDestination, "bash -s"], { input: bootstrapScript, encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
+  if ((bootstrap.status ?? 0) !== 0) {
+    return {
+      ok: false,
+      summary: "remote bootstrap failed before local resume context was rewritten",
+      details: {
+        workspace: options.workspace,
+        initialSsh: { host: options.sshHost, user: initialSshUser, destination: initialDestination },
+        futureSsh: { host: options.sshHost, user: defaults.sshUser, destination: futureDestination },
+        bootstrapCommand,
+        exitCode: bootstrap.status,
+        stdout: redactSecrets(String(bootstrap.stdout ?? "")),
+        stderr: redactSecrets(String(bootstrap.stderr ?? "")),
+        sideEffects: "remote bootstrap may have partially run; local setup context was not rewritten",
+      },
+    };
+  }
+
+  const validation = spawnSync("ssh", [futureDestination, remoteServiceUserValidationCommand(defaults)], { encoding: "utf8", maxBuffer: 1024 * 1024 });
+  if ((validation.status ?? 0) !== 0) {
+    return {
+      ok: false,
+      summary: "remote bootstrap ran, but service-user SSH validation failed",
+      details: {
+        workspace: options.workspace,
+        initialSsh: { host: options.sshHost, user: initialSshUser, destination: initialDestination },
+        futureSsh: { host: options.sshHost, user: defaults.sshUser, destination: futureDestination },
+        bootstrapCommand,
+        serviceValidationCommand,
+        exitCode: validation.status,
+        stdout: redactSecrets(String(validation.stdout ?? "")),
+        stderr: redactSecrets(String(validation.stderr ?? "")),
+        sideEffects: "remote bootstrap ran; local setup context was not rewritten because future service-user SSH failed",
+      },
+    };
+  }
+
+  const contextWrite = await writeLocalSetupContext(options.repo, context);
+  const sshConfigWrite = await writeGeneratedSshConfig(options, defaults);
+  const ok = contextWrite.wrote && (sshConfigWrite?.wrote ?? true);
+  return {
+    ok,
+    summary: ok ? "remote bootstrap complete; future setup commands will use the service user" : "remote bootstrap complete, but local future-SSH metadata was not fully persisted",
+    details: {
+      workspace: options.workspace,
+      initialSsh: { host: options.sshHost, user: initialSshUser, destination: initialDestination, scope: "one-time-bootstrap" },
+      futureSsh: { host: options.sshHost, user: defaults.sshUser, destination: futureDestination },
+      serviceUser: defaults.serviceUser,
+      repoPath: defaults.repoPath,
+      workspaceRoot: defaults.workspaceRoot,
+      bootstrapCommand,
+      serviceValidationCommand,
+      bootstrap: { exitCode: bootstrap.status, stdout: redactSecrets(String(bootstrap.stdout ?? "")), stderr: redactSecrets(String(bootstrap.stderr ?? "")) },
+      validation: { exitCode: validation.status, stdout: redactSecrets(String(validation.stdout ?? "")), stderr: redactSecrets(String(validation.stderr ?? "")) },
+      localSetupContext: setupContextWriteSummary(contextWrite, true),
+      sshConfig: sshConfigWrite,
+      sideEffects: [
+        "created/validated remote service user, sudo access, authorized_keys, checkout/workspace ownership",
+        contextWrite.wrote ? "updated ignored local private/setup-context.json to future service-user SSH" : "local setup context was not updated",
+        sshConfigWrite?.wrote ? "updated generated SSH config alias to future service-user SSH" : undefined,
+      ].filter(Boolean).join("; "),
+      secretValuesPrinted: false,
+    },
+  };
+}
+
+function renderRemoteBootstrapScript(input: { serviceUser: string; serviceHome: string; repoPath: string; workspaceRoot: string }): string {
+  return `#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+service_user=${shellLiteral(input.serviceUser)}
+service_home=${shellLiteral(input.serviceHome)}
+repo_path=${shellLiteral(input.repoPath)}
+workspace_root=${shellLiteral(input.workspaceRoot)}
+
+run_root() {
+  if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi
+}
+
+if [ "$service_user" = root ]; then service_home=/root; fi
+if ! id "$service_user" >/dev/null 2>&1; then
+  run_root useradd --create-home --home-dir "$service_home" --shell /bin/bash "$service_user"
+fi
+
+service_group="$(id -gn "$service_user")"
+run_root install -d -o "$service_user" -g "$service_group" -m 700 "$service_home/.ssh"
+authorized_keys="$service_home/.ssh/authorized_keys"
+if [ ! -s "$authorized_keys" ]; then
+  source_keys=""
+  if [ -s /root/.ssh/authorized_keys ]; then
+    source_keys=/root/.ssh/authorized_keys
+  elif [ -n "\${SUDO_USER:-}" ] && [ -s "$(getent passwd "$SUDO_USER" | cut -d: -f6)/.ssh/authorized_keys" ]; then
+    source_keys="$(getent passwd "$SUDO_USER" | cut -d: -f6)/.ssh/authorized_keys"
+  fi
+  if [ -z "$source_keys" ]; then
+    echo "No existing authorized_keys found to grant service-user SSH access." >&2
+    exit 1
+  fi
+  run_root install -o "$service_user" -g "$service_group" -m 600 "$source_keys" "$authorized_keys"
+fi
+run_root chown "$service_user:$service_group" "$authorized_keys"
+run_root chmod 600 "$authorized_keys"
+
+sudoers_file="/etc/sudoers.d/brain-\${service_user}"
+tmp_sudoers="$(mktemp)"
+printf "%s ALL=(ALL) NOPASSWD:ALL\\n" "$service_user" > "$tmp_sudoers"
+run_root install -o root -g root -m 440 "$tmp_sudoers" "$sudoers_file"
+rm -f "$tmp_sudoers"
+run_root visudo -cf "$sudoers_file" >/dev/null
+
+run_root install -d -o "$service_user" -g "$service_group" -m 755 "$repo_path"
+run_root install -d -o "$service_user" -g "$service_group" -m 700 "$workspace_root"
+for dir in config secrets state logs tmp artifacts cache private private/documents private/documents/files; do
+  mode=700
+  case "$dir" in config) mode=755 ;; esac
+  run_root install -d -o "$service_user" -g "$service_group" -m "$mode" "$workspace_root/$dir"
+done
+run_root chown -R "$service_user:$service_group" "$repo_path" "$workspace_root"
+
+sudo -iu "$service_user" test -r "$authorized_keys"
+sudo -iu "$service_user" test -d "$repo_path"
+sudo -iu "$service_user" test -w "$workspace_root"
+echo "Brain remote bootstrap validated for $service_user."
+`;
+}
+
+function remoteServiceUserValidationCommand(defaults: RemoteSetupDefaults): string {
+  return [
+    `test "$(id -un)" = ${shellArg(defaults.sshUser)}`,
+    `test -r ${shellArg(`${defaults.serviceHome}/.ssh/authorized_keys`)}`,
+    `test -d ${shellArg(defaults.repoPath)}`,
+    `test -w ${shellArg(defaults.workspaceRoot)}`,
+  ].join(" && ");
+}
+
+function sshConfigPlan(options: SetupRemoteBootstrapOptions, defaults: RemoteSetupDefaults) {
+  if (!options.sshAlias && !options.sshConfig) return undefined;
+  return { path: options.sshConfig ? path.resolve(options.sshConfig) : path.join(os.homedir(), ".ssh", "config"), alias: options.sshAlias ?? options.sshHost, hostName: options.sshHost, user: defaults.sshUser };
+}
+
+async function writeGeneratedSshConfig(options: SetupRemoteBootstrapOptions, defaults: RemoteSetupDefaults): Promise<{ wrote: boolean; path?: string; alias?: string; skipped?: string } | undefined> {
+  const plan = sshConfigPlan(options, defaults);
+  if (!plan) return undefined;
+  if (!plan.alias || !plan.hostName) return { wrote: false, path: plan.path, alias: plan.alias, skipped: "ssh alias and ssh host are required to update SSH config" };
+  const begin = `# BEGIN Brain generated host ${plan.alias}`;
+  const end = `# END Brain generated host ${plan.alias}`;
+  const block = [begin, `Host ${plan.alias}`, `    HostName ${plan.hostName}`, `    User ${defaults.sshUser}`, end, ""].join("\n");
+  await mkdir(path.dirname(plan.path), { recursive: true, mode: 0o700 });
+  const current = await readFile(plan.path, "utf8").catch(() => "");
+  const pattern = new RegExp(`${escapeRegExp(begin)}[\\s\\S]*?${escapeRegExp(end)}\\n?`, "m");
+  const next = pattern.test(current) ? current.replace(pattern, block) : `${current}${current && !current.endsWith("\n") ? "\n" : ""}${block}`;
+  await writeFile(plan.path, next, { mode: 0o600 });
+  await chmod(plan.path, 0o600).catch(() => undefined);
+  return { wrote: true, path: plan.path, alias: plan.alias };
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function conciseSetupFlow() {
@@ -2660,11 +2875,14 @@ function remoteSetupDefaults(options: Pick<SetupDefaultsOptions, "workspace" | "
   const serviceHome = serviceUserHome(serviceUser);
   const workspaceRoot = normalizeRemoteDisplayPath(options.path ?? defaultWorkspaceRootDisplay(options.workspace, serviceHome), serviceHome);
   const repoPath = `${serviceHome}/brain`;
+  const initialSshUser = options.sshUser || "root";
+  const usesRootBootstrap = initialSshUser === "root" && serviceUser !== "root";
   return {
     serviceUser,
     serviceHome,
     sshHost: nonPromptValue(options.sshHost),
-    sshUser: options.sshUser || "root",
+    sshUser: usesRootBootstrap ? serviceUser : initialSshUser,
+    bootstrapSshUser: usesRootBootstrap ? initialSshUser : undefined,
     workspaceRoot,
     repoPath,
     configPath: `${workspaceRoot}/config/runtime.yaml`,
@@ -2680,6 +2898,8 @@ function remoteLocalSetupContext(options: Pick<SetupDefaultsOptions, "workspace"
     updatedAt: new Date().toISOString(),
     sshHost: defaults.sshHost,
     sshUser: defaults.sshUser,
+    serviceUser: defaults.serviceUser,
+    bootstrapSshUser: defaults.bootstrapSshUser,
     repoPath: defaults.repoPath,
     configPath: defaults.configPath,
     secretValuesStored: false,
@@ -3296,6 +3516,8 @@ async function readLocalSetupContext(repoRoot: string, workspace: string): Promi
         updatedAt: parsed.updatedAt,
         sshHost: parsed.sshHost,
         sshUser: parsed.sshUser,
+        serviceUser: parsed.serviceUser,
+        bootstrapSshUser: parsed.bootstrapSshUser,
         repoPath: parsed.repoPath,
         configPath: parsed.configPath,
         secretValuesStored: false,
@@ -3422,6 +3644,7 @@ function buildSetupResumeProbe(
       progressPath,
       sshHost: context.sshHost ?? "<ssh-host>",
       sshUser: context.sshUser,
+      bootstrapSshUser: context.bootstrapSshUser,
       command: sshDestination ? `ssh ${shellArg(sshDestination)} ${shellArg(remoteStatusCommand)}` : `ssh <ssh-host> ${shellArg(remoteStatusCommand)}`,
       note: "Prior setup context points at a remote workspace. Ask only for permission or a missing SSH host, then run this remote metadata check before restarting the setup wizard.",
     };

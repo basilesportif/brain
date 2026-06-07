@@ -182,12 +182,14 @@ Then collect the path-specific fields below.
 ## Common guided questions
 
 For the first default confirmation, optimize for confidence over completeness:
-show only the setup mode, remote SSH host/user when remote mode is selected,
+show only the setup mode, remote SSH host, initial SSH user, future SSH user,
 source checkout path, private workspace path, initial workspace name, and the
-core setup flow. For a remote server, ask for the SSH IP/DNS host and SSH login
-username; default that SSH login username to `root` if omitted. Hide service
-user, systemd service name, derived config/secrets/log paths, and command lists
-unless the user asks for details or `brainctl setup defaults --verbose` is used.
+core setup flow. For a remote server, ask for the SSH IP/DNS host and initial
+SSH login username; default that initial username to `root` if omitted, but
+root must be kept only for one-time bootstrap and future commands should use
+the non-root service user. Hide service user, systemd service name, derived
+config/secrets/log paths, and command lists unless the user asks for details or
+`brainctl setup defaults --verbose` is used.
 
 1. Telegram connection? Default entrypoint is Telegram as `telegram-main`.
    Create/choose the BotFather bot, store only a private token ref, and do not
@@ -360,17 +362,23 @@ Use this flow only after the user chooses remote mode and confirms the host.
 1. Collect:
    - local SSH config host label,
    - server address/IP,
-   - initial SSH login username, default `root` when omitted,
+   - initial SSH login username, default `root` when omitted, and future service-user SSH identity,
    - repo clone path, default `/home/brain/brain` for the `brain` service user,
    - remote workspace path, default `/home/brain/.brain/workspace`,
    - provider and Telegram readiness.
    To display the concise grouped defaults without extra caveats, run:
    `pnpm run brainctl setup defaults --target remote --workspace <workspace-name>`.
    Use `--verbose` only when the user asks for derived paths, service-user, or
-   service-name details.
+   service-name details. If the initial login is `root`, treat it only as the
+   one-time bootstrap identity; future resume/status/auth/deploy commands must
+   use the non-root service user.
 2. Add or reuse a local `~/.ssh/config` entry so `ssh <host-label>` works. If
-   root is needed only for bootstrap, switch the alias to the service user after
-   user creation.
+   root is needed only for bootstrap, run `pnpm run brainctl setup
+   remote-bootstrap --ssh-host <host> --ssh-user root --service-user brain`
+   (plus `--ssh-config/--ssh-alias` when generating an alias) so setup
+   creates/validates the service user, sudo access, authorized keys, checkout
+   and workspace ownership, then switches the alias/context to the service
+   user.
 3. Prepare the server with the configured setup-server runbook. For Brain, adapt it as follows:
    - create/use a dedicated non-root Brain user with sudo for setup,
    - install Ubuntu base packages and Node/pnpm that satisfy this repo,
