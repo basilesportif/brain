@@ -24,6 +24,18 @@ export interface AutomationInspectionPort {
   health(): Promise<AutomationHealth> | AutomationHealth;
 }
 
+export interface AssistantWorkspaceCommandResult {
+  ok: boolean;
+  userFacingText?: string;
+  error?: string;
+  stderr?: string;
+  stdout?: unknown;
+}
+
+export interface AssistantWorkspaceCommandPort {
+  run(script: string, args?: string[]): Promise<AssistantWorkspaceCommandResult> | AssistantWorkspaceCommandResult;
+}
+
 export interface SubagentInspectionPort extends SubagentControlPort {
   listJobs?(): Promise<SubagentJob[]>;
   activeSnapshot?(limit?: number, now?: Date): Promise<ActiveSubagentSnapshot>;
@@ -34,9 +46,11 @@ export interface RuntimeCommandInterceptorOptions {
   subagents?: SubagentInspectionPort;
   employees?: EmployeeControlPort;
   automation?: AutomationInspectionPort;
+  assistantCommands?: AssistantWorkspaceCommandPort;
   logs?: RuntimeLogReader;
   health?: RuntimeHealthProvider;
   maxLogLines?: number;
+  mainLoop?: { model?: string; effort?: string };
   now?: () => Date;
 }
 
@@ -87,6 +101,9 @@ export class RuntimeCommandInterceptor {
 
     const backend = parseSubagentBackendCommand(text);
     if (backend.isBackend) return this.textResult("agent backend", this.formatBackendSeam(backend));
+
+    const todo = parseTodoCommand(text);
+    if (todo.isTodo) return this.textResult("todos", await this.handleTodoCommand(todo));
 
     const employee = parseEmployeeCommand(text);
     if (employee.isEmployee) return this.textResult("employees", await this.handleEmployeeCommand(employee));
@@ -161,16 +178,32 @@ export class RuntimeCommandInterceptor {
     const subagents = this.options.subagents;
     if (!subagents) return "Subagent lifecycle is not configured.";
     const jobs = subagents.listJobs ? await subagents.listJobs() : [];
-    if (jobs.length === 0) return "No subagent jobs.";
-    const active = jobs.filter((job) => activeStatuses.has(job.status));
-    const terminal = jobs.filter((job) => !activeStatuses.has(job.status)).slice(0, lastN);
-    const lines = [formatActiveSummary(active)];
-    if (active.length === 0) lines.push("No active subagent jobs. Use `agents detail` for recent terminal jobs.");
-    for (const job of active) lines.push(formatJobLine(job, { includeControls: true }));
+    const running = jobs.filter((job) => job.status === "running");
+    const cancelling = jobs.filter((job) => job.status === "cancelling");
+    const queued = jobs.filter((job) => job.status === "queued");
+    const terminal = jobs.filter((job) => !activeStatuses.has(job.status));
+    const active = [...running, ...cancelling, ...queued];
+    const lines: string[] = [];
+
     if (lastN > 0) {
-      lines.push("", `Recent terminal subagent jobs (last ${terminal.length}):`);
-      if (terminal.length === 0) lines.push("None.");
-      for (const job of terminal) lines.push(formatJobLine(job, { includeControls: false }));
+      lines.push(`${formatActiveSummary(active)}, ${terminal.length} terminal (${terminalStatusCountText(terminal)})`);
+    } else {
+      lines.push(formatActiveSummary(active));
+      if (active.length === 0) lines.push("No active subagent jobs. Use `agents detail` for recent terminal jobs.");
+    }
+
+    appendJobSection(lines, "Running", running, { includeControls: true, includeSteer: true, now: this.now() });
+    appendJobSection(lines, "Cancelling", cancelling, { includeControls: true, includeSteer: false, now: this.now() });
+    appendJobSection(lines, "Queued", queued, { includeControls: true, includeSteer: false, now: this.now() });
+
+    if (lastN > 0) {
+      const recent = terminal.slice(0, lastN);
+      if (recent.length > 0) {
+        lines.push("", `Recently terminal (last ${lastN}):`);
+        recent.forEach((job, index) => {
+          lines.push(formatTerminalJobLine(job, index + 1));
+        });
+      }
     }
     return lines.join("\n");
   }
@@ -182,13 +215,20 @@ export class RuntimeCommandInterceptor {
     if (resolved.status === "not_found") return `No subagent job matched "${ref}". Use "agents" to list usable refs.`;
     if (resolved.status === "ambiguous") return [`Ambiguous subagent ref "${ref}". Use a longer ref.`, ...resolved.candidates.map((candidate) => `- ${candidate.ref} ${candidate.status} ${candidate.profile}${candidate.summary ? ` — ${candidate.summary}` : ""}`)].join("\n");
     const job = resolved.job;
+    const refText = shortRef(job.id);
+    const elapsed = formatDurationSeconds(elapsedSeconds(job, this.now()));
+    const steerable = job.status === "running";
     const lines = [
       `Subagent ${job.id}`,
+      `ref: ${refText}`,
       `status: ${job.status}`,
       `profile: ${job.profile}`,
+      `provider: ${job.provider ?? "unknown"}`,
+      `owner: ${job.ownerType ?? "main"}:${job.ownerId ?? job.ownerType ?? "main"}`,
       `route: ${job.route}`,
       `resultTarget: ${job.resultTarget ?? "main"}`,
-      `provider: ${job.provider ?? "unknown"}`,
+      `steerable: ${steerable ? "yes" : "no"}`,
+      `elapsed: ${elapsed}`,
       `model/effort: ${[job.model, job.effort].filter(Boolean).join("/") || "default"}`,
       `enqueued: ${job.enqueuedAt}`,
     ];
@@ -197,9 +237,8 @@ export class RuntimeCommandInterceptor {
     if (job.summary) lines.push(`summary: ${job.summary}`);
     if (job.error) lines.push(`error: ${job.error}`);
     if (job.resultText) lines.push(`result: ${truncate(job.resultText, 1200)}`);
-    const refText = shortRef(job.id);
     if (activeStatuses.has(job.status)) lines.push(`cancel: agent kill ${refText}`);
-    if (job.status === "running") lines.push(`steer: agent steer ${refText} <text>`);
+    if (steerable) lines.push(`steer: agent steer ${refText} <text>`);
     return lines.join("\n");
   }
 
@@ -216,6 +255,14 @@ export class RuntimeCommandInterceptor {
   private formatBackendSeam(command: Extract<SubagentBackendCommand, { isBackend: true }>): string {
     if (command.action === "status") return "Subagent backend seam: configured by the Brain runtime at startup. Chat-time backend switching is intentionally not wired yet.";
     return `Subagent backend command recognized (${command.action}${command.backend ? ` ${command.backend}` : ""}), but chat-time backend mutation is disabled in Brain. Restart with the desired provider/executor configuration.`;
+  }
+
+  private async handleTodoCommand(command: Extract<TodoCommand, { isTodo: true }>): Promise<string> {
+    const assistantCommands = this.options.assistantCommands;
+    if (!assistantCommands) return withMainLoopDisclosure("Assistant workspace command runner is not configured.", this.options.mainLoop);
+    const result = await runTodoCommand(assistantCommands, command);
+    const text = result.userFacingText?.trim() || result.error || result.stderr || "Todo command completed without user-facing output.";
+    return withMainLoopDisclosure(text, this.options.mainLoop);
   }
 
   private async handleEmployeeCommand(command: Extract<EmployeeCommand, { isEmployee: true }>): Promise<string> {
@@ -237,6 +284,10 @@ export class RuntimeCommandInterceptor {
     if (command.action === "steer") return formatEmployeeLifecycleResult(await employees.steerEmployee(command.employeeId, command.text ?? ""));
     return "Unsupported employee command.";
   }
+
+  private now(): Date {
+    return this.options.now?.() ?? new Date();
+  }
 }
 
 export function parseHelpCommand(text: string): boolean {
@@ -257,6 +308,27 @@ export function parseLogCommand(text: string, maxLines = 2_000): { isLog: boolea
 
 export function parseLoopsCommand(text: string): boolean {
   return /^\/?(?:loops|loops?\s+status)$/i.test(text.trim());
+}
+
+export type TodoCommand =
+  | { isTodo: false }
+  | { isTodo: true; action: "list" }
+  | { isTodo: true; action: "add"; title: string }
+  | { isTodo: true; action: "delete"; ref: string };
+
+export function parseTodoCommand(text: string): TodoCommand {
+  const trimmed = text.trim();
+  if (/^\/?(?:todos?|todo\s+list|list\s+todos?|show\s+todos?|current\s+todos?)$/i.test(trimmed)) return { isTodo: true, action: "list" };
+
+  const add = trimmed.match(/^\/?(?:add\s+(?:a\s+)?todo|todo\s+add|new\s+todo)\s*:?\s+([\s\S]+)$/i);
+  if (add?.[1]?.trim()) return { isTodo: true, action: "add", title: add[1].trim() };
+
+  const deleteMatch = trimmed.match(/^\/?(?:(?:delete|remove)\s+todo|todo\s+(?:delete|remove))\s+([\s\S]+)$/i)
+    ?? trimmed.match(/^\/?(?:delete|remove)\s+(#\d+|\d+)$/i)
+    ?? trimmed.match(/^\/?mark\s+(#\d+|\d+)\s+(?:done|complete|completed)$/i);
+  if (deleteMatch?.[1]?.trim()) return { isTodo: true, action: "delete", ref: deleteMatch[1].trim() };
+
+  return { isTodo: false };
 }
 
 export function parseAgentsCommand(text: string): { isAgents: boolean; lastN: number } {
@@ -324,6 +396,15 @@ function commandText(event: EntryPointInboundEvent): string | undefined {
   return event.text?.trim();
 }
 
+async function runTodoCommand(port: AssistantWorkspaceCommandPort, command: Extract<TodoCommand, { isTodo: true }>): Promise<AssistantWorkspaceCommandResult> {
+  if (command.action === "list") return port.run("todo-list.js", []);
+  if (command.action === "add") return port.run("todo-add.js", ["--title", command.title]);
+  const normalized = normalizeRef(command.ref);
+  if (/^(?:#)?\d+$/.test(normalized)) return port.run("todo-delete.js", ["--number", normalized.replace(/^#/, "")]);
+  if (/^td_[0-9a-f]+$/i.test(normalized)) return port.run("todo-delete.js", ["--id", normalized]);
+  return port.run("todo-delete.js", ["--title", command.ref]);
+}
+
 function formatActiveSummary(jobs: SubagentJob[]): string {
   const counts = jobs.reduce<Record<string, number>>((acc, job) => {
     acc[job.status] = (acc[job.status] ?? 0) + 1;
@@ -332,20 +413,92 @@ function formatActiveSummary(jobs: SubagentJob[]): string {
   return `Subagents: ${counts.running ?? 0} running, ${counts.cancelling ?? 0} cancelling, ${counts.queued ?? 0} queued`;
 }
 
-function formatJobLine(job: SubagentJob, options: { includeControls: boolean }): string {
+function appendJobSection(lines: string[], label: string, jobs: SubagentJob[], options: { includeControls: boolean; includeSteer: boolean; now: Date }): void {
+  if (jobs.length === 0) return;
+  lines.push("", `${label}:`);
+  jobs.forEach((job, index) => {
+    lines.push(formatJobLine(job, index + 1, options));
+  });
+}
+
+function formatJobLine(job: SubagentJob, index: number, options: { includeControls: boolean; includeSteer: boolean; now: Date }): string {
   const ref = shortRef(job.id);
+  const details = formatJobSummaryDetails(job);
+  if (options.includeControls && activeStatuses.has(job.status)) details.push(`cancel: \`agent kill ${ref}\``);
+  if (options.includeSteer && job.status === "running") details.push(`steer: \`agent steer ${ref} <text>\``);
+  const header = `${index}. \`${ref}\` — ${compactText(formatJobHeader(job, options.now))}`;
+  return [header, ...details.map((detail) => `   ${compactText(detail)}`)].join("\n");
+}
+
+function formatTerminalJobLine(job: SubagentJob, index: number): string {
   const parts = [
-    `- ${job.status} ${job.profile}`,
-    `id=${job.id}`,
-    `ref=${ref}`,
-    `route=${job.route}`,
-    `provider=${job.provider ?? "unknown"}`,
+    `${index}. ${job.status} ${job.id.startsWith("job_") ? `job_${shortRef(job.id)}` : shortRef(job.id)} — ${compactText(job.profile)}`,
   ];
-  if (job.summary) parts.push(`summary=${JSON.stringify(job.summary)}`);
-  if (job.completedAt) parts.push(`completed=${job.completedAt}`);
-  if (options.includeControls && activeStatuses.has(job.status)) parts.push(`cancel="agent kill ${ref}"`);
-  if (options.includeControls && job.status === "running") parts.push(`steer="agent steer ${ref} <text>"`);
+  const details = formatJobSummaryDetails(job);
+  if (job.completedAt) details.push(`completed: ${job.completedAt}`);
+  if (job.error) details.push(`error: ${job.error}`);
+  return [...parts, ...details.map((detail) => `   ${compactText(detail)}`)].join("\n");
+}
+
+function formatJobHeader(job: SubagentJob, now: Date): string {
+  const elapsed = formatDurationSeconds(elapsedSeconds(job, now));
+  return [job.profile, job.effort ?? "default", elapsed].filter(Boolean).join(" / ");
+}
+
+function formatJobSummaryDetails(job: SubagentJob): string[] {
+  const details: string[] = [];
+  if (job.summary) details.push(job.summary);
+  const owner = formatJobOwnerDetails(job);
+  if (owner) details.push(owner);
+  return details;
+}
+
+function formatJobOwnerDetails(job: SubagentJob): string {
+  const ownerType = job.ownerType ?? "main";
+  const resultTarget = job.resultTarget ?? resultTargetForRoute(job.route);
+  if (ownerType === "main" && resultTarget === resultTargetForRoute(job.route) && !job.ownerRequestId && !job.parentTurnId) return "";
+  const parts = [
+    `owner: ${ownerType}:${compactText(job.ownerId ?? ownerType)}`,
+    job.ownerRequestId ? `request: ${compactText(job.ownerRequestId)}` : "",
+    job.parentTurnId ? `parentTurn: ${compactText(job.parentTurnId)}` : "",
+    `result: ${resultTarget}`,
+  ].filter(Boolean);
   return parts.join(" ");
+}
+
+function resultTargetForRoute(route: SubagentJob["route"]): string {
+  if (route === "send_to_user") return "user";
+  if (route === "send_to_admins") return "admins";
+  if (route === "store_only") return "store_only";
+  if (route === "silent") return "silent";
+  return "main";
+}
+
+function terminalStatusCountText(jobs: SubagentJob[]): string {
+  const counts = jobs.reduce<Record<string, number>>((acc, job) => {
+    acc[job.status] = (acc[job.status] ?? 0) + 1;
+    return acc;
+  }, {});
+  return `${counts.completed ?? 0} completed, ${counts.failed ?? 0} failed, ${counts.cancelled ?? 0} cancelled, ${counts.timed_out ?? 0} timed_out, ${counts.abandoned ?? 0} abandoned`;
+}
+
+function elapsedSeconds(job: SubagentJob, now: Date): number {
+  const from = job.status === "queued"
+    ? job.enqueuedAt
+    : job.status === "cancelling"
+      ? job.cancelRequestedAt ?? job.startedAt ?? job.enqueuedAt
+      : job.startedAt ?? job.enqueuedAt ?? job.completedAt ?? job.abandonedAt;
+  if (!from) return 0;
+  const elapsedMs = now.getTime() - new Date(from).getTime();
+  return Number.isFinite(elapsedMs) ? Math.max(0, Math.round(elapsedMs / 1000)) : 0;
+}
+
+function formatDurationSeconds(seconds: number): string {
+  const rounded = Math.round(seconds);
+  const totalSeconds = Number.isFinite(rounded) ? Math.max(0, rounded) : 0;
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainingSeconds = totalSeconds % 60;
+  return `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
 }
 
 function formatCancelJobResult(result: CancelSubagentJobResult): string {
@@ -451,6 +604,17 @@ function secretKey(key: string): boolean {
 
 function truncate(value: string, max: number): string {
   return value.length <= max ? value : `${value.slice(0, max)}…`;
+}
+
+function withMainLoopDisclosure(text: string, mainLoop: RuntimeCommandInterceptorOptions["mainLoop"] = {}): string {
+  if (/^main_loop:\s*model=/i.test(text.trim())) return text.trim();
+  const model = mainLoop?.model ?? "gpt-5.5";
+  const effort = mainLoop?.effort ?? "medium";
+  return `main_loop: model=${model} effort=${effort}\n\n${text.trim()}`;
+}
+
+function compactText(value: unknown): string {
+  return String(value ?? "").replace(/[\r\n]/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function shortRef(id: string): string {

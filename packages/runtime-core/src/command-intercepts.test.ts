@@ -54,14 +54,62 @@ test("RuntimeCommandInterceptor formats and controls subagent jobs", async () =>
 
   const interceptor = new RuntimeCommandInterceptor({ subagents: lifecycle });
   const agents = await interceptor.handle(event("agents"));
-  assert.match(agents?.actions[0]?.type === "send_text" ? agents.actions[0].text : "", /job_abcdef123456/);
+  assert.match(agents?.actions[0]?.type === "send_text" ? agents.actions[0].text : "", /`abcdef12`/);
+  assert.match(agents?.actions[0]?.type === "send_text" ? agents.actions[0].text : "", /test job/);
+  assert.match(agents?.actions[0]?.type === "send_text" ? agents.actions[0].text : "", /^Subagents: 1 running, 0 cancelling, 0 queued/);
 
   const status = await interceptor.handle(event("agent status abcdef12"));
   assert.match(status?.actions[0]?.type === "send_text" ? status.actions[0].text : "", /Subagent job_abcdef123456/);
+  assert.match(status?.actions[0]?.type === "send_text" ? status.actions[0].text : "", /ref: abcdef12/);
 
   const kill = await interceptor.handle(event("agent kill abcdef12"));
   assert.match(kill?.actions[0]?.type === "send_text" ? kill.actions[0].text : "", /Cancellation requested|Cancelled queued/);
   await lifecycle.shutdown("test done").catch(() => undefined);
+});
+
+test("RuntimeCommandInterceptor returns codex-chat-compatible empty subagent status", async () => {
+  const interceptor = new RuntimeCommandInterceptor({
+    subagents: {
+      async dispatch() { return "job_unused"; },
+      async listJobs() { return []; },
+    },
+  });
+  const sub = await interceptor.handle(event("sub"));
+  assert.equal(sub?.handled, true);
+  assert.equal(sub?.actions[0]?.type === "send_text" ? sub.actions[0].text : "", "Subagents: 0 running, 0 cancelling, 0 queued\nNo active subagent jobs. Use `agents detail` for recent terminal jobs.");
+});
+
+test("RuntimeCommandInterceptor handles todo commands with main_loop formatting", async () => {
+  const calls: Array<{ script: string; args: string[] }> = [];
+  const interceptor = new RuntimeCommandInterceptor({
+    assistantCommands: {
+      async run(script, args = []) {
+        calls.push({ script, args });
+        if (script === "todo-list.js") {
+          return { ok: true, userFacingText: "Current todos:\n\n1. Pay card" };
+        }
+        if (script === "todo-add.js") {
+          return { ok: true, userFacingText: "Added todo: Walk dog\n\nCurrent todos:\n\n1. Pay card\n2. Walk dog" };
+        }
+        return { ok: true, userFacingText: "Removed todo: Pay card\n\nCurrent todos:\n\n1. Walk dog" };
+      },
+    },
+  });
+
+  const list = await interceptor.handle(event("todos"));
+  assert.equal(list?.command, "todos");
+  assert.equal(list?.actions[0]?.type === "send_text" ? list.actions[0].text : "", "main_loop: model=gpt-5.5 effort=medium\n\nCurrent todos:\n\n1. Pay card");
+
+  const add = await interceptor.handle(event("add todo Walk dog"));
+  assert.match(add?.actions[0]?.type === "send_text" ? add.actions[0].text : "", /Added todo: Walk dog/);
+
+  const del = await interceptor.handle(event("delete #1"));
+  assert.match(del?.actions[0]?.type === "send_text" ? del.actions[0].text : "", /Removed todo: Pay card/);
+  assert.deepEqual(calls, [
+    { script: "todo-list.js", args: [] },
+    { script: "todo-add.js", args: ["--title", "Walk dog"] },
+    { script: "todo-delete.js", args: ["--number", "1"] },
+  ]);
 });
 
 test("RuntimeCommandInterceptor records safe Employee lifecycle commands", async () => {

@@ -55,7 +55,7 @@ test("buildPrompt exposes private workspace paths and codex-chat parity behavior
   assert.match(prompt, /Markdown project\/notes\/documents directories are supporting resources only/);
   assert.match(prompt, /do not claim no project\/todo\/CRM\/reminder list exists/);
   assert.match(prompt, /Main-loop routing parity/);
-  assert.match(prompt, /main_loop: model=<configured-or-runtime-default>/);
+  assert.match(prompt, /main_loop: model=gpt-5\.5 effort=medium/);
   assert.match(prompt, /Dispatch a subagent for repo\/file inspection/);
   assert.match(prompt, /stress\/fan-out requests/);
   assert.match(prompt, /For add\/delete, run the mutation and then always run/);

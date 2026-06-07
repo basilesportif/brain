@@ -3,9 +3,11 @@ import path from "node:path";
 
 export interface UserFacingFormatOptions {
   workspacePath?: string;
+  mainLoopDisclosure?: MainLoopDisclosure | false;
 }
 
 type JsonObject = Record<string, unknown>;
+type MainLoopDisclosure = { model?: string; effort?: string };
 
 export function formatAssistantCommandOutput(input: {
   script?: string;
@@ -13,34 +15,35 @@ export function formatAssistantCommandOutput(input: {
   stderr?: string;
   ok?: boolean;
   workspacePath?: string;
+  mainLoopDisclosure?: MainLoopDisclosure | false;
 }): string | undefined {
   const script = input.script ?? "";
   const stdout = unwrapStdout(input.stdout);
   if (!isObject(stdout)) return undefined;
 
   if (script.startsWith("todo-") || "todos" in stdout || "todo" in stdout || "deleted" in stdout && script.includes("todo")) {
-    return formatTodoCommand(script, stdout, input.workspacePath);
+    return withMainLoopDisclosure(formatTodoCommand(script, stdout, input.workspacePath), input.mainLoopDisclosure);
   }
   if (script.startsWith("reminder-") || "reminders" in stdout || "reminder" in stdout && !("todo" in stdout)) {
-    return formatReminderCommand(script, stdout, input.workspacePath);
+    return withMainLoopDisclosure(formatReminderCommand(script, stdout, input.workspacePath), input.mainLoopDisclosure);
   }
   if (isProjectDetailScript(script)) {
-    return formatProjectDetailCommand(script, stdout);
+    return withMainLoopDisclosure(formatProjectDetailCommand(script, stdout), input.mainLoopDisclosure);
   }
   if (script.startsWith("project-") || "projects" in stdout || "project" in stdout) {
-    return formatProjectCommand(script, stdout);
+    return withMainLoopDisclosure(formatProjectCommand(script, stdout), input.mainLoopDisclosure);
   }
   if (isCrmDetailScript(script)) {
-    return formatCrmDetailCommand(script, stdout);
+    return withMainLoopDisclosure(formatCrmDetailCommand(script, stdout), input.mainLoopDisclosure);
   }
   if (script.startsWith("crm-") || "people" in stdout || "businesses" in stdout || "pipeline" in stdout) {
-    return formatCrmCommand(script, stdout);
+    return withMainLoopDisclosure(formatCrmCommand(script, stdout), input.mainLoopDisclosure);
   }
   if (script.startsWith("calendar-") || looksLikeCalendarOutput(stdout)) {
-    return formatCalendarOutput(stdout);
+    return withMainLoopDisclosure(formatCalendarOutput(stdout), input.mainLoopDisclosure);
   }
   if (script.startsWith("gmail-") || script.startsWith("protonmail-") || script.startsWith("email-") || looksLikeEmailOutput(stdout)) {
-    return formatEmailOutput(stdout);
+    return withMainLoopDisclosure(formatEmailOutput(stdout), input.mainLoopDisclosure);
   }
   return undefined;
 }
@@ -78,10 +81,11 @@ function formatKnownJsonText(text: string, options: UserFacingFormatOptions): st
       stderr: typeof details.stderr === "string" ? details.stderr : undefined,
       ok: typeof parsed.ok === "boolean" ? parsed.ok : undefined,
       workspacePath,
+      mainLoopDisclosure: options.mainLoopDisclosure,
     });
     if (formatted) return formatted;
   }
-  if (isObject(parsed)) return formatAssistantCommandOutput({ stdout: parsed, workspacePath: options.workspacePath });
+  if (isObject(parsed)) return formatAssistantCommandOutput({ stdout: parsed, workspacePath: options.workspacePath, mainLoopDisclosure: options.mainLoopDisclosure });
   if (Array.isArray(parsed)) {
     return formatCalendarOutput(parsed) ?? formatEmailOutput(parsed);
   }
@@ -105,14 +109,14 @@ function unwrapStdout(stdout: unknown): unknown {
 }
 
 function formatTodoCommand(script: string, stdout: JsonObject, workspacePath?: string): string | undefined {
-  if (Array.isArray(stdout.todos)) return `Current todos:\n${formatTodoList(stdout.todos)}`;
+  if (Array.isArray(stdout.todos)) return `Current todos:\n\n${formatTodoList(stdout.todos)}`;
   if (isObject(stdout.todo)) {
     const title = stringField(stdout.todo, "title") || "todo";
-    return [`Added todo: ${title}`, "", `Current todos:\n${formatTodoList(loadTodos(workspacePath) ?? [stdout.todo])}`].join("\n");
+    return [`Added todo: ${title}`, "", `Current todos:\n\n${formatTodoList(loadTodos(workspacePath) ?? [stdout.todo])}`].join("\n");
   }
   if (isObject(stdout.deleted) && (script.includes("todo") || !script)) {
     const title = stringField(stdout.deleted, "title") || "todo";
-    return [`Removed todo: ${title}`, "", `Current todos:\n${formatTodoList(loadTodos(workspacePath) ?? [])}`].join("\n");
+    return [`Removed todo: ${title}`, "", `Current todos:\n\n${formatTodoList(loadTodos(workspacePath) ?? [])}`].join("\n");
   }
   return undefined;
 }
@@ -419,6 +423,16 @@ function readWorkspaceStore(workspacePath: string | undefined, file: string): Js
   } catch {
     return undefined;
   }
+}
+
+function withMainLoopDisclosure(text: string | undefined, disclosure: MainLoopDisclosure | false | undefined): string | undefined {
+  if (!text) return undefined;
+  const trimmed = text.trim();
+  if (!trimmed || /^main_loop:\s*model=/i.test(trimmed)) return trimmed;
+  if (disclosure === false) return trimmed;
+  const model = disclosure?.model ?? "gpt-5.5";
+  const effort = disclosure?.effort ?? "medium";
+  return `main_loop: model=${model} effort=${effort}\n\n${trimmed}`;
 }
 
 function looksLikeCalendarOutput(value: unknown): boolean {

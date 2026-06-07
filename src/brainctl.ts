@@ -12,7 +12,7 @@ import YAML from "yaml";
 import { validateAssistantPack } from "@brain/assistant-pack-schema";
 import { FakeEntrypointAdapter } from "@brain/entrypoint-protocol";
 import { defaultBackupExclude, defaultBackupInclude, validateWorkspaceConfig, type BrainConfig, type EntrypointConfig, type TranscriptionConfig, type WorkspaceConfig } from "@brain/workspace-schema";
-import { AutomationRuntime, BrainRuntime, BrainSupervisor, EchoProviderAdapter, EmployeeLifecycle, FakeProviderAdapter, FileAutomationLockStore, FileAutomationSpool, FileEmployeeStore, FileSubagentJobStore, ProviderEmployeeRuntime, ProviderSubagentExecutor, RuntimeCommandInterceptor, RuntimeEntrypointBridge, StaticSubagentExecutor, SubagentLifecycle, createGuardedLiveValidationPlan, createOperationsPlan, formatAssistantCommandOutput, parseBrainDirectives, renderSystemdService, type BrainSupervisorLogRecord, type OperationsPlan, type ProviderAdapter, type ProviderTurnEvent, type RuntimeLogEntry, type SubagentExecutor } from "@brain/runtime-core";
+import { AutomationRuntime, BrainRuntime, BrainSupervisor, EchoProviderAdapter, EmployeeLifecycle, FakeProviderAdapter, FileAutomationLockStore, FileAutomationSpool, FileEmployeeStore, FileSubagentJobStore, ProviderEmployeeRuntime, ProviderSubagentExecutor, RuntimeCommandInterceptor, RuntimeEntrypointBridge, StaticSubagentExecutor, SubagentLifecycle, createGuardedLiveValidationPlan, createOperationsPlan, formatAssistantCommandOutput, parseBrainDirectives, renderSystemdService, type AssistantWorkspaceCommandPort, type BrainSupervisorLogRecord, type OperationsPlan, type ProviderAdapter, type ProviderTurnEvent, type RuntimeLogEntry, type SubagentExecutor } from "@brain/runtime-core";
 import { FileTelegramPairingStore, FileTelegramPollingStateStore, OpenAITelegramAttachmentTranscriber, TelegramBotApiClient, TelegramEntrypointAdapter, loadTelegramToken, type TelegramAttachmentTranscriber } from "@brain/entrypoint-telegram";
 import { createCodexProvider, type CodexTransportKind } from "@brain/provider-codex";
 import { createClaudeCodeProvider, type ClaudeCodeTransportKind } from "@brain/provider-claude-code";
@@ -28,6 +28,8 @@ const program = new Command();
 const TELEGRAM_DOWNLOAD_MAX_BYTES = 52_428_800;
 const DEFAULT_WORKSPACE_ID = "personal";
 const DEFAULT_SERVICE_USER = "brain";
+const DEFAULT_MAIN_LOOP_MODEL = "gpt-5.5";
+const DEFAULT_MAIN_LOOP_EFFORT = "medium";
 
 type SetupDefaultsTarget = "local" | "remote";
 
@@ -583,8 +585,10 @@ async function runCommand(options: SupervisorRunCommandOptions): Promise<CliResu
     subagents,
     employees,
     automation,
+    assistantCommands: createCliAssistantCommandPort(options.workspace, workspace.workspacePath),
     logs: logReader,
     health: { health: () => supervisor?.health() ?? { ok: false, detail: "supervisor not constructed" } },
+    mainLoop: { model: DEFAULT_MAIN_LOOP_MODEL, effort: DEFAULT_MAIN_LOOP_EFFORT },
   });
   supervisor = new BrainSupervisor({
     runtime,
@@ -1181,6 +1185,22 @@ async function workspaceRunCommand(script: string, scriptArgs: string[], options
   };
 }
 
+function createCliAssistantCommandPort(workspace: string, workspaceRoot: string): AssistantWorkspaceCommandPort {
+  return {
+    async run(script: string, args: string[] = []) {
+      const result = await workspaceRunCommand(script, args, { workspace, path: workspaceRoot });
+      const details = isRecord(result.details) ? result.details : {};
+      return {
+        ok: result.ok,
+        userFacingText: typeof details.userFacingText === "string" ? details.userFacingText : undefined,
+        error: result.ok ? undefined : result.summary,
+        stderr: typeof details.stderr === "string" ? details.stderr : undefined,
+        stdout: details.stdout,
+      };
+    },
+  };
+}
+
 function parseJsonOrString(text: string): unknown {
   const trimmed = text.trim();
   if (!trimmed) return "";
@@ -1189,6 +1209,10 @@ function parseJsonOrString(text: string): unknown {
   } catch {
     return trimmed;
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function assistantWorkspaceScaffoldPlan(workspaceRoot: string) {
@@ -2104,6 +2128,8 @@ function createCliProvider(selection: ResolvedSupervisorRuntime, options: Superv
   if (provider === "echo") return new EchoProviderAdapter();
   if (provider === "codex") return createCodexProvider({
     transport: (options.transport as CodexTransportKind | undefined) ?? "stub",
+    model: DEFAULT_MAIN_LOOP_MODEL,
+    effort: DEFAULT_MAIN_LOOP_EFFORT,
     binary: options.binary,
     cwd: options.cwd ?? selection.workspace.workspacePath ?? process.cwd(),
     tmpDir: path.join(selection.workspace.workspacePath, "tmp"),

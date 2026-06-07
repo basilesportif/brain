@@ -170,7 +170,9 @@ export class BrainSupervisor {
   }
 
   async run(options: BrainSupervisorRunOptions = {}): Promise<BrainSupervisorRunResult> {
-    const processed: BrainSupervisorEventResult[] = [];
+    const processed: Array<BrainSupervisorEventResult | undefined> = [];
+    const inFlight = new Set<Promise<void>>();
+    let acceptedEvents = 0;
     const abortStop = (): void => {
       void this.stop();
     };
@@ -178,12 +180,26 @@ export class BrainSupervisor {
     await this.start();
     try {
       for await (const event of this.options.entrypoint.inboundEvents()) {
-        if (this.stopping) return { processed, stoppedReason: "stopped" };
-        if (options.signal?.aborted) return { processed, stoppedReason: "aborted" };
-        processed.push(await this.handleEvent(event));
-        if (options.maxEvents !== undefined && processed.length >= options.maxEvents) return { processed, stoppedReason: "max-events" };
+        if (this.stopping) return { processed: completedEventResults(processed), stoppedReason: "stopped" };
+        if (options.signal?.aborted) return { processed: completedEventResults(processed), stoppedReason: "aborted" };
+        const index = processed.length;
+        processed.push(undefined);
+        acceptedEvents++;
+        const task = this.handleEvent(event)
+          .then((result) => {
+            processed[index] = result;
+          })
+          .finally(() => {
+            inFlight.delete(task);
+          });
+        inFlight.add(task);
+        if (options.maxEvents !== undefined && acceptedEvents >= options.maxEvents) {
+          await waitForInFlight(inFlight);
+          return { processed: completedEventResults(processed), stoppedReason: "max-events" };
+        }
       }
-      return { processed, stoppedReason: options.signal?.aborted ? "aborted" : "entrypoint-closed" };
+      await waitForInFlight(inFlight);
+      return { processed: completedEventResults(processed), stoppedReason: options.signal?.aborted ? "aborted" : "entrypoint-closed" };
     } finally {
       options.signal?.removeEventListener("abort", abortStop);
       await this.stop();
@@ -231,6 +247,16 @@ export class BrainSupervisor {
       release();
     }
   }
+}
+
+async function waitForInFlight(inFlight: Set<Promise<void>>): Promise<void> {
+  while (inFlight.size > 0) {
+    await Promise.allSettled([...inFlight]);
+  }
+}
+
+function completedEventResults(results: Array<BrainSupervisorEventResult | undefined>): BrainSupervisorEventResult[] {
+  return results.filter((result): result is BrainSupervisorEventResult => Boolean(result));
 }
 
 function errorMessage(error: unknown): string {
