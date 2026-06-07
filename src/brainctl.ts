@@ -3173,9 +3173,9 @@ function shellLiteral(value: string): string {
 
 async function setupInspectCommand(options: SetupInspectOptions): Promise<CliResult> {
   const details = await setupInspectDetails(options);
-  const remoteResumeProbe = details.resumeProbe?.target === "remote" && !details.setupState.present && !options.path;
+  const remoteResumeProbe = details.resumeProbe?.target === "remote" && !options.path;
   const ok = remoteResumeProbe || details.plan.missing_required.length === 0;
-  const summary = details.resumeProbe?.target === "remote" && !details.setupState.present
+  const summary = remoteResumeProbe
     ? "setup status inspected; prior remote setup context found; inspect remote progress before asking first-run questions"
     : ok ? `setup status inspected; resume from ${setupResumeWizard(details).nextIncompleteStep.title}` : "setup status inspected; required pieces are missing";
   return {
@@ -3207,7 +3207,7 @@ async function setupInspectDetails(options: SetupInspectOptions) {
   const transcription = setupTranscriptionStatus(workspace);
   const assistantWorkspace = await assistantWorkspaceParityStatus({ workspaceRoot, workspaceId: options.workspace });
   const serviceName = options.serviceName ?? `brain-${options.workspace}`;
-  const service = setupServiceStatus(serviceName);
+  const service = setupServiceStatus(serviceName, workspaceRoot);
   const plan = buildSetupPlan({
     config,
     workspace,
@@ -3541,7 +3541,8 @@ function setupResumeWizard(details: {
   const state = details.setupState?.state;
   const codexAuthUser = state?.statuses.codexAuth.runAsUser;
   const codexAuthVerifiedByState = codexAuthMatchesServiceUser(state?.statuses.codexAuth, details.serviceUser);
-  const serviceStarted = details.service?.active === true || state?.statuses.service.started === true;
+  const serviceActiveForWorkspace = details.service?.active === true && details.service.workspaceMatched !== false;
+  const serviceStarted = serviceActiveForWorkspace || state?.statuses.service.started === true;
   const serviceInstalled = details.service?.installed === true || state?.statuses.service.installed === true || serviceStarted;
   const steps = [
     {
@@ -3666,13 +3667,14 @@ function setupResumeWizard(details: {
   };
 }
 
-function setupServiceStatus(serviceName: string): {
+function setupServiceStatus(serviceName: string, workspaceRoot?: string): {
   serviceName: string;
   inspected: boolean;
   installed: boolean;
   enabled: boolean;
   active: boolean;
   source: string;
+  workspaceMatched?: boolean;
 } {
   const runSystemctl = (args: string[]) => spawnSync("systemctl", args, { encoding: "utf8" });
   const show = runSystemctl(["show", `${serviceName}.service`, "--property=LoadState", "--value"]);
@@ -3680,6 +3682,13 @@ function setupServiceStatus(serviceName: string): {
     return { serviceName, inspected: false, installed: false, enabled: false, active: false, source: "systemctl-unavailable" };
   }
   const loadState = String(show.stdout ?? "").trim();
+  const execStart = runSystemctl(["show", `${serviceName}.service`, "--property=ExecStart", "--value"]);
+  const execStartText = (execStart.status ?? 1) === 0 ? String(execStart.stdout ?? "").trim() : "";
+  const workspaceMatched = workspaceRoot && execStartText.includes(workspaceRoot)
+    ? true
+    : workspaceRoot && /(?:^|\s)(?:ExecStart=|\{|\w+=|\/)/.test(execStartText)
+      ? false
+      : undefined;
   const enabled = runSystemctl(["is-enabled", `${serviceName}.service`]);
   const active = runSystemctl(["is-active", `${serviceName}.service`]);
   return {
@@ -3689,6 +3698,7 @@ function setupServiceStatus(serviceName: string): {
     enabled: (enabled.status ?? 1) === 0,
     active: (active.status ?? 1) === 0,
     source: "systemctl",
+    workspaceMatched,
   };
 }
 
