@@ -38,9 +38,12 @@ pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" todo-delete.js -- 
 
 # By title match (deletes if exactly one match)
 pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" todo-delete.js -- --title "coffee"
+
+# By user-visible list number (maps internally; do not show td_* to the user)
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" todo-delete.js -- --number 2
 ```
 
-If `--title` matches multiple to-dos, the script exits with code 2 and lists the matches on stderr. Use `--id` to disambiguate.
+If `--title` matches multiple to-dos, the script exits with code 2 and lists the matches on stderr. Use `--id` internally to disambiguate, or `--number` for a user-visible numbered-list reference.
 
 ## Post-Mutation Rule
 

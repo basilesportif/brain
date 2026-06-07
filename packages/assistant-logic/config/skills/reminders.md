@@ -74,9 +74,12 @@ pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" reminder-delete.js
 
 # By title match (deletes if exactly one match)
 pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" reminder-delete.js -- --title "medicine"
+
+# By user-visible list number (maps internally; do not show rm_* to the user)
+pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" reminder-delete.js -- --number 2
 ```
 
-If `--title` matches multiple reminders, the script exits with code 2 and lists the matches on stderr. Use `--id` to disambiguate.
+If `--title` matches multiple reminders, the script exits with code 2 and lists the matches on stderr. Use `--id` internally to disambiguate, or `--number` for a user-visible numbered-list reference.
 
 ### Check due reminders (loop use)
 

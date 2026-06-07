@@ -5,12 +5,13 @@
  *
  * Flags:
  *   --id "rm_..."       delete by exact ID
- *   --title "TEXT"       delete by title match (confirm if ambiguous)
+ *   --title "TEXT"       delete by title match (confirm if ambiguous); "#2" maps to numbered list item 2
+ *   --number "2"         delete by current enabled-reminder list position
  *
  * Output: JSON to stdout, errors to stderr.
  * Exit 2 if title match is ambiguous (lists matches on stderr).
  */
-import { removeReminder, removeReminderByTitle } from "../lib/reminder-store.js";
+import { removeReminder, removeReminderByTitle, removeReminderByNumber } from "../lib/reminder-store.js";
 
 function parseArgs(argv) {
   const args = {};
@@ -19,6 +20,8 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (arg === "--id" && argv[i + 1]) {
       args.id = argv[++i];
+    } else if (arg === "--number" && argv[i + 1]) {
+      args.number = argv[++i];
     } else if (arg === "--title" && argv[i + 1]) {
       args.title = argv[++i];
     }
@@ -30,8 +33,8 @@ function parseArgs(argv) {
 function main() {
   const args = parseArgs(process.argv);
 
-  if (!args.id && !args.title) {
-    console.error('Usage: reminder-delete.js --id "rm_..." | --title "TEXT"');
+  if (!args.id && !args.title && !args.number) {
+    console.error('Usage: reminder-delete.js --id "rm_..." | --title "TEXT" | --number 2');
     process.exit(1);
   }
 
@@ -42,6 +45,12 @@ function main() {
       result = removeReminder(args.id);
       if (!result.found) {
         console.error(JSON.stringify({ error: `No reminder found with id: ${args.id}` }));
+        process.exit(1);
+      }
+    } else if (args.number) {
+      result = removeReminderByNumber(Number(args.number));
+      if (!result.found) {
+        console.error(JSON.stringify({ error: `No reminder found at number: ${args.number}` }));
         process.exit(1);
       }
     } else {

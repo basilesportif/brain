@@ -95,6 +95,8 @@ function removeReminder(id, options = {}) {
 }
 
 function removeReminderByTitle(titleQuery, options = {}) {
+  const numberRef = parseNumberReference(titleQuery);
+  if (numberRef !== undefined) return removeReminderByNumber(numberRef, options);
   const store = loadStore(options);
   const lowerQuery = titleQuery.toLowerCase();
   const matches = store.reminders.filter((r) =>
@@ -107,6 +109,26 @@ function removeReminderByTitle(titleQuery, options = {}) {
   store.reminders.splice(index, 1);
   saveStore(store, options);
   return { found: true, deleted: { id: target.id, title: target.title } };
+}
+
+function removeReminderByNumber(number, options = {}) {
+  const store = loadStore(options);
+  const enabled = store.reminders.filter((r) => r.enabled !== false);
+  const index = Number(number) - 1;
+  if (!Number.isInteger(index) || index < 0 || index >= enabled.length) return { found: false, matches: [] };
+  const target = enabled[index];
+  const storeIndex = store.reminders.findIndex((r) => r.id === target.id);
+  store.reminders.splice(storeIndex, 1);
+  saveStore(store, options);
+  return { found: true, deleted: { id: target.id, title: target.title } };
+}
+
+function parseNumberReference(value) {
+  const text = String(value || "").trim().toLowerCase();
+  const match = text.match(/^(?:#|number\s*)?(\d+)$/);
+  if (match) return Number(match[1]);
+  const words = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10 };
+  return words[text];
 }
 
 function listReminders({ enabled, query } = {}, options = {}) {
@@ -360,6 +382,7 @@ export {
   updateReminder,
   removeReminder,
   removeReminderByTitle,
+  removeReminderByNumber,
   listReminders,
   isDue,
   markTriggered,

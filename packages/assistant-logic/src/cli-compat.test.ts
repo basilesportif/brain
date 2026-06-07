@@ -39,6 +39,10 @@ test("native CLI surfaces preserve JSON stdout for todos/projects/CRM/reminders/
     assert.equal(deletedTodo.ok, true);
     const todosAfterDelete = parseStdout(runCli(workspace, "todo-list.js"));
     assert.equal(todosAfterDelete.count, 0);
+    parseStdout(runCli(workspace, "todo-add.js", ["--title", "First numbered"]));
+    parseStdout(runCli(workspace, "todo-add.js", ["--title", "Second numbered"]));
+    const deletedNumberedTodo = parseStdout(runCli(workspace, "todo-delete.js", ["--title", "#2"]));
+    assert.equal(deletedNumberedTodo.deleted.title, "Second numbered");
 
     const project = parseStdout(runCli(workspace, "project-add.js", ["--name", "Parity Project"]));
     assert.equal(project.ok, true);

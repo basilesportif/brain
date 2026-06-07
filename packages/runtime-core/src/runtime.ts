@@ -3,6 +3,7 @@ import type { WorkspaceConfig } from "@brain/workspace-schema";
 import { parseBrainDirectives } from "./directives.js";
 import type { ProviderAdapter, ProviderHealth, ProviderResumeHandle, ProviderSession, ProviderTurnEvent } from "./provider.js";
 import type { ActiveSubagentSnapshot, SubagentControlPort } from "./subagents.js";
+import { sanitizeUserFacingText } from "./user-facing-format.js";
 
 export interface RuntimeControlResult {
   action: BrainOutboundAction;
@@ -110,7 +111,7 @@ export class BrainRuntime {
       for (const action of block.actions) await this.collectRuntimeAction(event, action, actions, subagentJobIds, controlResults);
     }
     if (parsed.cleanText) {
-      actions.unshift(routeOutboundToOrigin(event, { type: "send_text", text: parsed.cleanText, format: "markdown" }));
+      actions.unshift(routeOutboundToOrigin(event, { type: "send_text", text: sanitizeUserFacingText(parsed.cleanText, { workspacePath: this.options.workspace.workspacePath }), format: "markdown" }));
     }
 
     return {
@@ -133,7 +134,10 @@ export class BrainRuntime {
     subagentJobIds: string[],
     controlResults: RuntimeControlResult[],
   ): Promise<BrainOutboundAction[]> {
-    const routed = routeOutboundToOrigin(event, action);
+    const sanitizedAction = action.type === "send_text"
+      ? { ...action, text: sanitizeUserFacingText(action.text, { workspacePath: this.options.workspace.workspacePath }) }
+      : action;
+    const routed = routeOutboundToOrigin(event, sanitizedAction);
     if (routed.type === "dispatch_subagent" && this.options.subagents) {
       const jobId = await this.options.subagents.dispatch({
         workspaceId: routed.workspaceId ?? event.workspaceId,
@@ -269,12 +273,14 @@ function behaviorParityInstructions(workspacePath: string): string[] {
     "Dispatch a subagent for repo/file inspection, code or docs edits, review, debugging, architecture, research, external/current-data lookup, calendar/email/Gmail lookup, finance/health/betting/account reads, ambiguous or multi-step work, generated images, and scratch web pages.",
     "For every dispatch_subagent action include summary, model, and effort. Use model gpt-5.5; effort medium for mechanical scoped edits and straightforward calendar event creation/adding with needed details and no external lookup; high for normal research/inspection/account lookup including calendar/email lookup and calendar creation requiring research/external-data lookup; and xhigh for risky ambiguous scheduling debugging architecture multi-step deploy-sensitive work.",
     "For user-facing main-loop work, include a short routing disclosure such as `main_loop: model=<configured-or-runtime-default> effort=<configured-or-runtime-default>` before the result, unless the message is only a terse service-command response.",
+    "User-facing formatting parity: never paste raw assistant-logic JSON stdout, createdAt/updatedAt timestamps, or internal todo/reminder IDs into Telegram/user replies. Use clean lists/summaries from command results; Brain also applies a final sanitizer as a safety net.",
     "The runtime sends visible dispatch feedback for each dispatched subagent with summary, profile, model, effort, id, and ref. Do not hide delegation from the user.",
     "Subagent stress/fan-out requests: when the user asks to stress test or fan out N subagents, dispatch N distinct bounded researcher jobs in one response, avoid duplicating the same file/topic in the same batch, and send a short user-visible note telling them to use `agents` to monitor progress.",
     "Subagent callbacks with an origin entrypoint are user-originated work: summarize completion/failure back to the user. If the main turn is silent, Brain will send a direct fallback result.",
     "Natural-language subagent steering: use the Active subagent jobs snapshot when present. Emit steer_subagent only when exactly one matching job has steerable=true; otherwise ask which job or tell the user to run `agent steer <ref> <text>`. Use service commands `agents`, `agents detail`, `agent status <ref>`, `agent kill <ref>`, and `agent steer <ref> <text>` for mechanical control/status.",
     "Before touching todos, projects, CRM, reminders, calendar/email, finance, health/Whoop, betting, messaging, generated web pages, or file-save, read the matching skill doc under packages/assistant-logic/config/skills and then any workspace overlay under instructions/skills. Follow the doc's command flags exactly.",
-    `Todos: direct main-loop operations only. For add/delete, run the mutation and then always run \`${wrapper} todo-list.js --\`; include the full updated numbered todo list in the same user reply and hide internal td_* IDs unless disambiguation requires them.`,
+    `Todos: direct main-loop operations only. For add/delete, run the mutation and then always run \`${wrapper} todo-list.js --\`; include the full updated numbered todo list in the same user reply and hide internal td_* IDs. For numeric deletes, pass \`--number N\` (or map #N to the internal ID) instead of treating the number as a title.`,
+    `Reminders: direct deterministic reminder operations may stay in the main loop; list reminders as clean numbered human-readable schedules, hide rm_* IDs in user replies, and use \`--number N\` for numbered delete references.`,
     `Projects/resources: direct deterministic project mutations/listing may stay in the main loop using project-*.js commands, including project-resource.js and project-task.js. For broader project investigation or repo/account lookup, dispatch a subagent.`,
     `CRM/reminders: deterministic JSON-backed mutations/listing can use crm-*.js and reminder-*.js through \`${wrapper}\`; calendar/email/Gmail/Composio live account lookup should dispatch a subagent that reads the relevant skill docs and uses configured private refs.`,
     "File-save/PDF attach: if exactly one inbound/replied attachment is the intended file, save it directly in the main loop with file-save.js, copy bytes into private document storage, record metadata (received_at, entrypoint/chat/message ids, original name, MIME, size, sha256 when available), and never commit or publish the private bytes.",

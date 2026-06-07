@@ -80,6 +80,8 @@ function deleteTodoById(id, options = {}) {
 }
 
 function deleteTodoByTitle(titleQuery, options = {}) {
+  const numberRef = parseNumberReference(titleQuery);
+  if (numberRef !== undefined) return deleteTodoByNumber(numberRef, options);
   const store = loadStore(options);
   const lowerQuery = titleQuery.toLowerCase();
   const matches = store.todos.filter((todo) =>
@@ -94,6 +96,23 @@ function deleteTodoByTitle(titleQuery, options = {}) {
   return { found: true, deleted: { id: target.id, title: target.title } };
 }
 
+function deleteTodoByNumber(number, options = {}) {
+  const index = Number(number) - 1;
+  const store = loadStore(options);
+  if (!Number.isInteger(index) || index < 0 || index >= store.todos.length) return { found: false, matches: [] };
+  const [removed] = store.todos.splice(index, 1);
+  saveStore(store, options);
+  return { found: true, deleted: { id: removed.id, title: removed.title } };
+}
+
+function parseNumberReference(value) {
+  const text = String(value || "").trim().toLowerCase();
+  const match = text.match(/^(?:#|number\s*)?(\d+)$/);
+  if (match) return Number(match[1]);
+  const words = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10 };
+  return words[text];
+}
+
 export {
   getTodoStore,
   loadStore,
@@ -102,5 +121,6 @@ export {
   listTodos,
   deleteTodoById,
   deleteTodoByTitle,
+  deleteTodoByNumber,
 
 };

@@ -756,10 +756,22 @@ test("brainctl scaffolds and reuses in-repo assistant-logic JSON workspace store
 
     const addTodo = spawnBrainctl(["workspace", "run", "--path", workspace, "todo-add.js", "--", "--title", "Buy coffee"]);
     assert.equal(addTodo.status, 0, addTodo.stderr);
+    const addTodoJson = JSON.parse(addTodo.stdout) as { details: { userFacingText?: string } };
+    assert.match(addTodoJson.details.userFacingText ?? "", /Added todo: Buy coffee/);
+    assert.match(addTodoJson.details.userFacingText ?? "", /Current todos:\n1\. Buy coffee/);
+    assert.doesNotMatch(addTodoJson.details.userFacingText ?? "", /td_|createdAt|updatedAt|\{/);
     const todoList = spawnBrainctl(["workspace", "run", "--path", workspace, "todo-list.js"]);
     assert.equal(todoList.status, 0, todoList.stderr);
-    const todoListJson = JSON.parse(todoList.stdout) as { details: { stdout: { todos: Array<{ title: string }> } } };
+    const todoListJson = JSON.parse(todoList.stdout) as { details: { stdout: { todos: Array<{ title: string }> }; userFacingText?: string } };
     assert.equal(todoListJson.details.stdout.todos[0]?.title, "Buy coffee");
+    assert.equal(todoListJson.details.userFacingText, "Current todos:\n1. Buy coffee");
+    assert.doesNotMatch(todoListJson.details.userFacingText ?? "", /td_|createdAt|updatedAt|\{/);
+    const deleteTodo = spawnBrainctl(["workspace", "run", "--path", workspace, "todo-delete.js", "--", "--number", "1"]);
+    assert.equal(deleteTodo.status, 0, deleteTodo.stderr);
+    const deleteTodoJson = JSON.parse(deleteTodo.stdout) as { details: { userFacingText?: string } };
+    assert.match(deleteTodoJson.details.userFacingText ?? "", /Removed todo: Buy coffee/);
+    assert.match(deleteTodoJson.details.userFacingText ?? "", /Current todos:\nNo todos\./);
+    assert.doesNotMatch(deleteTodoJson.details.userFacingText ?? "", /td_|createdAt|updatedAt|\{/);
 
     const addProject = spawnBrainctl(["workspace", "run", "--path", workspace, "project-add.js", "--", "--name", "Parity Project"]);
     assert.equal(addProject.status, 0, addProject.stderr);

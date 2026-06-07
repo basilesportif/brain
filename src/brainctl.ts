@@ -12,7 +12,7 @@ import YAML from "yaml";
 import { validateAssistantPack } from "@brain/assistant-pack-schema";
 import { FakeEntrypointAdapter } from "@brain/entrypoint-protocol";
 import { defaultBackupExclude, defaultBackupInclude, validateWorkspaceConfig, type BrainConfig, type EntrypointConfig, type TranscriptionConfig, type WorkspaceConfig } from "@brain/workspace-schema";
-import { AutomationRuntime, BrainRuntime, BrainSupervisor, EchoProviderAdapter, EmployeeLifecycle, FakeProviderAdapter, FileAutomationLockStore, FileAutomationSpool, FileEmployeeStore, FileSubagentJobStore, ProviderEmployeeRuntime, ProviderSubagentExecutor, RuntimeCommandInterceptor, RuntimeEntrypointBridge, StaticSubagentExecutor, SubagentLifecycle, createGuardedLiveValidationPlan, createOperationsPlan, parseBrainDirectives, renderSystemdService, type BrainSupervisorLogRecord, type OperationsPlan, type ProviderAdapter, type ProviderTurnEvent, type RuntimeLogEntry, type SubagentExecutor } from "@brain/runtime-core";
+import { AutomationRuntime, BrainRuntime, BrainSupervisor, EchoProviderAdapter, EmployeeLifecycle, FakeProviderAdapter, FileAutomationLockStore, FileAutomationSpool, FileEmployeeStore, FileSubagentJobStore, ProviderEmployeeRuntime, ProviderSubagentExecutor, RuntimeCommandInterceptor, RuntimeEntrypointBridge, StaticSubagentExecutor, SubagentLifecycle, createGuardedLiveValidationPlan, createOperationsPlan, formatAssistantCommandOutput, parseBrainDirectives, renderSystemdService, type BrainSupervisorLogRecord, type OperationsPlan, type ProviderAdapter, type ProviderTurnEvent, type RuntimeLogEntry, type SubagentExecutor } from "@brain/runtime-core";
 import { FileTelegramPairingStore, FileTelegramPollingStateStore, OpenAITelegramAttachmentTranscriber, TelegramBotApiClient, TelegramEntrypointAdapter, loadTelegramToken, type TelegramAttachmentTranscriber } from "@brain/entrypoint-telegram";
 import { createCodexProvider, type CodexTransportKind } from "@brain/provider-codex";
 import { createClaudeCodeProvider, type ClaudeCodeTransportKind } from "@brain/provider-claude-code";
@@ -1142,6 +1142,13 @@ async function workspaceRunCommand(script: string, scriptArgs: string[], options
   const stdout = String(result.stdout ?? "");
   const stderr = String(result.stderr ?? "");
   const parsedStdout = parseJsonOrString(stdout);
+  const userFacingText = formatAssistantCommandOutput({
+    script: resolved.script,
+    stdout: parsedStdout,
+    stderr,
+    ok: (result.status ?? 1) === 0,
+    workspacePath: workspaceRoot,
+  });
   return {
     ok: (result.status ?? 1) === 0,
     summary: (result.status ?? 1) === 0
@@ -1160,6 +1167,7 @@ async function workspaceRunCommand(script: string, scriptArgs: string[], options
       env: assistantWorkspaceEnv(workspaceRoot),
       exitCode: result.status,
       stdout: parsedStdout,
+      userFacingText,
       stderr: String(redactSecrets(stderr)),
       sideEffects: resolved.kind === "native"
         ? "native assistant-logic CLI controlled the JSON workspace state"
