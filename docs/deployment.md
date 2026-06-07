@@ -1,6 +1,15 @@
 # Deployment planning
 
-No live deployment is executed by this repository by default. Brain now includes non-mutating operations seams that render the commands and unit files an operator can review before installing anything.
+No live deployment is executed by this repository by default. Brain is the
+control plane for reviewed setup/deploy planning. The production servant runtime
+is `codex-chat`; `assistant-agent-logic` and `assistant-agent-data` stay as
+separate repositories/workspaces. Brain's own runtime service remains
+experimental/lab until deliberately promoted.
+
+`brainctl stack status` and `brainctl stack plan` are the current source of truth
+for control-plane stack resolution. They read repo-registry metadata plus
+ignored setup context, render no-network plans, and refuse repo-boundary
+violations before any future executor can act.
 
 
 ## Canonical setup UX
@@ -47,6 +56,14 @@ commands should use the non-root `brain` service user, with source checkout
 
 The repository now has CLI seams for deployment automation, but they remain non-deploying by default:
 
+- `brainctl stack status` resolves the `codex-chat` servant runtime,
+  `assistant-agent-logic`, `assistant-agent-data`/workspace, deploy host, SSH
+  identity, service/env/config paths, and health checks from repo registry and
+  setup context without contacting hosts.
+- `brainctl stack plan` renders the no-network servant stack flow: clone/update
+  separate repos, prompt/validate assistant data, render `codex-chat`
+  config/env, plan service install/start, and plan health checks. It does not
+  execute SSH, git, systemd, or secret reads.
 - `brainctl start` prints a dry-run supervisor plan unless `--foreground` is supplied.
 - `brainctl health` inspects config/state/log readiness without starting live providers or Telegram.
 - `brainctl logs` tails Brain JSONL logs with redaction.

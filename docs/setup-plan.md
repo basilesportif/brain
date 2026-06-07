@@ -1,21 +1,21 @@
 # Guided setup plan
 
-Goal: a user can clone/open this repo root with Codex or Claude Code, say
-`setup`, and the agent can guide a first local or remote bootstrap without
-access to the maintainer's private workspace, integrations, credentials, or
-hosts.
+Goal: Brain acts as the control-plane/setup orchestrator. A user can
+clone/open this repo root with Codex or Claude Code, say `setup`, and the agent
+can guide a first local or remote bootstrap for the servant runtime stack
+without access to the maintainer's private workspace, integrations,
+credentials, or hosts.
 
-Status: guided setup documentation. `brainctl`, runtime packages, provider
-adapters, Telegram entrypoint seams, and non-mutating operations planning exist.
-Setup should prepare and validate a local or remote workspace, then guide the
-user through a concise core flow: Brain assistant-logic JSON workspace scaffold,
-Telegram connection, private data/backup repo pull or initialization, Composio
-account connection if needed, and other essential runtime choices. Codex auth
-is verified before service start or live Telegram traffic. First-user pairing,
-OpenAI transcription, web publishing, and backup policy tuning are follow-up
-steps unless the user explicitly asks to do them during initial setup. Setup
-still stops before credentials, privileged service changes, or live deployment
-unless the user explicitly confirms.
+Status: guided setup documentation. `brainctl stack status` and
+`brainctl stack plan` now establish Brain's control-plane source of truth:
+`codex-chat` is the servant Telegram/Codex runtime, `assistant-agent-logic` is a
+separate logic repository, and `assistant-agent-data` / workspace is separate
+private state. Brain runtime packages, provider adapters, and Telegram
+entrypoint seams are lab/compatibility surfaces until explicitly promoted.
+Setup should prepare and validate repo-registry metadata, servant runtime
+service paths, and private workspace/data choices, then stop before
+credentials, privileged service changes, or live deployment unless the user
+explicitly confirms.
 
 Setup is intentionally re-runnable. At any time, `brainctl setup inspect` or
 `brainctl setup status` should show configured, missing required, missing
@@ -57,9 +57,11 @@ or "start the service" unless the complete command is included immediately.
 Ask confirmation questions in plain English and accept ordinary yes/no answers;
 do not require exact reply text unless the user must run a command verbatim.
 
-Initial setup must create an inspectable JSON-backed assistant workspace before
-live traffic. The Brain source of truth uses the in-repo
-`packages/assistant-logic` native TypeScript stores and CLI commands:
+Initial setup must create or validate an inspectable assistant workspace before
+live traffic. The control-plane source of truth is the separate
+`assistant-agent-data` workspace and separate `assistant-agent-logic` repo
+resolved from repo-registry metadata. The legacy/lab in-repo
+`packages/assistant-logic` stores and CLI commands remain compatibility helpers:
 `data/todos.json`, `data/projects.json`, `data/crm.json`,
 `data/reminders.json`, `private/documents/metadata.jsonl`,
 `instructions/skills/`, `instructions/prompts/`, `tasks/`, and selected
@@ -75,9 +77,11 @@ boundary is the dedicated service user plus private workspace path, not a
 per-turn approval prompt. This lets questions like "do I have projects?" inspect
 the JSON stores through native assistant-logic CLI commands instead of answering from
 active entrypoint metadata or markdown folders alone.
-Ask whether the user wants to initialize or connect a private Git backup for
-this personal workspace memory; never commit secrets, logs, Telegram IDs,
-transcripts, or provider session material.
+Ask whether the user wants to initialize, pull, or validate the
+`assistant-agent-data` private workspace/repo; never commit secrets, logs,
+Telegram IDs, transcripts, or provider session material. Do not auto-migrate
+legacy private data in the first control-plane implementation; render a
+placeholder/prompt and require an explicit migration plan.
 
 If the wizard needs a clean resume state, run:
 
@@ -108,7 +112,8 @@ change directories into `setup/`.
    for permission or missing SSH details needed to run the reported remote
    metadata check, then resume from the next incomplete step.
 5. For remote Ubuntu preparation, use the Brain-owned deployment/self-hosting
-   docs in this repo. Do not require an external assistant-agent-logic checkout.
+   docs in this repo, then use repo-registry metadata to resolve the separate
+   `assistant-agent-logic` checkout required by the servant stack.
 6. Run `pnpm run check` before and after setup or documentation changes.
 7. Ask before touching any real remote host, local SSH config, systemd unit,
    secret file, or credential.

@@ -1,6 +1,9 @@
 # apps
 
-Durable runtime applications live here when they are not channel entrypoints or provider implementation details.
+Lab runtime applications live here when they are not channel entrypoints or
+provider implementation details. Production servant runtime deployment is
+currently planned through the separate `codex-chat` repo, not through apps in
+Brain.
 
 Planned app placeholders:
 

@@ -214,6 +214,24 @@ operations.command("validate")
   .option("--repo <path>", "deployment checkout path", process.cwd())
   .action(async (options) => exitWith(await operationsValidateCommand(options)));
 
+const stack = program.command("stack").description("Control-plane inspection and no-network plans for the servant runtime stack");
+stack.command("status")
+  .description("Resolve codex-chat, assistant-agent-logic, assistant-agent-data/workspace, and service metadata from the repo registry without contacting hosts.")
+  .option("--registry <path>", "repo-registry index.yaml path")
+  .option("--repo <path>", "Brain control-plane checkout path used to find ignored setup context", process.cwd())
+  .option("--setup-context <path>", "explicit setup-context.json path")
+  .option("--workspace <id>", "workspace id", DEFAULT_WORKSPACE_ID)
+  .option("--environment <name>", "codex-chat app environment", "production")
+  .action(async (options) => exitWith(await stackStatusCommand(options)));
+stack.command("plan")
+  .description("Render a no-network setup/deploy plan for codex-chat + assistant-agent-logic + assistant-agent-data.")
+  .option("--registry <path>", "repo-registry index.yaml path")
+  .option("--repo <path>", "Brain control-plane checkout path used to find ignored setup context", process.cwd())
+  .option("--setup-context <path>", "explicit setup-context.json path")
+  .option("--workspace <id>", "workspace id", DEFAULT_WORKSPACE_ID)
+  .option("--environment <name>", "codex-chat app environment", "production")
+  .action(async (options) => exitWith(await stackPlanCommand(options)));
+
 const web = program.command("web").description("Generated static web page validation and publisher commands");
 web.command("setup")
   .description("Render a safe web publishing setup plan for domain or direct-IP publishing without DNS/proxy changes.")
@@ -787,6 +805,579 @@ function operationsPlan(options: OperationsCommandOptions, runtime?: ResolvedSup
     providerKind: runtime?.providerKind,
     entrypointKind: runtime?.entrypointKind,
   });
+}
+
+interface StackCommandOptions {
+  registry?: string;
+  repo?: string;
+  setupContext?: string;
+  workspace: string;
+  environment: string;
+}
+
+interface RepoRegistryIndex {
+  version?: unknown;
+  controller_root?: unknown;
+  repos?: Record<string, RepoRegistryRepo>;
+}
+
+interface RepoRegistryRepo {
+  alias?: unknown;
+  host?: unknown;
+  path?: unknown;
+  repo_name?: unknown;
+  default_branch?: unknown;
+  current_branch?: unknown;
+  remote_url?: unknown;
+  deploy_host?: unknown;
+  deploy_path?: unknown;
+  apps?: unknown;
+  ops?: unknown;
+}
+
+interface StackRepoResolution {
+  role: "control-plane" | "servant-runtime" | "assistant-logic" | "assistant-data";
+  alias: string;
+  repoName: string;
+  host: string;
+  path: string;
+  branch?: string;
+  remoteUrl?: string;
+  source: string;
+  registryKey?: string;
+  present: boolean;
+}
+
+interface StackStatusDetails {
+  role: string;
+  dryRun: true;
+  networkAccess: false;
+  sideEffects: "none";
+  secretValuesPrinted: false;
+  registry: {
+    path: string;
+    present: boolean;
+    version?: unknown;
+    controllerRoot?: string;
+    issues: string[];
+  };
+  setupContext: Awaited<ReturnType<typeof readStackSetupContext>>;
+  controlPlane: StackRepoResolution;
+  servantRuntime: StackRepoResolution & {
+    appEnvironment: string;
+    deploy: {
+      host?: string;
+      path?: string;
+      sshIdentity?: string;
+      runtimeUser?: string;
+      serviceName?: string;
+      envFile?: string;
+      configPath?: string;
+      envVars: string[];
+      healthChecks: Array<{ kind: string; command: string }>;
+    };
+  };
+  assistantLogic: StackRepoResolution;
+  assistantData: StackRepoResolution & {
+    workspacePath?: string;
+    promptRequired: boolean;
+    migrationPlaceholder: string;
+  };
+  servicePaths: {
+    deployHost?: string;
+    sshIdentity?: string;
+    deployPath?: string;
+    serviceName?: string;
+    envFile?: string;
+    configPath?: string;
+    setupContextConfigPath?: string;
+  };
+  secretMetadataChecks: Array<Record<string, unknown>>;
+  repoBoundaries: ReturnType<typeof analyzeStackRepoBoundaries>;
+  missing: string[];
+}
+
+const DEFAULT_REPO_REGISTRY_INDEX = "/home/tim/.assistant-claude/workspace/.claude/repo-registry/index.yaml";
+const STACK_REQUIRED_ALIASES = {
+  codexChat: ["codex-chat"],
+  assistantLogic: ["assistant-agent-logic", "assistant-claude"],
+  assistantData: ["assistant-agent-data", "assistant-data"],
+} as const;
+
+async function stackStatusCommand(options: StackCommandOptions): Promise<CliResult> {
+  const status = await resolveStackStatus(options);
+  return {
+    ok: status.missing.length === 0 && status.repoBoundaries.ok,
+    summary: status.missing.length === 0 && status.repoBoundaries.ok
+      ? "servant runtime stack resolved from repo registry without network side effects"
+      : "servant runtime stack resolution needs attention before planning",
+    details: status,
+  };
+}
+
+async function stackPlanCommand(options: StackCommandOptions): Promise<CliResult> {
+  const status = await resolveStackStatus(options);
+  const plan = renderStackNoNetworkPlan(status);
+  return {
+    ok: status.missing.length === 0 && status.repoBoundaries.ok,
+    summary: status.missing.length === 0 && status.repoBoundaries.ok
+      ? "servant runtime setup/deploy plan rendered without network or mutation"
+      : "servant runtime setup/deploy plan rendered with unresolved prerequisites",
+    details: {
+      status,
+      plan,
+      dryRun: true,
+      networkAccess: false,
+      sideEffects: "none",
+      secretValuesPrinted: false,
+    },
+  };
+}
+
+async function resolveStackStatus(options: StackCommandOptions): Promise<StackStatusDetails> {
+  const repoRoot = path.resolve(options.repo ?? process.cwd());
+  const registryPath = path.resolve(options.registry ?? process.env.BRAIN_REPO_REGISTRY ?? DEFAULT_REPO_REGISTRY_INDEX);
+  const registry = await loadRepoRegistry(registryPath);
+  const setupContext = await readStackSetupContext(options.setupContext ? path.resolve(options.setupContext) : localSetupContextPath(repoRoot), options.workspace);
+  const codexChat = findRegistryRepo(registry.index, STACK_REQUIRED_ALIASES.codexChat, "codex-chat");
+  const assistantLogic = findRegistryRepo(registry.index, STACK_REQUIRED_ALIASES.assistantLogic, "assistant-agent-logic");
+  const assistantData = findRegistryRepo(registry.index, STACK_REQUIRED_ALIASES.assistantData, "assistant-agent-data");
+  const codexEnvironment = codexChat.repo ? registryAppEnvironment(codexChat.repo, "codex-chat", options.environment) : undefined;
+  const codexDeploy = asRecord(codexEnvironment?.environment?.deploy);
+  const codexSource = asRecord(codexEnvironment?.environment?.source);
+  const deployHost = asString(codexDeploy?.host) ?? asString(codexChat.repo?.deploy_host) ?? setupContext.context?.sshHost;
+  const deployPath = asString(codexDeploy?.path) ?? asString(codexChat.repo?.deploy_path) ?? asString(codexChat.repo?.path);
+  const runtimeUser = asString(codexDeploy?.runtime_user);
+  const sshIdentity = asString(codexDeploy?.ssh_identity) ?? sshIdentityFromHost(deployHost, runtimeUser) ?? sshIdentityFromSetupContext(setupContext.context);
+  const serviceName = asString(codexDeploy?.service);
+  const envFile = asString(codexDeploy?.env_file);
+  const configPath = asString(codexDeploy?.config_path) ?? asString(codexDeploy?.config);
+  const envVars = asStringArray(codexDeploy?.env_vars);
+  const healthChecks = readStackHealthChecks(codexEnvironment?.environment);
+  const controlPlane = stackRepoFromLocalBrain(repoRoot);
+  const servantRuntime = {
+    ...stackRepoFromRegistry("servant-runtime" as const, codexChat, codexSource),
+    appEnvironment: codexEnvironment?.name ?? options.environment,
+    deploy: {
+      host: deployHost,
+      path: deployPath,
+      sshIdentity,
+      runtimeUser,
+      serviceName,
+      envFile,
+      configPath,
+      envVars,
+      healthChecks,
+    },
+  };
+  const assistantLogicResolution = stackRepoFromRegistry("assistant-logic" as const, assistantLogic);
+  const assistantDataResolution = {
+    ...stackRepoFromRegistry("assistant-data" as const, assistantData),
+    workspacePath: asString(assistantData.repo?.path),
+    promptRequired: true,
+    migrationPlaceholder: "Prompt the operator to confirm/pull/init the assistant-agent-data workspace; do not auto-migrate private data in this phase.",
+  };
+  const servicePaths = {
+    deployHost,
+    sshIdentity,
+    deployPath,
+    serviceName,
+    envFile,
+    configPath,
+    setupContextConfigPath: setupContext.context?.configPath,
+  };
+  const secretMetadataChecks = stackSecretMetadataChecks(envVars, envFile, sshIdentity);
+  const repoBoundaries = analyzeStackRepoBoundaries([controlPlane, servantRuntime, assistantLogicResolution, assistantDataResolution]);
+  const missing = [
+    ...registry.issues,
+    ...(!codexChat.repo ? ["repo registry entry missing: codex-chat"] : []),
+    ...(!assistantLogic.repo ? ["repo registry entry missing: assistant-agent-logic (or assistant-claude alias)"] : []),
+    ...(!assistantData.repo ? ["repo registry entry missing: assistant-agent-data"] : []),
+    ...(!deployHost ? ["codex-chat deploy host missing from registry/setup context"] : []),
+    ...(!deployPath ? ["codex-chat deploy path missing from registry"] : []),
+    ...(!serviceName ? ["codex-chat service name missing from registry"] : []),
+    ...(!envFile ? ["codex-chat env file path missing from registry"] : []),
+    ...repoBoundaries.issues,
+  ];
+
+  return {
+    role: "Brain control plane manages the codex-chat servant runtime stack; Brain's own runtime remains experimental/lab.",
+    dryRun: true,
+    networkAccess: false,
+    sideEffects: "none",
+    secretValuesPrinted: false,
+    registry: {
+      path: registry.path,
+      present: registry.present,
+      version: registry.index?.version,
+      controllerRoot: asString(registry.index?.controller_root),
+      issues: registry.issues,
+    },
+    setupContext,
+    controlPlane,
+    servantRuntime,
+    assistantLogic: assistantLogicResolution,
+    assistantData: assistantDataResolution,
+    servicePaths,
+    secretMetadataChecks,
+    repoBoundaries,
+    missing,
+  };
+}
+
+async function loadRepoRegistry(registryPath: string): Promise<{ path: string; present: boolean; index?: RepoRegistryIndex; issues: string[] }> {
+  try {
+    const raw = await readFile(registryPath, "utf8");
+    const parsed = YAML.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { path: registryPath, present: true, issues: ["repo registry index is not an object"] };
+    }
+    const index = parsed as RepoRegistryIndex;
+    if (!index.repos || typeof index.repos !== "object" || Array.isArray(index.repos)) {
+      return { path: registryPath, present: true, index, issues: ["repo registry index has no repos map"] };
+    }
+    return { path: registryPath, present: true, index, issues: [] };
+  } catch (error) {
+    return { path: registryPath, present: false, issues: [`repo registry index could not be read: ${errorMessage(error)}`] };
+  }
+}
+
+async function readStackSetupContext(contextPath: string, workspace: string): Promise<{ present: boolean; path: string; context?: LocalSetupContext; warning?: string; note?: string; metadata?: Awaited<ReturnType<typeof fileMetadata>> }> {
+  const metadata = await fileMetadata(contextPath);
+  if (!metadata.present) return { present: false, path: contextPath, metadata, note: "no setup context found; registry deploy metadata remains authoritative" };
+  try {
+    const parsed = JSON.parse(await readFile(contextPath, "utf8")) as Partial<LocalSetupContext>;
+    if (parsed.version !== 1 || (parsed.target !== "local" && parsed.target !== "remote") || typeof parsed.workspaceRoot !== "string") {
+      return { present: true, path: contextPath, metadata, warning: "setup context is invalid or unsupported" };
+    }
+    if ((parsed.workspace ?? workspace) !== workspace) {
+      return { present: true, path: contextPath, metadata, warning: `setup context is for workspace ${parsed.workspace}, not ${workspace}` };
+    }
+    return {
+      present: true,
+      path: contextPath,
+      metadata,
+      context: {
+        version: 1,
+        target: parsed.target,
+        workspace,
+        workspaceRoot: parsed.workspaceRoot,
+        updatedAt: parsed.updatedAt,
+        sshHost: parsed.sshHost,
+        sshUser: parsed.sshUser,
+        serviceUser: parsed.serviceUser,
+        bootstrapSshUser: parsed.bootstrapSshUser,
+        repoPath: parsed.repoPath,
+        configPath: parsed.configPath,
+        secretValuesStored: false,
+      },
+    };
+  } catch (error) {
+    return { present: true, path: contextPath, metadata, warning: `could not parse setup context: ${errorMessage(error)}` };
+  }
+}
+
+function findRegistryRepo(index: RepoRegistryIndex | undefined, aliases: readonly string[], repoName: string): { key?: string; repo?: RepoRegistryRepo } {
+  const repos = index?.repos;
+  if (!repos) return {};
+  for (const alias of aliases) {
+    const repo = repos[alias];
+    if (repo) return { key: alias, repo };
+  }
+  for (const [key, repo] of Object.entries(repos)) {
+    if (asString(repo.repo_name) === repoName || aliases.includes(asString(repo.alias) ?? "")) return { key, repo };
+  }
+  return {};
+}
+
+function stackRepoFromLocalBrain(repoRoot: string): StackRepoResolution {
+  return {
+    role: "control-plane",
+    alias: "brain",
+    repoName: "brain",
+    host: "local",
+    path: repoRoot,
+    source: "current checkout",
+    present: true,
+  };
+}
+
+function stackRepoFromRegistry<R extends StackRepoResolution["role"]>(role: R, resolved: { key?: string; repo?: RepoRegistryRepo }, sourceOverride?: Record<string, unknown>): StackRepoResolution {
+  const repo = resolved.repo;
+  const opsSource = asRecord(asRecord(asRecord(repo?.ops)?.repository)?.source);
+  const host = asString(sourceOverride?.host) ?? asString(opsSource?.host) ?? asString(repo?.host) ?? "missing";
+  const repoPath = asString(sourceOverride?.path) ?? asString(opsSource?.path) ?? asString(repo?.path) ?? "missing";
+  const branch = asString(sourceOverride?.branch) ?? asString(opsSource?.branch) ?? asString(repo?.current_branch) ?? asString(repo?.default_branch);
+  const remoteUrl = redactRemoteUrl(asString(sourceOverride?.remote_url) ?? asString(opsSource?.remote_url) ?? asString(repo?.remote_url) ?? "");
+  return {
+    role,
+    alias: asString(repo?.alias) ?? resolved.key ?? "missing",
+    repoName: asString(repo?.repo_name) ?? resolved.key ?? "missing",
+    host,
+    path: repoPath,
+    branch,
+    remoteUrl: remoteUrl || undefined,
+    source: resolved.repo ? "repo-registry" : "missing",
+    registryKey: resolved.key,
+    present: Boolean(resolved.repo),
+  };
+}
+
+function registryAppEnvironment(repo: RepoRegistryRepo, appName: string, environment: string): { name: string; app?: Record<string, unknown>; environment?: Record<string, unknown> } | undefined {
+  const apps = asRecord(repo.apps);
+  const app = asRecord(apps?.[appName]) ?? Object.values(apps ?? {}).map(asRecord).find(Boolean);
+  const environments = asRecord(app?.environments);
+  const env = asRecord(environments?.[environment]) ?? Object.values(environments ?? {}).map(asRecord).find(Boolean);
+  const envName = asRecord(environments?.[environment]) ? environment : Object.keys(environments ?? {})[0] ?? environment;
+  return app || env ? { name: envName, app, environment: env } : undefined;
+}
+
+function readStackHealthChecks(environment: Record<string, unknown> | undefined): Array<{ kind: string; command: string }> {
+  const checks = Array.isArray(environment?.health_checks) ? environment.health_checks : [];
+  return checks.flatMap((check) => {
+    const record = asRecord(check);
+    const command = asString(record?.command);
+    if (!command) return [];
+    return [{ kind: asString(record?.kind) ?? "command", command }];
+  });
+}
+
+function stackSecretMetadataChecks(envVars: string[], envFile: string | undefined, sshIdentity: string | undefined): Array<Record<string, unknown>> {
+  if (!envFile && envVars.length === 0) return [];
+  return [
+    ...(envFile ? [{
+      source: "codex-chat.env_file",
+      kind: "file",
+      path: envFile,
+      metadataOnly: true,
+      value: "redacted",
+      plannedCheck: remotePlanCommand(sshIdentity, `test -r ${shellPathArg(envFile)} && stat -c '%a %U %s' ${shellPathArg(envFile)}`),
+    }] : []),
+    ...envVars.map((name) => ({
+      source: "codex-chat.env_vars",
+      kind: "env",
+      name,
+      metadataOnly: true,
+      value: "redacted",
+      plannedCheck: envFile
+        ? remotePlanCommand(sshIdentity, `grep -qE '^${escapeShellRegex(name)}=' ${shellPathArg(envFile)}`)
+        : "pending env file selection; check presence without printing values",
+    })),
+  ];
+}
+
+function renderStackNoNetworkPlan(status: StackStatusDetails) {
+  const servant = status.servantRuntime;
+  const logic = status.assistantLogic;
+  const data = status.assistantData;
+  const deploy = servant.deploy;
+  const sourceIdentity = sshIdentityFromHost(servant.host, undefined);
+  const deployIdentity = deploy.sshIdentity;
+  const serviceName = deploy.serviceName ?? "codex-chat.service";
+  return {
+    goal: "Deploy/manage the codex-chat servant runtime stack from Brain as a control-plane orchestrator while keeping repositories separate.",
+    mode: "dry-run/no-network",
+    steps: [
+      {
+        id: "resolve-repo-registry",
+        title: "Resolve registry and setup context.",
+        status: status.missing.length === 0 ? "ready" : "needs-attention",
+        inputs: [status.registry.path, status.setupContext.path],
+        sideEffects: "none",
+        commandsExecuted: [],
+      },
+      {
+        id: "repo-boundary-preflight",
+        title: "Assert repo boundaries before any setup/deploy work.",
+        status: status.repoBoundaries.ok ? "ready" : "blocked",
+        policy: status.repoBoundaries.policy,
+        issues: status.repoBoundaries.issues,
+        sideEffects: "none",
+      },
+      {
+        id: "clone-update-codex-chat",
+        title: "Clone or update codex-chat servant runtime checkout.",
+        target: { host: servant.host, path: servant.path, deployHost: deploy.host, deployPath: deploy.path, branch: servant.branch, remoteUrl: servant.remoteUrl },
+        commands: [
+          renderGitCloneOrUpdateCommand({ hostIdentity: sourceIdentity, path: servant.path, remoteUrl: servant.remoteUrl, branch: servant.branch }),
+          deploy.path && deploy.path !== servant.path
+            ? renderGitCloneOrUpdateCommand({ hostIdentity: deployIdentity, path: deploy.path, remoteUrl: servant.remoteUrl, branch: servant.branch })
+            : undefined,
+        ].filter(isString),
+        sideEffectsIfExecuted: "would clone/fetch/pull codex-chat only; not executed by this command",
+      },
+      {
+        id: "clone-update-assistant-agent-logic",
+        title: "Clone or update assistant-agent-logic as a separate repository.",
+        target: { host: logic.host, path: logic.path, branch: logic.branch, remoteUrl: logic.remoteUrl },
+        commands: [
+          renderGitCloneOrUpdateCommand({ hostIdentity: sshIdentityFromHost(logic.host, undefined), path: logic.path, remoteUrl: logic.remoteUrl, branch: logic.branch }),
+        ],
+        boundary: "Do not vendor, copy, subtree, or merge assistant-agent-logic into Brain or codex-chat.",
+        sideEffectsIfExecuted: "would clone/fetch/pull assistant-agent-logic only; not executed by this command",
+      },
+      {
+        id: "assistant-data-workspace",
+        title: "Prompt and validate assistant-agent-data/private workspace.",
+        target: { host: data.host, path: data.path, branch: data.branch, remoteUrl: data.remoteUrl },
+        prompts: [
+          "Confirm the assistant-agent-data repository/workspace path and remote before relying on private memory.",
+          "Choose pull existing private repo, initialize new private repo, or validate current workspace metadata.",
+          "If legacy private data exists elsewhere, create an explicit migration plan; this phase does not auto-migrate or print private filenames/values.",
+        ],
+        validationPlaceholders: [
+          "Check .git presence, branch, and remote metadata only.",
+          "Check expected workspace directories/stores by metadata only.",
+          "Check secret/env files by existence/mode/size only; never cat or echo values.",
+        ],
+        migrationPlaceholder: data.migrationPlaceholder,
+        sideEffectsIfExecuted: "operator-approved private data pull/init/validation only; not executed by this command",
+      },
+      {
+        id: "render-codex-chat-config-env",
+        title: "Render codex-chat service config/env from registry and setup context.",
+        target: { envFile: deploy.envFile, configPath: deploy.configPath ?? status.servicePaths.setupContextConfigPath },
+        envVars: deploy.envVars.map((name) => ({ name, value: "redacted", metadataOnly: true })),
+        secretMetadataChecks: status.secretMetadataChecks,
+        templates: [
+          "codex-chat service env template with secret placeholders only",
+          "codex-chat runtime config template/path binding when configured",
+        ],
+        sideEffectsIfExecuted: "would write private env/config files only after explicit operator confirmation; not executed by this command",
+      },
+      {
+        id: "install-start-codex-chat-service",
+        title: "Install, enable, and start the codex-chat servant service.",
+        target: { host: deploy.host, sshIdentity: deployIdentity, path: deploy.path, serviceName, runtimeUser: deploy.runtimeUser },
+        commands: [
+          remotePlanCommand(deployIdentity, `cd ${shellPathArg(deploy.path ?? servant.path)} && pnpm install --frozen-lockfile && pnpm run build`),
+          remotePlanCommand(deployIdentity, `sudo systemctl daemon-reload && sudo systemctl enable --now ${shellArg(serviceName)}`),
+          remotePlanCommand(deployIdentity, `systemctl is-active ${shellArg(serviceName)} --quiet`),
+        ],
+        sideEffectsIfExecuted: "would install dependencies/build and start systemd service; not executed by this command",
+      },
+      {
+        id: "health-check-codex-chat",
+        title: "Run codex-chat servant runtime health checks.",
+        target: { host: deploy.host, sshIdentity: deployIdentity, serviceName },
+        commands: deploy.healthChecks.length > 0
+          ? deploy.healthChecks.map((check) => remotePlanCommand(deployIdentity, check.command))
+          : [remotePlanCommand(deployIdentity, `systemctl status ${shellArg(serviceName)} --no-pager`)],
+        sideEffectsIfExecuted: "health/readiness checks only; not executed by this command",
+      },
+    ],
+    forbidden: [
+      "Do not deploy or mutate remote servers from stack status/plan.",
+      "Do not vendor or merge codex-chat, assistant-agent-logic, or assistant-agent-data into Brain.",
+      "Do not print secret values; inspect env/secret files by metadata only.",
+    ],
+  };
+}
+
+function analyzeStackRepoBoundaries(repos: Array<Pick<StackRepoResolution, "role" | "host" | "path" | "present">>) {
+  const issues: string[] = [];
+  const present = repos.filter((repo) => repo.present);
+  for (let i = 0; i < present.length; i += 1) {
+    for (let j = i + 1; j < present.length; j += 1) {
+      const a = present[i]!;
+      const b = present[j]!;
+      if (!sameRegistryHost(a.host, b.host)) continue;
+      const relation = registryPathRelation(a.path, b.path);
+      if (relation === "same") {
+        issues.push(`${a.role} and ${b.role} resolve to the same checkout path on ${a.host}: ${a.path}`);
+      } else if (relation === "a-in-b") {
+        issues.push(`${a.role} path is nested inside ${b.role} on ${a.host}: ${a.path}`);
+      } else if (relation === "b-in-a") {
+        issues.push(`${b.role} path is nested inside ${a.role} on ${a.host}: ${b.path}`);
+      }
+    }
+  }
+  return {
+    ok: issues.length === 0,
+    issues,
+    policy: [
+      "Brain is the control-plane/setup orchestrator.",
+      "codex-chat is the servant runtime checkout.",
+      "assistant-agent-logic remains a separate logic repository.",
+      "assistant-agent-data/workspace remains a separate private data repository/workspace.",
+      "Registry links/metadata are references, not vendored source.",
+    ],
+  };
+}
+
+function registryPathRelation(aPath: string, bPath: string): "same" | "a-in-b" | "b-in-a" | "separate" {
+  const a = normalizeRegistryPath(aPath);
+  const b = normalizeRegistryPath(bPath);
+  if (!a || !b || a === "missing" || b === "missing") return "separate";
+  if (a === b) return "same";
+  const aInB = a.startsWith(`${b.endsWith("/") ? b : `${b}/`}`);
+  const bInA = b.startsWith(`${a.endsWith("/") ? a : `${a}/`}`);
+  if (aInB) return "a-in-b";
+  if (bInA) return "b-in-a";
+  return "separate";
+}
+
+function normalizeRegistryPath(value: string): string {
+  if (!value) return "";
+  const normalized = value.startsWith("~/") ? `/~/${value.slice(2)}` : value;
+  return path.posix.normalize(normalized.replaceAll("\\", "/"));
+}
+
+function sameRegistryHost(a: string, b: string): boolean {
+  return normalizeRegistryHost(a) === normalizeRegistryHost(b);
+}
+
+function normalizeRegistryHost(value: string): string {
+  return !value || value === "local" ? "local" : value;
+}
+
+function renderGitCloneOrUpdateCommand(input: { hostIdentity?: string; path: string; remoteUrl?: string; branch?: string }): string {
+  const branch = input.branch ?? "main";
+  const command = input.remoteUrl
+    ? `if [ -d ${shellPathArg(`${input.path}/.git`)} ]; then git -C ${shellPathArg(input.path)} fetch --prune origin && git -C ${shellPathArg(input.path)} checkout ${shellArg(branch)} && git -C ${shellPathArg(input.path)} pull --ff-only; else git clone --branch ${shellArg(branch)} ${shellArg(input.remoteUrl)} ${shellPathArg(input.path)}; fi`
+    : `test -d ${shellPathArg(input.path)} && git -C ${shellPathArg(input.path)} status --short --branch`;
+  return remotePlanCommand(input.hostIdentity, command);
+}
+
+function remotePlanCommand(identity: string | undefined, command: string): string {
+  return identity ? `ssh ${shellArg(identity)} ${shellArg(command)}` : command;
+}
+
+function shellPathArg(value: string): string {
+  if (value === "~") return "\"$HOME\"";
+  if (value.startsWith("~/")) return `"$HOME/${value.slice(2).replace(/["\\`]/g, "\\$&")}"`;
+  return shellArg(value);
+}
+
+function sshIdentityFromHost(host: string | undefined, runtimeUser: string | undefined): string | undefined {
+  if (!host || host === "local" || host === "missing") return undefined;
+  if (host.includes("@")) return host;
+  return runtimeUser ? `${runtimeUser}@${host}` : host;
+}
+
+function sshIdentityFromSetupContext(context: LocalSetupContext | undefined): string | undefined {
+  if (!context?.sshHost) return undefined;
+  return remoteSshDestination(context.sshHost, context.sshUser ?? context.serviceUser);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter(isString) : [];
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function escapeShellRegex(value: string): string {
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
 }
 
 async function webValidateCommand(options: { dir: string }): Promise<CliResult> {

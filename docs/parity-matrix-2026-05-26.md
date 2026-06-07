@@ -1,5 +1,11 @@
 # Brain parity matrix against assistant-agent-logic, codex-chat, and codex-chat-web
 
+Status: historical/lab parity audit. The current architecture is control-plane
+first: Brain manages the separate `codex-chat` servant runtime,
+`assistant-agent-logic` repo, and `assistant-agent-data` workspace through
+repo-registry metadata. Entries below describe compatibility work and must not
+be read as a production directive to vendor or merge those repos into Brain.
+
 Audit date: 2026-05-26.
 
 Sources checked:

@@ -1,5 +1,10 @@
 # Directory structure
 
+Brain is the control-plane repo first. The tree below includes lab
+runtime/provider/entrypoint compatibility packages, but production servant
+runtime deployment is planned through separate repo-registry entries for
+`codex-chat`, `assistant-agent-logic`, and `assistant-agent-data`/workspace.
+
 ```text
 brain/
   entrypoints/
@@ -18,7 +23,7 @@ brain/
   docs/                 # Architecture, runtime config, migration, and self-host documentation.
   examples/config/      # Public-safe runtime config examples.
   plans/                # Migration plans and decision logs.
-  workspace/            # Ignored user-owned workspace boundary; runtime scaffold mirrors Brain assistant-logic JSON state.
+  workspace/            # Ignored user-owned boundary; production private data lives in assistant-agent-data/workspace.
   private/              # Ignored local-only/private boundary.
   data/                 # Ignored generated/user data boundary.
 ```
@@ -32,8 +37,11 @@ Ownership rules:
 
 Configuration examples live under `examples/config/` and are public-safe. Real workspace config, adapter secrets, bot tokens, allowlists, and host-specific paths belong in the private workspace or host secret store, not in source control.
 
-The Brain workspace state model uses native TypeScript modules and CLI
-commands in the in-repo `packages/assistant-logic` package. Setup creates/recognizes:
+The lab Brain workspace state model uses native TypeScript modules and CLI
+commands in the in-repo `packages/assistant-logic` package. Control-plane
+servant-stack setup must instead resolve the separate `assistant-agent-logic`
+repo and `assistant-agent-data` workspace from the repo registry. Lab setup
+creates/recognizes:
 
 - `data/todos.json`, `data/projects.json`, `data/crm.json`, and
   `data/reminders.json`;

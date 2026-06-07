@@ -18,20 +18,20 @@ Claude Code should follow the same repository instructions as Codex:
   before Brain-specific config, and save a non-secret ignored resume pointer in
   `private/setup-context.json` as soon as the remote target is known.
 - Keep setup provider-agnostic where possible, with Codex as the first live
-  provider path. Record Claude Code only as a placeholder until real wiring is
-  intentionally added. Bootstrap Telegram first with default first-user pairing:
-  the first Telegram user/chat to message a newly configured bot becomes the
-  paired/admin identity in private state. Do not require Composio or other
-  optional integrations for initial setup.
+  provider path. Brain is the control plane; `codex-chat` remains the servant
+  runtime unless a task explicitly promotes Brain runtime work. Record Claude
+  Code only as a placeholder until real wiring is intentionally added.
+  Bootstrap Telegram first with default first-user pairing: the first Telegram
+  user/chat to message a newly configured bot becomes the paired/admin identity
+  in private state. Do not require Composio or other optional integrations for
+  initial setup.
 - Keep private workspace data, env files, credentials, generated artifacts,
   logs, chat transcripts, Telegram IDs, hostnames, and repo-registry state out
   of source control.
-- For short-term workspace parity, use the assistant-agent-logic JSON workspace
-  (`data/todos.json`, `data/projects.json`, `data/crm.json`,
-  `data/reminders.json`, file-save metadata, overlays, tasks, and selected
-  repo-registry state) through `brainctl workspace run` or compatible
-  `ASSISTANT_WORKSPACE=<path>` commands. Do not treat markdown notes as the
-  source of truth or migrate them unless explicitly requested.
+- For control-plane stack work, use repo-registry metadata to resolve the
+  separate `assistant-agent-logic` repo and `assistant-agent-data` workspace.
+  Do not vendor, subtree, copy, or merge them into Brain. The in-repo
+  `packages/assistant-logic` commands are lab compatibility helpers only.
 - Provide secret-entry copy/paste commands only as one-use private temporary
   scripts that prompt with hidden input, write to the private server
   env/secret store, and delete themselves. Never echo tokens in shell history,

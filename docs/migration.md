@@ -1,5 +1,11 @@
 # Migration skeleton
 
+Status: historical/lab migration notes. The current implementation direction is
+Brain as control plane for the separate `codex-chat` servant runtime,
+`assistant-agent-logic` repo, and `assistant-agent-data` workspace. Do not use
+the parity notes below to justify vendoring or merging servant-stack repos into
+Brain.
+
 See `plans/2026-05-21-brain-monorepo-consolidation.md` for the living consolidation plan.
 
 This file will become the stable migration index once phases are locked.

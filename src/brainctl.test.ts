@@ -1292,6 +1292,137 @@ test("brainctl backup, web setup, and Composio status are safe and metadata-only
   }
 });
 
+test("brainctl stack status and plan resolve servant runtime control-plane metadata without network or secrets", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-stack-"));
+  try {
+    const brainRepo = path.join(root, "brain");
+    const assistantData = path.join(root, "assistant-agent-data");
+    const registry = path.join(root, "registry.yaml");
+    const setupContext = path.join(root, "setup-context.json");
+    await mkdir(brainRepo, { recursive: true });
+    await mkdir(assistantData, { recursive: true });
+    await writeFile(registry, stackRegistryFixture({ assistantData }));
+    await writeFile(setupContext, `${JSON.stringify({
+      version: 1,
+      target: "remote",
+      workspace: "personal",
+      workspaceRoot: "/srv/brain/workspace",
+      sshHost: "brain.example.test",
+      sshUser: "brain",
+      serviceUser: "brain",
+      repoPath: "/srv/brain/control-plane",
+      configPath: "/srv/brain/workspace/config/runtime.yaml",
+      secretValuesStored: false,
+    }, null, 2)}\n`);
+
+    const secretValue = "super-secret-stack-value";
+    const status = spawnBrainctl(["stack", "status", "--registry", registry, "--repo", brainRepo, "--setup-context", setupContext, "--workspace", "personal"], {
+      TELEGRAM_BOT_TOKEN: secretValue,
+    });
+    assert.equal(status.status, 0, status.stderr);
+    assert.doesNotMatch(status.stdout, new RegExp(secretValue));
+    const statusJson = JSON.parse(status.stdout) as {
+      ok: boolean;
+      details: {
+        role: string;
+        dryRun: boolean;
+        networkAccess: boolean;
+        sideEffects: string;
+        secretValuesPrinted: boolean;
+        servantRuntime: { repoName: string; deploy: { sshIdentity: string; serviceName: string; envFile: string; configPath: string; envVars: string[] } };
+        assistantLogic: { alias: string; repoName: string; path: string };
+        assistantData: { workspacePath: string; promptRequired: boolean; migrationPlaceholder: string };
+        servicePaths: { deployHost: string; sshIdentity: string; envFile: string; configPath: string; setupContextConfigPath: string };
+        secretMetadataChecks: Array<{ kind: string; value: string; metadataOnly: boolean; plannedCheck: string }>;
+        repoBoundaries: { ok: boolean; policy: string[] };
+        missing: string[];
+      };
+    };
+    assert.equal(statusJson.ok, true);
+    assert.match(statusJson.details.role, /control plane/);
+    assert.equal(statusJson.details.dryRun, true);
+    assert.equal(statusJson.details.networkAccess, false);
+    assert.equal(statusJson.details.sideEffects, "none");
+    assert.equal(statusJson.details.secretValuesPrinted, false);
+    assert.equal(statusJson.details.servantRuntime.repoName, "codex-chat");
+    assert.equal(statusJson.details.servantRuntime.deploy.sshIdentity, "codex@app.example.test");
+    assert.equal(statusJson.details.servantRuntime.deploy.serviceName, "codex-chat.service");
+    assert.equal(statusJson.details.servantRuntime.deploy.envFile, "/etc/codex-chat/env");
+    assert.equal(statusJson.details.servantRuntime.deploy.configPath, "/etc/codex-chat/config.yaml");
+    assert.deepEqual(statusJson.details.servantRuntime.deploy.envVars, ["TELEGRAM_BOT_TOKEN", "OPENAI_API_KEY"]);
+    assert.equal(statusJson.details.assistantLogic.alias, "assistant-claude");
+    assert.equal(statusJson.details.assistantLogic.repoName, "assistant-agent-logic");
+    assert.equal(statusJson.details.assistantLogic.path, "/srv/src/assistant-agent-logic");
+    assert.equal(statusJson.details.assistantData.workspacePath, assistantData);
+    assert.equal(statusJson.details.assistantData.promptRequired, true);
+    assert.match(statusJson.details.assistantData.migrationPlaceholder, /do not auto-migrate/);
+    assert.equal(statusJson.details.servicePaths.deployHost, "app.example.test");
+    assert.equal(statusJson.details.servicePaths.sshIdentity, "codex@app.example.test");
+    assert.equal(statusJson.details.servicePaths.setupContextConfigPath, "/srv/brain/workspace/config/runtime.yaml");
+    assert.equal(statusJson.details.repoBoundaries.ok, true);
+    assert.ok(statusJson.details.repoBoundaries.policy.some((line) => /codex-chat is the servant runtime/.test(line)));
+    assert.deepEqual(statusJson.details.missing, []);
+    assert.ok(statusJson.details.secretMetadataChecks.every((check) => check.value === "redacted" && check.metadataOnly));
+    assert.ok(statusJson.details.secretMetadataChecks.some((check) => check.plannedCheck.includes("stat -c") && check.plannedCheck.includes("/etc/codex-chat/env")));
+    assert.ok(statusJson.details.secretMetadataChecks.some((check) => check.kind === "env" && check.plannedCheck.includes("grep -qE")));
+
+    const plan = spawnBrainctl(["stack", "plan", "--registry", registry, "--repo", brainRepo, "--setup-context", setupContext, "--workspace", "personal"], {
+      TELEGRAM_BOT_TOKEN: secretValue,
+    });
+    assert.equal(plan.status, 0, plan.stderr);
+    assert.doesNotMatch(plan.stdout, new RegExp(secretValue));
+    const planJson = JSON.parse(plan.stdout) as {
+      ok: boolean;
+      details: {
+        dryRun: boolean;
+        networkAccess: boolean;
+        sideEffects: string;
+        secretValuesPrinted: boolean;
+        plan: { mode: string; steps: Array<{ id: string; commands?: string[]; prompts?: string[]; migrationPlaceholder?: string; target?: Record<string, string>; status?: string }>; forbidden: string[] };
+      };
+    };
+    assert.equal(planJson.ok, true);
+    assert.equal(planJson.details.dryRun, true);
+    assert.equal(planJson.details.networkAccess, false);
+    assert.equal(planJson.details.sideEffects, "none");
+    assert.equal(planJson.details.secretValuesPrinted, false);
+    assert.equal(planJson.details.plan.mode, "dry-run/no-network");
+    const steps = new Map(planJson.details.plan.steps.map((step) => [step.id, step]));
+    assert.ok(steps.get("clone-update-codex-chat")?.commands?.some((command) => /git clone --branch main/.test(command) && /codex-chat/.test(command)));
+    assert.ok(steps.get("clone-update-assistant-agent-logic")?.commands?.some((command) => /assistant-agent-logic/.test(command)));
+    assert.ok(steps.get("assistant-data-workspace")?.prompts?.some((prompt) => /pull existing private repo/.test(prompt)));
+    assert.match(steps.get("assistant-data-workspace")?.migrationPlaceholder ?? "", /do not auto-migrate/);
+    assert.ok(steps.get("render-codex-chat-config-env")?.target?.envFile);
+    assert.ok(steps.get("install-start-codex-chat-service")?.commands?.some((command) => /systemctl enable --now codex-chat\.service/.test(command)));
+    assert.ok(steps.get("health-check-codex-chat")?.commands?.some((command) => /codex-chat health --json/.test(command)));
+    assert.ok(planJson.details.plan.forbidden.some((line) => /Do not vendor or merge/.test(line)));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brainctl stack status blocks repo-boundary violations instead of preserving stale runtime parity nesting", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-stack-boundary-"));
+  try {
+    const brainRepo = path.join(root, "brain");
+    const assistantData = path.join(root, "assistant-agent-data");
+    const registry = path.join(root, "registry.yaml");
+    await mkdir(brainRepo, { recursive: true });
+    await mkdir(assistantData, { recursive: true });
+    await writeFile(registry, stackRegistryFixture({ assistantData, assistantLogicPath: "/srv/src/codex-chat/vendor/assistant-agent-logic" }));
+
+    const status = spawnBrainctl(["stack", "status", "--registry", registry, "--repo", brainRepo]);
+    assert.equal(status.status, 1, status.stderr);
+    const parsed = JSON.parse(status.stdout) as { ok: boolean; details: { repoBoundaries: { ok: boolean; issues: string[] }; missing: string[] } };
+    assert.equal(parsed.ok, false);
+    assert.equal(parsed.details.repoBoundaries.ok, false);
+    assert.ok(parsed.details.repoBoundaries.issues.some((issue) => /assistant-logic path is nested inside servant-runtime/.test(issue)));
+    assert.ok(parsed.details.missing.some((issue) => /nested inside/.test(issue)));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 function testRuntimeConfig(workspace: string, backupRepo: string, options: { composioEnabled?: boolean; webEnabled?: boolean; transcriptionEnabled?: boolean; transcriptionApiKeyRef?: string } = {}): string {
   return [
     "runtime:",
@@ -1349,6 +1480,64 @@ function testRuntimeConfig(workspace: string, backupRepo: string, options: { com
     `            connectedAccountRef: file:${path.join(workspace, "config", "chat-account.json")}`,
     "            requiredEnvRefs:",
     "              - env:COMPOSIO_API_KEY",
+    "",
+  ].join("\n");
+}
+
+function stackRegistryFixture(options: { assistantData: string; assistantLogicPath?: string }): string {
+  const assistantLogicPath = options.assistantLogicPath ?? "/srv/src/assistant-agent-logic";
+  return [
+    "version: 1",
+    `controller_root: ${JSON.stringify(path.dirname(options.assistantData))}`,
+    "repos:",
+    "  codex-chat:",
+    "    alias: codex-chat",
+    "    host: dev.example.test",
+    "    path: /srv/src/codex-chat",
+    "    repo_name: codex-chat",
+    "    default_branch: main",
+    "    current_branch: main",
+    "    remote_url: git@github.com:example/codex-chat.git",
+    "    apps:",
+    "      codex-chat:",
+    "        kind: service",
+    "        environments:",
+    "          production:",
+    "            source:",
+    "              host: dev.example.test",
+    "              path: /srv/src/codex-chat",
+    "              branch: main",
+    "              remote_url: git@github.com:example/codex-chat.git",
+    "            deploy:",
+    "              host: app.example.test",
+    "              path: /srv/codex-chat",
+    "              service: codex-chat.service",
+    "              runtime_user: codex",
+    "              ssh_identity: codex@app.example.test",
+    "              env_file: /etc/codex-chat/env",
+    "              config_path: /etc/codex-chat/config.yaml",
+    "              env_vars:",
+    "                - TELEGRAM_BOT_TOKEN",
+    "                - OPENAI_API_KEY",
+    "            health_checks:",
+    "              - kind: command",
+    "                command: codex-chat health --json",
+    "  assistant-claude:",
+    "    alias: assistant-claude",
+    "    host: dev.example.test",
+    `    path: ${JSON.stringify(assistantLogicPath)}`,
+    "    repo_name: assistant-agent-logic",
+    "    default_branch: main",
+    "    current_branch: main",
+    "    remote_url: git@github.com:example/assistant-agent-logic.git",
+    "  assistant-agent-data:",
+    "    alias: assistant-agent-data",
+    "    host: local",
+    `    path: ${JSON.stringify(options.assistantData)}`,
+    "    repo_name: assistant-agent-data",
+    "    default_branch: main",
+    "    current_branch: main",
+    "    remote_url: https://github.com/example/assistant-agent-data.git",
     "",
   ].join("\n");
 }

@@ -1,6 +1,11 @@
 # brainctl
 
-`brainctl` is the operator CLI for Brain. It remains validation-first and safe by default: it prepares private workspace directories, checks config/assistant-pack hygiene, resolves supervisor provider/entrypoint defaults from runtime config, keeps explicit fake/no-network smoke flags for tests, and renders deployment plans without installing services, contacting Telegram, deploying, or writing secrets unless explicit live flags are supplied.
+`brainctl` is the operator CLI for Brain. Its control-plane commands are the
+current source of truth for stack setup/deploy planning: resolve
+`codex-chat`, `assistant-agent-logic`, and `assistant-agent-data` from the repo
+registry, preserve repo boundaries, and render no-network plans without
+installing services, contacting hosts, or printing secrets. The older Brain
+runtime/provider commands remain validation/lab surfaces.
 
 Setup output should be direct-action first. When a setup step requires the user
 to do something, print the exact copy-paste command or the exact UI message to
@@ -33,6 +38,8 @@ pnpm run brainctl setup reset --workspace personal --path ~/.brain/workspace --y
 pnpm run brainctl doctor --config examples/config/runtime.yaml --pack assistant-packs/core
 pnpm run brainctl config validate examples/config/runtime.yaml
 pnpm run brainctl secrets check --config examples/config/runtime.yaml
+pnpm run brainctl stack status --workspace personal
+pnpm run brainctl stack plan --workspace personal
 pnpm run brainctl backup plan --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl backup init --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl backup init --config examples/config/runtime.yaml --workspace personal --apply
@@ -137,6 +144,32 @@ Destructive replacement is never implicit; commands that support replacement
 require explicit `--force` or `--replace` and still print the planned target.
 Secret refs are checked only by env/file existence, mode, and byte size.
 
+## Control-plane servant stack
+
+`stack status` and `stack plan` are dry-run/no-network commands for the
+production architecture where Brain manages the `codex-chat` servant runtime
+stack instead of replacing it:
+
+```bash
+pnpm run brainctl stack status --workspace personal
+pnpm run brainctl stack plan --workspace personal
+pnpm run brainctl stack status --registry /path/to/index.yaml --setup-context /path/to/setup-context.json
+```
+
+The status command resolves repo-registry entries for `codex-chat`,
+`assistant-agent-logic` (or the legacy `assistant-claude` alias), and
+`assistant-agent-data`; it also resolves deploy host, SSH identity, service
+name, env/config paths, env-var names, and health-check commands from
+`codex-chat` app metadata and local setup context. Secret checks are represented
+only as metadata plans such as `stat` or quiet env-key checks; values are always
+redacted.
+
+The plan command renders, but does not run, the first servant-stack flow:
+clone/update `codex-chat`, clone/update `assistant-agent-logic`, prompt/validate
+`assistant-agent-data`/workspace, render `codex-chat` config/env, install/start
+the `codex-chat` service, and run health checks. It blocks boundary violations
+such as nesting `assistant-agent-logic` under `codex-chat`.
+
 Setup is resumable across Codex sessions. `brainctl setup` writes a
 metadata-only private progress file at
 `<private-workspace>/state/setup-progress.json` with mode `0600` where
@@ -186,9 +219,15 @@ Bulky/private document bytes under `private/documents/files/**`, secrets, logs,
 tmp/cache paths, setup progress metadata, and repo-registry runtime caches are
 excluded by default.
 
-## Assistant workspace parity
+## Lab assistant workspace parity
 
-Brain carries native todo/project/CRM/reminder/file-save JSON stores and the vendored assistant-agent-logic live integration scripts in the in-repo `packages/assistant-logic` package. Setup creates a compatible workspace and `brainctl workspace run` executes those integrated commands with:
+Brain still carries lab todo/project/CRM/reminder/file-save JSON stores and
+compatibility scripts in the in-repo `packages/assistant-logic` package. These
+commands are useful for tests and future experiments, but the control-plane
+servant stack treats the separate `assistant-agent-logic` repo and
+`assistant-agent-data` workspace as production sources of truth. Setup must not
+vendor or merge those repos into Brain. `brainctl workspace run` executes the
+lab integrated commands with:
 
 ```bash
 ASSISTANT_WORKSPACE=<workspace>
@@ -216,7 +255,10 @@ pnpm run brainctl workspace run --path ~/.brain/workspace whoop-profile.js
 pnpm run brainctl workspace run --path ~/.brain/workspace telegram-unread.js
 ```
 
-No external `assistant-agent-logic` checkout is required. The legacy `--assistant-repo` flag is accepted only as a deprecated no-op. The wrapper prefers native compiled `dist/cli/*.js` commands for core stores and falls back to vendored `packages/assistant-logic/scripts/*` for live integrations.
+The legacy `--assistant-repo` flag is accepted only as a deprecated no-op for
+the lab command wrapper. For stack setup/deploy, use `brainctl stack status` and
+`brainctl stack plan` to resolve the external `assistant-agent-logic` checkout
+from the repo registry instead.
 
 `workspace scaffold` writes empty stores and example templates only. Copy/fill `.env.example`, `composio.yaml.example`, `messaging.yaml.example`, `telegram.yaml.example`, and `protonmail.yaml.example` inside the private workspace; never commit filled credentials, OAuth tokens, Telegram sessions, ProtonMail Bridge passwords, finance tokens, WHOOP tokens, live API output, or private logs.
 

@@ -1,6 +1,18 @@
 # Architecture skeleton
 
-`brain` should separate the assistant system into four layers:
+`brain` is now framed as the assistant stack control plane. Its primary
+production role is to inspect repo-registry metadata, plan setup/deploy work,
+and operate the separate servant runtime stack:
+
+1. `codex-chat` — servant runtime service.
+2. `assistant-agent-logic` — reusable logic/scripts/prompts repository.
+3. `assistant-agent-data` / workspace — private data and repo-registry state.
+
+The in-repo Brain runtime remains experimental/lab until explicitly promoted.
+It should not be treated as the production runtime or as a reason to vendor or
+merge the servant repositories.
+
+The lab code in `brain` is still separated into four layers:
 
 1. **Entrypoints** in `entrypoints/` — channel adapters that translate external traffic into Brain inbound events and Brain outbound actions back to the channel.
 2. **Runtime apps** in `apps/` — durable app surfaces such as the web shell/static publisher; channel ingress does not live here.

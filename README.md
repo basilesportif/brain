@@ -1,17 +1,31 @@
 # brain
 
-`brain` is a local monorepo for consolidating a self-hosted assistant runtime, entrypoint adapters, web shell, reusable assistant logic, and self-host setup guidance.
+`brain` is the control-plane and setup-orchestrator repository for Tim's
+assistant stack. Its first responsibility is to resolve, plan, deploy, and
+operate the servant runtime stack made of separate repositories:
 
-Status: **safe parity surface**. Runtime, entrypoint, provider, supervisor, operations, and web-publisher seams exist for no-network validation and reviewed setup/deployment planning, but no private assistant data, secrets, logs, generated artifacts, or real deployment state has been copied here.
+- `codex-chat` — the servant Telegram/Codex runtime service.
+- `assistant-agent-logic` — reusable assistant logic, scripts, prompts, and
+  setup resources.
+- `assistant-agent-data` / workspace — private durable workspace data and
+  repo-registry state.
+
+Status: **control-plane first**. `brainctl stack status` and
+`brainctl stack plan` resolve the servant runtime stack from repo-registry
+metadata and local setup context without contacting remote hosts, mutating
+servers, or printing secrets. Brain's own in-repo runtime packages remain
+experimental/lab compatibility surfaces; they are not the production servant
+runtime source of truth.
 
 ## Intended layout
 
 ```text
-entrypoints/              Channel adapters such as Telegram; they translate external traffic into Brain events.
-apps/                     Durable runtime applications, currently the web shell/static publisher placeholder.
-packages/                 Provider-neutral libraries, entrypoint protocol contracts, and provider adapters.
-assistant-packs/          Pure prompts, skills, workflows, and setup guidance inspectable by Codex/Claude.
-docs/                     Architecture, runtime configuration, entrypoint, self-host, deployment, testing, and public-readiness docs.
+src/brainctl.ts           Control-plane CLI, including stack registry resolution and no-network plans.
+entrypoints/              Lab channel adapter experiments, not the production servant runtime.
+apps/                     Lab app/static publisher placeholders.
+packages/                 Lab provider/runtime compatibility packages and schemas.
+assistant-packs/          Setup/operator guidance inspectable by Codex/Claude.
+docs/                     Control-plane, setup, deployment, testing, and public-readiness docs.
 plans/                    Migration and consolidation plans.
 workspace/, private/, data/  User-owned/private boundaries; ignored except README placeholders.
 ```
@@ -52,15 +66,12 @@ provider sessions, Telegram IDs, and logs do not belong in that file.
 Use `brainctl setup reset --workspace <name> --path <workspace-path> --dry-run`
 to inspect a reset, and add `--yes` to remove only that progress file.
 
-Personal workspace parity is JSON-backed through Brain's in-repo
-`packages/assistant-logic` package rather than a sibling checkout. Setup scaffolds
-`data/todos.json`, `data/projects.json`, `data/crm.json`,
-`data/reminders.json`, `private/documents/metadata.jsonl`,
-`instructions/`, `tasks/`, and selected repo-registry state. Use
-`brainctl workspace run --path <workspace> <assistant-script>.js -- <args>` to
-run native `@brain/assistant-logic` CLI commands against that workspace. Markdown
-`projects/`, `notes/`, and `documents/metadata/` folders remain supporting
-resources only.
+Control-plane setup preserves repository boundaries. Brain resolves
+`assistant-agent-logic` and `assistant-agent-data` from the repo registry and
+plans clone/update/validation steps against those separate repositories. The
+older in-repo `packages/assistant-logic` workspace commands are lab
+compatibility helpers only; do not vendor, merge, or make them the production
+source of truth for servant runtime deployment.
 
 ## Initial commands
 
@@ -79,6 +90,8 @@ The check validates that the repo structure exists, runtime config examples are 
 pnpm run build
 pnpm run brainctl doctor --config examples/config/runtime.yaml --pack assistant-packs/core
 pnpm run brainctl runtime smoke --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl stack status --workspace personal
+pnpm run brainctl stack plan --workspace personal
 pnpm run brainctl operations plan --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl validate live --config examples/config/runtime.yaml --workspace personal --run-safe
 pnpm run brainctl workspace status --path ~/.brain/workspace
@@ -87,8 +100,13 @@ pnpm run brainctl workspace run --path ~/.brain/workspace todo-list.js
 
 ## Design goals
 
-- Clean monorepo first, with an option to make public-safe slices later.
-- Treat channel-specific bots as entrypoint adapters, not as the core app.
+- Brain is the control plane first; servant runtime execution belongs to
+  `codex-chat` unless and until a future Brain runtime graduates from the lab.
+- Preserve repo boundaries using repo-registry links/metadata; never vendor or
+  merge `codex-chat`, `assistant-agent-logic`, or `assistant-agent-data` into
+  Brain.
+- Treat channel-specific bots as servant runtime/entrypoint concerns, not as
+  the control-plane core.
 - Configure one primary active entrypoint per workspace by default through an explicit `enabledEntrypoints` map.
 - Route outbound actions back to the originating entrypoint unless deliberate config says otherwise.
 - Keep assistant prompts and workflows generic around Brain inbound events, active-entrypoint metadata, and outbound actions, while preserving Telegram behavior through the Telegram entrypoint adapter.

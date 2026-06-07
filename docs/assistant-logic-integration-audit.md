@@ -1,5 +1,11 @@
 # Assistant-agent-logic integration audit
 
+Status: historical/lab parity audit. Brain's current production architecture is
+control-plane first: resolve and manage the separate `assistant-agent-logic`
+repository and `assistant-agent-data` workspace through repo-registry metadata.
+The in-repo paths below are compatibility/lab surfaces, not a directive to
+vendor or merge source for servant runtime deployment.
+
 Source audited: `/home/tim/pkg/tim/assistant-agent-logic` at `60089113e49501fd6f8e11c4e81039d1ced3f4b0`.
 
 Goal: Tim can move the codex-chat/assistant-agent-logic setup to Brain without functionality loss while keeping personal data, credentials, OAuth/session tokens, account ids, and live API results in the private workspace only.

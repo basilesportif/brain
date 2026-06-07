@@ -1,8 +1,10 @@
 # Agent guidance for `brain`
 
-This repo is a safe, reviewable assistant monorepo with runtime, provider,
-entrypoint, setup, and operations seams. Keep migration work bounded and
-inspectable.
+This repo is the safe, reviewable Brain control plane. Its production role is
+setup/orchestration for the servant runtime stack (`codex-chat` +
+`assistant-agent-logic` + `assistant-agent-data`/workspace). Brain's in-repo
+runtime/provider/entrypoint code is experimental/lab unless a task explicitly
+promotes it. Keep migration work bounded and inspectable.
 
 ## Current boundaries
 
@@ -15,14 +17,11 @@ inspectable.
 - Treat `workspace/`, `private/`, and `data/` as user-owned/private boundaries.
   Only the checked-in README files in those folders should exist unless a task
   explicitly changes the private-boundary policy.
-- Personal workspace parity uses the in-repo `packages/assistant-logic` JSON
-  stores and scripts, not a Brain-native markdown model yet. Setup/runtime guidance should
-  treat `data/todos.json`, `data/projects.json`, `data/crm.json`,
-  `data/reminders.json`, `private/documents/metadata.jsonl`,
-  `instructions/**`, `tasks/**`, and selected `.claude/repo-registry/` state as
-  the active private workspace model. Use `brainctl workspace run` from the
-  Brain checkout; do not require a sibling assistant-agent-logic checkout, port
-  stores, or migrate current markdown notes unless explicitly requested.
+- For control-plane stack work, use repo-registry metadata as the source of
+  truth for the separate `codex-chat`, `assistant-agent-logic`, and
+  `assistant-agent-data`/workspace repos. Do not vendor, subtree, copy, or merge
+  those repos into Brain. The in-repo `packages/assistant-logic` commands are
+  lab compatibility helpers only.
 
 ## Entrypoint and provider direction
 
@@ -72,8 +71,9 @@ an exact phrase unless they must run a command verbatim.
    directory or remote Ubuntu server over SSH?
 5. For remote setup, ask before editing local `~/.ssh/config` or contacting a
    host. Use the Brain-owned deployment/self-hosting docs in this repository to
-   prepare the server with its own non-root Brain service user. Do not require a
-   separate assistant-agent-logic checkout for setup.
+   prepare the server with its own non-root control-plane/service user, then
+   use repo-registry metadata to resolve any separate servant stack checkout
+   such as `assistant-agent-logic`.
    As soon as the user confirms the remote target, run
    `brainctl setup defaults --target remote` or
    `brainctl setup --target remote` with the known host/path fields so the CLI

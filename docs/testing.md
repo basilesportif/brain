@@ -20,6 +20,8 @@ pnpm run brainctl run --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl health --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl status --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl logs --file <runtime-jsonl-log> --lines 50
+pnpm run brainctl stack status --workspace personal
+pnpm run brainctl stack plan --workspace personal
 pnpm run brainctl provider smoke codex --transport stub --prompt ping
 pnpm run brainctl operations plan --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl operations validate --config examples/config/runtime.yaml --workspace personal

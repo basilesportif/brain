@@ -1,7 +1,9 @@
 # docs
 
-Documentation skeleton for the `brain` monorepo.
+Documentation skeleton for the `brain` control-plane repository.
 
+- `control-plane.md` — Brain as setup/orchestration control plane for the
+  `codex-chat` servant runtime stack.
 - `architecture.md` — target component boundaries and data flow.
 - `directory-structure.md` — intended tree and ownership rules.
 - `private-workspace-boundary.md` — what must stay outside git/public packages.
