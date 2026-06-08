@@ -1,15 +1,15 @@
 ---
 name: setup-self-host
-description: Guided Brain setup skill for local or remote self-host bootstrap with Codex-first provider setup, Claude Code placeholder support, and Telegram first entrypoint.
+description: Guided Brain control-plane setup skill for local or remote codex-chat self-host bootstrap with Codex provider setup and Telegram first entrypoint.
 ---
 
 # setup-self-host
 
 Use this skill when a user opens the Brain repo root with Codex or Claude Code
 and asks to install, set up, self-host, or "make this work". The current repo has
-runtime, provider, Telegram entrypoint, `brainctl`, and operations planning
-seams, so this skill guides private workspace creation, local/remote
-preparation, config/secrets placeholders, validations, and a stop-before-live
+control-plane, stack planning, and lab compatibility seams, so this skill
+guides private workspace creation, local/remote preparation, config/secrets
+placeholders, validations, and a stop-before-live `codex-chat.service`
 deployment handoff.
 
 ## Safety rules
@@ -40,6 +40,13 @@ deployment handoff.
   when no existing progress/context was found.
 - Ask before editing local `~/.ssh/config`, contacting a real host, writing a
   secret, creating a systemd unit, or starting/enabling a service.
+- Production service setup must target `codex-chat.service`, not
+  `brain-personal.service`, `brainctl run`, or the Brain lab Telegram runtime.
+  Stop/disable any legacy Brain polling service before enabling codex-chat to
+  avoid double polling.
+- Resolve repo authority from repo-registry metadata and refresh the real
+  `codex-chat` and `assistant-agent-logic` checkouts during deployment/update.
+  Verify and record the resolved SHAs; do not reuse stale embedded copies.
 - Keep real workspace contents, credentials, Telegram IDs, hostnames, logs,
   generated artifacts, and repo-registry data outside git.
 - Do not require Composio or any optional integration for initial bootstrap.
@@ -118,9 +125,10 @@ deployment handoff.
   commands through `brainctl workspace run` with `ASSISTANT_WORKSPACE=<path>` and
   private roots set, not from active entrypoint metadata or markdown folders
   alone.
-- Ensure the in-repo `packages/assistant-logic` package is present in the Brain
-  checkout. No sibling assistant-agent-logic checkout is required; validate with
-  `pnpm run brainctl workspace status --path <workspace>`.
+- Treat the in-repo `packages/assistant-logic` package as lab compatibility
+  only. Production setup requires the separate `assistant-agent-logic` checkout
+  resolved from the repo registry; validate Brain's lab workspace commands with
+  `pnpm run brainctl workspace status --path <workspace>` only as a smoke check.
 
 ## Canonical user flow
 
@@ -397,7 +405,10 @@ Use this flow only after the user chooses remote mode and confirms the host.
      creating a new key for initial bootstrap,
    - keep all provider and Telegram secrets out of the checkout.
 4. Verify service-user access through the local SSH config alias.
-5. Clone/update the user-confirmed Brain repository remote into the chosen repo path.
+5. Clone/update the user-confirmed Brain control-plane repository remote into
+   the chosen repo path, then resolve and clone/update the configured
+   `codex-chat` and `assistant-agent-logic` repositories from repo-registry
+   authority.
 6. Run dependency/check commands from the remote repo root, at minimum
    `pnpm run check` after any install step.
 7. Create the remote private workspace directories listed in the local flow.
@@ -405,10 +416,10 @@ Use this flow only after the user chooses remote mode and confirms the host.
    chosen provider identifier. Store real secret values only if supplied, and
    only through a private temporary script/secret store flow that keeps values
    out of shell history, chat, logs, and the checkout.
-9. Render systemd metadata with `brainctl operations systemd`; install or enable
-   a unit only after explicit confirmation. Record working directory, env file
-   path, `ExecStart`, restart policy, log command, health command, and
-   rollback/update notes.
+9. Render servant-stack metadata with `brainctl stack plan`; install or enable
+   `codex-chat.service` only after explicit confirmation. Record working
+   directory, env/config refs, `ExecStart`, requested refs, resolved SHAs,
+   restart policy, log command, health command, and rollback/update notes.
 10. Report remaining blockers before any live start in this order: Codex auth,
     reviewed service install/start, Telegram bot token, first-user pairing or
     selected admin bootstrap, webhook/firewall, and optional web preview.
@@ -447,11 +458,11 @@ Prefer polling for the first bootstrap because it needs only outbound HTTPS.
 Webhook mode, reverse proxy, TLS, firewall rules, generated pages, and web
 preview are optional follow-up setup.
 
-After Brain starts with the token, the intended admin chat(s) should message the
+After `codex-chat.service` starts with the token, the intended admin chat(s) should message the
 bot to complete first-user pairing. By default up to two distinct user/chat
 pairs can pair, and pairing closes after the cap. If the token is ever leaked,
 tell the user to rotate it immediately in `@BotFather` with `/revoke`, update
-the private Brain secret, restart Brain, and verify setup checks still report
+the private service secret, restart `codex-chat`, and verify setup checks still report
 only redacted token metadata.
 
 ## Fresh remote prerequisites checklist
@@ -484,6 +495,6 @@ pnpm run brainctl entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN \
   --polling-state <workspace>/state/telegram-offset.json \
   --pairing-state <workspace>/state/telegram-pairing
 pnpm run brainctl doctor --config <workspace>/config/runtime.yaml --pack assistant-packs/core
-pnpm run brainctl operations validate --config <workspace>/config/runtime.yaml --workspace <name> --repo <checkout>
-pnpm run brainctl operations systemd --config <workspace>/config/runtime.yaml --workspace <name> --repo <checkout>
+pnpm run brainctl stack status --workspace <name>
+pnpm run brainctl stack plan --workspace <name>
 ```

@@ -1,16 +1,22 @@
 ---
 name: setup-server
-description: Prepare a generic Ubuntu server for a Brain self-host runtime without storing secrets or deploying automatically.
+description: Prepare a generic Ubuntu server for Brain control-plane deployment of codex-chat without storing secrets or deploying automatically.
 ---
 
 # setup-server
 
-Use this skill when a user asks to prepare a fresh Ubuntu host for Brain.
+Use this skill when a user asks to prepare a fresh Ubuntu host for the Brain
+control plane and `codex-chat.service` servant runtime.
 
 ## Safety rules
 
 - Ask before contacting a host, changing SSH config, creating users, installing packages, writing env files, or enabling services.
-- Use a dedicated non-root service user for Brain.
+- Use a dedicated non-root service/control-plane user.
+- Production runtime service is `codex-chat.service`; do not install
+  `brainctl run`/`brain-personal.service` as the live assistant.
+- During deploy/update, fetch or clone the configured `codex-chat` and
+  `assistant-agent-logic` refs, verify resolved SHAs, and keep the repositories
+  separate.
 - Keep provider auth, entrypoint tokens, admin identifiers, webhook secrets, and workspace data outside the repository checkout.
 - Keep user instructions direct-action first. If the user must do something,
   provide the full copy-paste command or the exact UI action. Do not say "SSH

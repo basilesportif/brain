@@ -26,7 +26,20 @@ See `docs/runtime-configuration.md` for the draft config examples and validation
 
 ## Assistant-agent-logic migration parity
 
-Brain now includes everything needed from `assistant-agent-logic` except Tim's personal workspace data. Core JSON stores are native TypeScript in `packages/assistant-logic`; the larger live integrations are vendored as executable in-repo scripts under `packages/assistant-logic/scripts/**` and are run through `brainctl workspace run` with:
+This section is retained only as historical/lab parity context. It is not the
+production architecture and must not be used to justify deploying Brain as the
+assistant runtime or treating Brain's copies as canonical. The production
+assistant stack uses the live `assistant-agent-logic` checkout resolved from the
+repo registry, and Brain deployment/update flows must fetch/update that checkout
+and record the resolved SHA.
+
+Legacy lab commands in `packages/assistant-logic` can still exercise JSON-store
+compatibility and no-network smoke tests. The larger executable integrations
+under `packages/assistant-logic/scripts/**` are compatibility snapshots only;
+production domain logic belongs in the separate `assistant-agent-logic` repo and
+private `assistant-agent-data` workspace.
+
+Legacy lab wrapper environment:
 
 ```bash
 ASSISTANT_WORKSPACE=<workspace>
@@ -36,7 +49,7 @@ BRAIN_PRIVATE_DIR=<workspace>/private
 
 Native state files include `data/todos.json`, `data/projects.json`, `data/crm.json`, `data/reminders.json`, and `private/documents/metadata.jsonl`. The scaffold also creates empty/private-state placeholders for betting, email/calendar/message reminder state, finance sources, and ProtonMail drafts.
 
-Live integration code/templates are in the Brain monorepo for Composio/Gmail/Calendar, ProtonMail Bridge, finance/Mercury/Plaid, WHOOP, Telegram user-client messaging, betting, dictionary, transcription, and loop utilities. Personal data is supplied privately by copying/filling the scaffolded examples in the workspace (`.env.example`, `composio.yaml.example`, `messaging.yaml.example`, `telegram.yaml.example`, `protonmail.yaml.example`) into real private files such as `.env`, `composio.yaml`, `messaging.yaml`, and `protonmail.yaml`. Do not commit those filled files.
+Legacy lab code/templates exist in the Brain monorepo for Composio/Gmail/Calendar, ProtonMail Bridge, finance/Mercury/Plaid, WHOOP, Telegram user-client messaging, betting, dictionary, transcription, and loop utilities. Personal data is supplied privately by copying/filling the scaffolded examples in the workspace (`.env.example`, `composio.yaml.example`, `messaging.yaml.example`, `telegram.yaml.example`, `protonmail.yaml.example`) into real private files such as `.env`, `composio.yaml`, `messaging.yaml`, and `protonmail.yaml`. Do not commit those filled files. Do not deploy these snapshots instead of the live `assistant-agent-logic` repo.
 
 Use:
 
@@ -49,4 +62,4 @@ pnpm run brainctl workspace run --path ~/.brain/workspace telegram-unread.js
 pnpm run brainctl workspace run --path ~/.brain/workspace whoop-profile.js
 ```
 
-See `docs/assistant-logic-integration-audit.md` for the concrete integrated/status table and the remaining live validation that needs Tim's private credentials/accounts.
+See `docs/assistant-logic-integration-audit.md` for the historical integrated/status table and the remaining lab validation that needs Tim's private credentials/accounts.

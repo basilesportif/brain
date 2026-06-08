@@ -6,6 +6,13 @@ setup/orchestration for the servant runtime stack (`codex-chat` +
 runtime/provider/entrypoint code is experimental/lab unless a task explicitly
 promotes it. Keep migration work bounded and inspectable.
 
+Brain is **not** the deployed assistant runtime. Do not install
+`brainctl run/start`, `brain-personal.service`, or any Brain Telegram polling
+path as the production assistant. Production deploy/update work must install,
+configure, and start the real `codex-chat.service` runtime, with
+`assistant-agent-logic` as the canonical assistant-domain logic repository and
+`assistant-agent-data`/workspace as private state.
+
 ## Current boundaries
 
 - Do **not** copy private workspace data, secrets, logs, generated pages/images,
@@ -22,6 +29,11 @@ promotes it. Keep migration work bounded and inspectable.
   `assistant-agent-data`/workspace repos. Do not vendor, subtree, copy, or merge
   those repos into Brain. The in-repo `packages/assistant-logic` commands are
   lab compatibility helpers only.
+- Deployment/update flows must fetch or clone the configured latest branch/ref
+  for both `codex-chat` and `assistant-agent-logic`, verify the resolved commit
+  SHA after checkout, record requested refs plus resolved SHAs in deployment
+  metadata, and use those live checkouts for `codex-chat` service config. Brain
+  must not deploy stale embedded copies.
 - Do **not** encode Tim-assistant domain workflows, prompts, skills, or intent
   rules in Brain. Brain wraps deployment/control-plane operations for
   `codex-chat` and `assistant-agent-logic`; domain behavior belongs in
@@ -117,9 +129,11 @@ an exact phrase unless they must run a command verbatim.
    write only to the private server env/secret store, and delete the script
    after success. Never echo tokens in chat, shell history, logs, command
    output, or repo files.
-11. Treat private workspace env files as the setup source of truth for env refs.
-   `env:TELEGRAM_MAIN_CONFIG` and similar refs should be present in
-   `<workspace>/config/brain-<workspace>.env` or `<workspace>/secrets/secrets.env`
+11. Treat private workspace/env files as the setup source of truth for env refs.
+   `TELEGRAM_BOT_TOKEN`, `OPENAI_API_KEY`, `COMPOSIO_API_KEY`,
+   `env:TELEGRAM_MAIN_CONFIG`, and similar refs should be present only in
+   service/private env files such as `<workspace>/config/codex-chat.env`,
+   `<workspace>/config/brain-<workspace>.env`, or `<workspace>/secrets/secrets.env`
    for services and setup metadata checks. Do not decide a setup step is
    incomplete only because a one-off SSH command's process environment lacks
    the variable; rerun `brainctl setup status --path <workspace> --config

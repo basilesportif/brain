@@ -1,4 +1,9 @@
-# Codex Chat / Assistant Logic Behavior Parity Checklist
+# Codex Chat / Assistant Logic Behavior Parity Checklist (historical/lab)
+
+This checklist records Brain lab-runtime parity experiments. It is not
+production setup guidance. The deployed assistant runtime is `codex-chat`;
+assistant-domain behavior belongs in `assistant-agent-logic`; Brain must not
+serve as the live assistant or encode Tim-assistant behavior in production.
 
 Brain keeps Tim-facing behavior aligned with the current `codex-chat` + `assistant-agent-logic` workflow while preserving Brain's provider-neutral architecture.
 

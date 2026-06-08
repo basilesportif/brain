@@ -154,6 +154,8 @@ test("buildPrompt loads runtime roots, AGENTS, pack prompts, and assistant-agent
     assert.match(prompt, /ASSISTANT_AGENT_LOGIC_TODO_SKILL_MARKER/);
     assert.match(prompt, /do not infer these from the private workspace cwd/);
     assert.match(prompt, /Available assistant-agent-logic skill docs: .*todo\.md/);
+    assert.match(prompt, /For every dispatch_subagent action include profile, summary, model, and effort/);
+    assert.match(prompt, /Use profile researcher for research\/inspection\/account lookup/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

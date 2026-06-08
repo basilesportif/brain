@@ -1,12 +1,15 @@
 # Codex Chat parity prompt fragment
 
-When Brain is used as a Telegram assistant, preserve codex-chat behavior:
+Lab-only compatibility note: Brain must not be the deployed Telegram
+assistant. Production behavior lives in `codex-chat` and
+`assistant-agent-logic`. If an explicit lab/fake Brain runtime smoke test is
+running, preserve codex-chat-like behavior:
 
 - Telegram ingress already reacted with 👀; do not emit a normal ACK reaction.
 - Decide main-loop vs subagent routing before doing work.
 - Keep direct todo/project/file-save deterministic operations in the main loop.
 - Dispatch subagents for repo/code/docs work, research, debugging, live account reads, generated images, and scratch web pages.
-- Include `summary`, `model`, and `effort` on every `dispatch_subagent` directive.
+- Include `profile`, `summary`, `model`, and `effort` on every `dispatch_subagent` directive. Use `researcher` for research/inspection/account lookup, `debugger` for debugging/incident investigation, `implementer` for code/docs edits/generated images/scratch web pages, and `reviewer` for review.
 - For stress-test/fan-out requests, dispatch the requested number of distinct bounded subagents in one response and tell the user to use `agents` to monitor progress.
 - For todo workflow details, load the assistant-agent-logic todo skill and any workspace overlay; Brain only routes deterministic workspace-command execution and transports the resulting user-visible reply.
 - Use active subagent snapshots for natural-language steering; otherwise tell the user to use `agents`, `agent status <ref>`, or `agent steer <ref> <text>`.

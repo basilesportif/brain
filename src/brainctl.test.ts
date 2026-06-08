@@ -404,7 +404,7 @@ console.log(JSON.stringify({ method: "turn/completed", params: { turn: { id: "tu
         setupStateUpdate: { state: { nextRecommendedStep: string; statuses: { telegramToken: { configured: boolean } } } };
       };
     };
-    assert.match(liveWithTelegramJson.summary, /Next: Install and start the Brain service/);
+    assert.match(liveWithTelegramJson.summary, /Next: Install and start the codex-chat service/);
     assert.equal(liveWithTelegramJson.details.nextStep.step, "install-start-service");
     assert.equal(liveWithTelegramJson.details.setupStateUpdate.state.nextRecommendedStep, "install-start-service");
     assert.equal(liveWithTelegramJson.details.setupStateUpdate.state.statuses.telegramToken.configured, true);
@@ -1176,7 +1176,7 @@ test("brainctl setup defaults renders concise remote choices and persists ignore
     assert.deepEqual(parsed.details.setupFlow.coreSteps.map((item) => item.step), ["essential-runtime-choices", "configure-verify-codex-auth", "telegram-connection", "personal-workspace", "private-data-repo", "composio-accounts"]);
     assert.ok(parsed.details.setupFlow.orderingNotes.some((item) => /provider is Codex/.test(item)));
     assert.ok(parsed.details.setupFlow.orderingNotes.some((item) => /Codex auth before starting the service/.test(item)));
-    assert.ok(parsed.details.setupFlow.orderingNotes.some((item) => /todos\/projects\/CRM\/reminders/.test(item)));
+    assert.ok(parsed.details.setupFlow.orderingNotes.some((item) => /assistant-agent-data/.test(item) && /not Brain/.test(item)));
     assert.ok(parsed.details.safety.some((item) => /outside git/.test(item)));
     assert.equal(parsed.details.localSetupContext.wrote, true);
     assert.equal(parsed.details.localSetupContext.mode, "0600");
@@ -1204,7 +1204,7 @@ test("brainctl setup defaults renders concise remote choices and persists ignore
     assert.equal(verboseJson.details.decisions.find((item) => item.decision === "Future remote SSH user")?.default, "ubuntu");
     assert.deepEqual(verboseJson.details.advanced.ssh, { host: "203.0.113.10", user: "ubuntu" });
     assert.equal(verboseJson.details.advanced.serviceUser, "brain");
-    assert.equal(verboseJson.details.advanced.serviceName, "brain-personal");
+    assert.equal(verboseJson.details.advanced.serviceName, "codex-chat.service");
     assert.equal(verboseJson.details.advanced.paths.runtimeConfig, "/home/brain/.brain/workspace/config/runtime.yaml");
     assert.equal(verboseJson.details.advanced.paths.secretsEnv, "/home/brain/.brain/workspace/secrets/secrets.env");
 
@@ -1470,7 +1470,7 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
     assert.equal(statusJson.details.servantRuntime.deploy.sshIdentity, "codex@app.example.test");
     assert.equal(statusJson.details.servantRuntime.deploy.serviceName, "codex-chat.service");
     assert.equal(statusJson.details.servantRuntime.deploy.envFile, "/etc/codex-chat/env");
-    assert.equal(statusJson.details.servantRuntime.deploy.configPath, "/etc/codex-chat/config.yaml");
+    assert.equal(statusJson.details.servantRuntime.deploy.configPath, "/etc/codex-chat/codex-chat.toml");
     assert.deepEqual(statusJson.details.servantRuntime.deploy.envVars, ["TELEGRAM_BOT_TOKEN", "OPENAI_API_KEY"]);
     assert.equal(statusJson.details.assistantLogic.alias, "assistant-claude");
     assert.equal(statusJson.details.assistantLogic.repoName, "assistant-agent-logic");
@@ -1517,7 +1517,7 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
     assert.equal(planJson.details.secretValuesPrinted, false);
     assert.equal(planJson.details.plan.mode, "dry-run/no-network");
     const steps = new Map(planJson.details.plan.steps.map((step) => [step.id, step]));
-    assert.ok(steps.get("clone-update-codex-chat")?.commands?.some((command) => /git clone --branch main/.test(command) && /codex-chat/.test(command)));
+    assert.ok(steps.get("clone-update-codex-chat")?.commands?.some((command) => /git clone .*codex-chat/.test(command) && /BRAIN_REPO_SHA/.test(command)));
     assert.ok(steps.get("clone-update-assistant-agent-logic")?.commands?.some((command) => /assistant-agent-logic/.test(command)));
     assert.ok(steps.get("assistant-data-workspace")?.prompts?.some((prompt) => /pull existing private repo/.test(prompt)));
     assert.match(steps.get("assistant-data-workspace")?.migrationPlaceholder ?? "", /do not auto-migrate/);
@@ -1579,6 +1579,56 @@ test("brainctl stack plan renders local executor actions for local control-plane
   }
 });
 
+test("brainctl stack status can bind assistant-agent-logic to the service-host checkout", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-stack-logic-live-"));
+  try {
+    const brainRepo = path.join(root, "brain");
+    const assistantData = path.join(root, "assistant-agent-data");
+    const registry = path.join(root, "registry.yaml");
+    const setupContext = path.join(root, "setup-context.json");
+    await mkdir(brainRepo, { recursive: true });
+    await mkdir(assistantData, { recursive: true });
+    await writeFile(registry, stackRegistryFixture({
+      assistantData,
+      assistantLogicDeployHost: "codex@app.example.test",
+      assistantLogicDeployPath: "/srv/codex-chat/assistant-agent-logic",
+    }));
+    await writeFile(setupContext, `${JSON.stringify({
+      version: 1,
+      target: "remote",
+      workspace: "personal",
+      workspaceRoot: "/srv/brain/workspace",
+      sshHost: "brain.example.test",
+      sshUser: "brain",
+      serviceUser: "brain",
+      repoPath: "/srv/brain/control-plane",
+      configPath: "/srv/brain/workspace/config/runtime.yaml",
+      secretValuesStored: false,
+    }, null, 2)}\n`);
+
+    const plan = spawnBrainctl(["stack", "plan", "--registry", registry, "--repo", brainRepo, "--setup-context", setupContext, "--workspace", "personal"]);
+    assert.equal(plan.status, 0, plan.stderr);
+    const parsed = JSON.parse(plan.stdout) as {
+      details: {
+        status: { assistantLogic: { host: string; path: string; requestedRef: string } };
+        plan: { steps: Array<{ id: string; commands?: string[]; renderedConfigPreview?: string }> };
+      };
+    };
+    assert.equal(parsed.details.status.assistantLogic.host, "codex@app.example.test");
+    assert.equal(parsed.details.status.assistantLogic.path, "/srv/codex-chat/assistant-agent-logic");
+    assert.equal(parsed.details.status.assistantLogic.requestedRef, "main");
+    const steps = new Map(parsed.details.plan.steps.map((step) => [step.id, step]));
+    const renderedConfig = steps.get("render-codex-chat-config-env")?.renderedConfigPreview ?? "";
+    assert.ok(steps.get("clone-update-assistant-agent-logic")?.commands?.some((command) => /ssh codex@app\.example\.test/.test(command) && /BRAIN_REPO_SHA role=assistant-logic/.test(command)));
+    assert.match(renderedConfig, /\/srv\/brain\/workspace/);
+    assert.match(renderedConfig, /\/srv\/brain\/control-plane/);
+    assert.match(renderedConfig, /\/srv\/codex-chat\/assistant-agent-logic/);
+    assert.doesNotMatch(renderedConfig, new RegExp(assistantData.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("brainctl stack apply defaults to dry-run, enforces approval gates, and writes redacted deployment metadata through mock executor", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brainctl-stack-apply-"));
   try {
@@ -1635,7 +1685,7 @@ test("brainctl stack apply defaults to dry-run, enforces approval gates, and wri
       TELEGRAM_BOT_TOKEN: secretValue,
       OPENAI_API_KEY: "sk-stack-apply-secret-value-must-not-print",
     });
-    assert.equal(apply.status, 0, apply.stderr);
+    assert.equal(apply.status, 0, `${apply.stderr}\n${apply.stdout}`);
     assert.doesNotMatch(apply.stdout, new RegExp(secretValue));
     assert.doesNotMatch(apply.stdout, /sk-stack-apply-secret-value-must-not-print/);
     const applyJson = JSON.parse(apply.stdout) as { details: { executor: { dryRun: boolean; effective: string }; metadataWrite: { ok: boolean; path: string; canonicalPath: string; deployments: Array<{ id: string; status: string }> }; actionResults: Array<{ status: string }> } };
@@ -1678,6 +1728,85 @@ test("brainctl stack apply defaults to dry-run, enforces approval gates, and wri
     assert.equal(statusJson.details.deploymentMetadata.read.present, true);
     assert.equal(statusJson.details.deploymentMetadata.read.validation.ok, true);
     assert.deepEqual(statusJson.details.deploymentMetadata.deployments, [{ id: "personal:production:codex-chat", stack: "codex-chat", workspace: "personal", environment: "production", status: "healthy", updatedAt: "2026-06-07T00:00:00.000Z", serviceName: "codex-chat.service", deployHost: "app.example.test" }]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brainctl stack apply local updates configured repo refs and records resolved SHAs", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-stack-sha-"));
+  try {
+    const brainRepo = path.join(root, "brain");
+    const assistantData = path.join(root, "assistant-agent-data");
+    const codexCheckout = path.join(root, "deploy", "codex-chat");
+    const logicCheckout = path.join(root, "deploy", "assistant-agent-logic");
+    const codexRemote = path.join(root, "remotes", "codex-chat.git");
+    const logicRemote = path.join(root, "remotes", "assistant-agent-logic.git");
+    const registry = path.join(root, "registry.yaml");
+    const setupContext = path.join(root, "setup-context.json");
+    const metadataFile = path.join(root, "offline", "deployments.json");
+    const bin = path.join(root, "bin");
+    await mkdir(brainRepo, { recursive: true });
+    await mkdir(assistantData, { recursive: true });
+    await mkdir(bin, { recursive: true });
+    await writeFile(path.join(bin, "pnpm"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o700 });
+    await chmod(path.join(bin, "pnpm"), 0o700);
+    const codexSha = await createBareRepoWithCommit(root, "codex-source", codexRemote);
+    const logicSha = await createBareRepoWithCommit(root, "logic-source", logicRemote);
+    await writeFile(registry, stackRegistryFixture({
+      assistantData,
+      assistantLogicPath: logicCheckout,
+      codexHost: "local",
+      codexPath: codexCheckout,
+      assistantLogicHost: "local",
+      deployHost: "local",
+      deployPath: codexCheckout,
+      sshIdentity: "",
+      envFile: path.join(root, "codex-chat.env"),
+      configPath: path.join(root, "codex-chat.toml"),
+      codexRemoteUrl: codexRemote,
+      assistantLogicRemoteUrl: logicRemote,
+    }));
+    await writeFile(setupContext, `${JSON.stringify({
+      version: 1,
+      target: "local",
+      workspace: "personal",
+      workspaceRoot: path.join(root, "workspace"),
+      repoPath: brainRepo,
+      configPath: path.join(root, "workspace", "config", "runtime.yaml"),
+      secretValuesStored: false,
+    }, null, 2)}\n`);
+
+    const apply = spawnBrainctl([
+      "stack", "apply",
+      "--registry", registry,
+      "--repo", brainRepo,
+      "--setup-context", setupContext,
+      "--workspace", "personal",
+      "--executor", "local",
+      "--metadata-file", metadataFile,
+      "--approve",
+      "--now", "2026-06-08T00:00:00.000Z",
+    ], { PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}` });
+    assert.equal(apply.status, 0, `${apply.stderr}\n${apply.stdout}`);
+    const parsed = JSON.parse(apply.stdout) as { details: { actionResults: Array<{ id: string; repoUpdate?: { resolvedSha?: string; verified: boolean } }> } };
+    assert.equal(parsed.details.actionResults.find((result) => result.id === "clone-update-codex-chat-source")?.repoUpdate?.resolvedSha, codexSha);
+    assert.equal(parsed.details.actionResults.find((result) => result.id === "clone-update-codex-chat-source")?.repoUpdate?.verified, true);
+    assert.equal(parsed.details.actionResults.find((result) => result.id === "clone-update-assistant-agent-logic")?.repoUpdate?.resolvedSha, logicSha);
+
+    const store = JSON.parse(await readFile(metadataFile, "utf8")) as {
+      deployments: Array<{
+        servantRuntime: { requestedRef?: string; resolvedSha?: string };
+        assistantLogic: { requestedRef?: string; resolvedSha?: string };
+        repositories: Array<{ role: string; requestedRef?: string; resolvedSha?: string; verified: boolean }>;
+      }>;
+    };
+    assert.equal(store.deployments[0]?.servantRuntime.requestedRef, "main");
+    assert.equal(store.deployments[0]?.servantRuntime.resolvedSha, codexSha);
+    assert.equal(store.deployments[0]?.assistantLogic.requestedRef, "main");
+    assert.equal(store.deployments[0]?.assistantLogic.resolvedSha, logicSha);
+    assert.ok(store.deployments[0]?.repositories.some((repo) => repo.role === "servant-runtime" && repo.resolvedSha === codexSha && repo.verified));
+    assert.ok(store.deployments[0]?.repositories.some((repo) => repo.role === "assistant-logic" && repo.resolvedSha === logicSha && repo.verified));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1793,6 +1922,9 @@ function testRuntimeConfig(workspace: string, backupRepo: string, options: { com
 function stackRegistryFixture(options: {
   assistantData: string;
   assistantLogicPath?: string;
+  assistantLogicHost?: string;
+  assistantLogicDeployHost?: string;
+  assistantLogicDeployPath?: string;
   codexHost?: string;
   codexPath?: string;
   deployHost?: string;
@@ -1800,15 +1932,29 @@ function stackRegistryFixture(options: {
   sshIdentity?: string;
   envFile?: string;
   configPath?: string;
+  codexRemoteUrl?: string;
+  assistantLogicRemoteUrl?: string;
 }): string {
   const assistantLogicPath = options.assistantLogicPath ?? "/srv/src/assistant-agent-logic";
+  const assistantLogicHost = options.assistantLogicHost ?? "dev.example.test";
   const codexHost = options.codexHost ?? "dev.example.test";
   const codexPath = options.codexPath ?? "/srv/src/codex-chat";
   const deployHost = options.deployHost ?? "app.example.test";
   const deployPath = options.deployPath ?? "/srv/codex-chat";
   const sshIdentity = options.sshIdentity ?? "codex@app.example.test";
   const envFile = options.envFile ?? "/etc/codex-chat/env";
-  const configPath = options.configPath ?? "/etc/codex-chat/config.yaml";
+  const configPath = options.configPath ?? "/etc/codex-chat/codex-chat.toml";
+  const codexRemoteUrl = options.codexRemoteUrl ?? "git@github.com:example/codex-chat.git";
+  const assistantLogicRemoteUrl = options.assistantLogicRemoteUrl ?? "git@github.com:example/assistant-agent-logic.git";
+  const assistantLogicEnvironment = options.assistantLogicDeployHost || options.assistantLogicDeployPath
+    ? [
+        "            assistant_logic:",
+        `              host: ${JSON.stringify(options.assistantLogicDeployHost ?? assistantLogicHost)}`,
+        `              path: ${JSON.stringify(options.assistantLogicDeployPath ?? assistantLogicPath)}`,
+        "              branch: main",
+        `              remote_url: ${JSON.stringify(assistantLogicRemoteUrl)}`,
+      ]
+    : [];
   return [
     "version: 1",
     `controller_root: ${JSON.stringify(path.dirname(options.assistantData))}`,
@@ -1820,7 +1966,7 @@ function stackRegistryFixture(options: {
     "    repo_name: codex-chat",
     "    default_branch: main",
     "    current_branch: main",
-    "    remote_url: git@github.com:example/codex-chat.git",
+    `    remote_url: ${JSON.stringify(codexRemoteUrl)}`,
     "    apps:",
     "      codex-chat:",
     "        kind: service",
@@ -1830,7 +1976,7 @@ function stackRegistryFixture(options: {
     `              host: ${JSON.stringify(codexHost)}`,
     `              path: ${JSON.stringify(codexPath)}`,
     "              branch: main",
-    "              remote_url: git@github.com:example/codex-chat.git",
+    `              remote_url: ${JSON.stringify(codexRemoteUrl)}`,
     "            deploy:",
     `              host: ${JSON.stringify(deployHost)}`,
     `              path: ${JSON.stringify(deployPath)}`,
@@ -1845,14 +1991,15 @@ function stackRegistryFixture(options: {
     "            health_checks:",
     "              - kind: command",
     "                command: codex-chat health --json",
+    ...assistantLogicEnvironment,
     "  assistant-claude:",
     "    alias: assistant-claude",
-    "    host: dev.example.test",
+    `    host: ${JSON.stringify(assistantLogicHost)}`,
     `    path: ${JSON.stringify(assistantLogicPath)}`,
     "    repo_name: assistant-agent-logic",
     "    default_branch: main",
     "    current_branch: main",
-    "    remote_url: git@github.com:example/assistant-agent-logic.git",
+    `    remote_url: ${JSON.stringify(assistantLogicRemoteUrl)}`,
     "  assistant-agent-data:",
     "    alias: assistant-agent-data",
     "    host: local",
@@ -1891,4 +2038,23 @@ async function initRepoWithPrivateIgnore(root: string): Promise<void> {
   await writeFile(path.join(root, "private", "README.md"), "private placeholder\n");
   const init = spawnSync("git", ["init", "-q"], { cwd: root, encoding: "utf8" });
   assert.equal(init.status, 0, init.stderr);
+}
+
+async function createBareRepoWithCommit(root: string, name: string, barePath: string): Promise<string> {
+  const work = path.join(root, name);
+  await mkdir(work, { recursive: true });
+  let result = spawnSync("git", ["init", "-q", "-b", "main"], { cwd: work, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  await writeFile(path.join(work, "README.md"), `${name}\n`);
+  result = spawnSync("git", ["add", "README.md"], { cwd: work, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  result = spawnSync("git", ["-c", "user.email=test@example.test", "-c", "user.name=Test", "commit", "-q", "-m", `init ${name}`], { cwd: work, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  result = spawnSync("git", ["rev-parse", "HEAD"], { cwd: work, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const sha = result.stdout.trim();
+  await mkdir(path.dirname(barePath), { recursive: true });
+  result = spawnSync("git", ["clone", "--bare", work, barePath], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  return sha;
 }

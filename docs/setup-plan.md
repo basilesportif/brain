@@ -12,10 +12,18 @@ Status: guided setup documentation. `brainctl stack status` and
 separate logic repository, and `assistant-agent-data` / workspace is separate
 private state. Brain runtime packages, provider adapters, and Telegram
 entrypoint seams are lab/compatibility surfaces until explicitly promoted.
+They must not be selected as production setup targets: live assistant traffic
+belongs to `codex-chat.service`, not `brain-personal.service` or
+`brainctl run`.
 Setup should prepare and validate repo-registry metadata, servant runtime
 service paths, and private workspace/data choices, then stop before
 credentials, privileged service changes, or live deployment unless the user
 explicitly confirms.
+
+Deployment/update must resolve repo authority from the repo registry and refresh
+the real `codex-chat` and `assistant-agent-logic` checkouts before build or
+service restart. Record both the requested branch/ref and the resolved commit
+SHA in deployment metadata. Brain must never deploy stale embedded copies.
 
 Setup is intentionally re-runnable. At any time, `brainctl setup inspect` or
 `brainctl setup status` should show configured, missing required, missing
@@ -239,11 +247,12 @@ config/secrets/log paths, and command lists unless the user asks for details or
    workspace/server env file or host secret store, and run only redacted
    metadata/health checks unless the user explicitly allows live provider
    checks.
-9. Review and install/start the Brain service only after Telegram token storage,
+9. Review and install/start the real `codex-chat.service` only after Telegram token storage,
    private data setup, and Codex auth are ready:
-   render the systemd plan, confirm service user, working directory, private env
-   file, and unit path, and require explicit confirmation before any `sudo
-   systemctl` install/enable/start.
+   render the stack/systemd plan, confirm the `codex-chat` checkout,
+   `assistant-agent-logic` checkout, assistant-agent-data workspace, service
+   user, working directory, private env/config refs, and unit path, and require
+   explicit confirmation before any `sudo systemctl` install/enable/start.
 10. Optional follow-up: which Telegram admin bootstrap should be used? Default:
    first-user pairing,
    where up to two distinct Telegram user/chat pairs that message the newly
@@ -338,9 +347,11 @@ on private workspace knowledge.
 - JSON stores exist and validate for Brain assistant-logic parity:
   `data/todos.json`, `data/projects.json`, `data/crm.json`, and
   `data/reminders.json`.
-- The in-repo `packages/assistant-logic` package is present; validate with
-  `pnpm run brainctl workspace status --path <workspace>`. No sibling
-  assistant-agent-logic checkout is required.
+- The in-repo `packages/assistant-logic` package is present only for lab
+  compatibility; validate with
+  `pnpm run brainctl workspace status --path <workspace>` as a smoke check. A
+  separate `assistant-agent-logic` checkout is required for production
+  `codex-chat.service` deployment.
 - File-save metadata is `private/documents/metadata.jsonl`; private file bytes
   stay under `private/documents/files/` and are excluded from default backups.
 - Runtime config starts from `examples/config/runtime.yaml` or TOML and contains
@@ -505,13 +516,14 @@ on private workspace knowledge.
      --polling-state <workspace>/state/telegram-offset.json \
      --pairing-state <workspace>/state/telegram-pairing
    pnpm run brainctl doctor --config <private-config> --pack assistant-packs/core
-   pnpm run brainctl operations validate --config <private-config> --workspace <workspace-name> --repo <repo-root>
-   pnpm run brainctl operations systemd --config <private-config> --workspace <workspace-name> --repo <repo-root>
+   pnpm run brainctl stack status --workspace <workspace-name>
+   pnpm run brainctl stack plan --workspace <workspace-name>
    ```
 
 8. Use `brainctl run --fake --once --fake-text help` only for fake/dev smoke.
    Config-driven `brainctl start`/`run` resolves the provider and entrypoint
-   from runtime config by default.
+   from runtime config by default, but these are lab checks and must not be
+   installed as the live assistant runtime.
 9. Summarize successful pre-live validation as a wizard:
    - completed checks;
    - not live yet;
@@ -604,11 +616,12 @@ remote checkout is `/home/brain/brain`, the workspace parent is
 9. Write private Telegram/provider secret files only if the user supplies the
    values through a private temporary script/secret store flow; otherwise mark
    them pending.
-10. Render and review, but do not install or enable, a systemd unit with
-   `brainctl operations systemd`. The rendered command uses the runtime config's
-   provider and primary entrypoint by default.
-   Record its `ExecStart`, env file, working directory, restart policy, log
-   command, and health command.
+10. Render and review the servant-stack service plan with `brainctl stack plan`.
+    For production this must target the real `codex-chat.service` from the
+    registry, not the deprecated/lab Brain supervisor unit rendered by
+    `brainctl operations systemd`.
+    Record its `ExecStart`, env file, working directory, restart policy, log
+    command, health command, requested refs, and resolved repository SHAs.
 11. Run metadata-only checks and report exactly what remains before a live start:
     provider auth, Telegram bot token, first-user pairing or selected admin bootstrap, service enable/start, and optional webhook/web configuration.
 
@@ -626,8 +639,8 @@ pnpm run brainctl entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN \
   --pairing-state <workspace>/state/telegram-pairing
 pnpm run brainctl start --config <runtime-config> --workspace <name>
 pnpm run brainctl run --config <runtime-config> --workspace <name> --fake --once --fake-text help
-pnpm run brainctl operations validate --config <runtime-config> --workspace <name> --repo <checkout>
-pnpm run brainctl operations systemd --config <runtime-config> --workspace <name> --repo <checkout>
+pnpm run brainctl stack status --workspace <name>
+pnpm run brainctl stack plan --workspace <name>
 ```
 
 The CLI should print paths and actions, but not secret values.
@@ -636,8 +649,12 @@ The CLI should print paths and actions, but not secret values.
 
 - `pnpm run check` passes from the repo root.
 - Private workspace exists outside git and contains all real env/config/state.
-- Runtime config validates with one primary enabled entrypoint.
+- Runtime config validates with one primary enabled entrypoint for lab smoke;
+  the production servant config is the generated `codex-chat` config.
 - Provider adapter can authenticate or report a clear unauthenticated state.
+- `brainctl stack apply` fetches/updates `codex-chat` and
+  `assistant-agent-logic`, records requested refs and resolved SHAs, then can
+  run approved build and metadata steps.
 - Telegram adapter can validate token/admin-pairing metadata without exposing
   token, chat ID, user ID, or pairing code values.
 - Telegram is ready enough that future integration setup can continue through

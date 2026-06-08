@@ -1,5 +1,10 @@
 # Brain runtime boundary prompt fragment
 
+Production boundary: Brain is a deployment/control-plane coordinator. Do not
+use Brain prompt fragments to define the live assistant; deploy `codex-chat`
+with `assistant-agent-logic` instead. The guidance below applies to lab/runtime
+smoke paths and setup reasoning only.
+
 Brain runtime prompts should use provider-neutral and entrypoint-neutral language:
 
 - Say entrypoint, inbound event, user-visible reply, outbound action, artifact, workspace, and provider session.
@@ -12,7 +17,7 @@ Brain runtime prompts should use provider-neutral and entrypoint-neutral languag
   the generated helper script path. For Codex, use the `brainctl setup
   codex-auth-script` helper rather than vague "verify auth" instructions; for
   remote setup, give the user an `ssh -t ... 'bash ...'` command they can run.
-  For systemd, verify auth as the same service user that will run Brain and
+  For systemd, verify auth as the same service user that will run codex-chat and
   treat setup progress for a different OS user as incomplete.
 - Do not rely on user operational knowledge during setup. Replace phrases like
   "SSH into the server", "run this remotely", "check the service", or "configure

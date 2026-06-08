@@ -150,7 +150,7 @@ export function renderSystemdService(plan: OperationsPlan): string {
 
   return [
     "[Unit]",
-    `Description=Brain runtime (${plan.workspaceId})`,
+    `Description=Brain lab runtime (${plan.workspaceId})`,
     "After=network-online.target",
     "Wants=network-online.target",
     "",

@@ -17,6 +17,10 @@ servers, or printing secrets. Brain's own in-repo runtime packages remain
 experimental/lab compatibility surfaces; they are not the production servant
 runtime source of truth.
 
+Production service target: `codex-chat.service`. Brain must not be installed as
+the live assistant (`brain-personal.service` / `brainctl run`) and must not
+substitute its experimental Telegram/Codex runtime for `codex-chat`.
+
 ## Intended layout
 
 ```text
@@ -73,6 +77,12 @@ older in-repo `packages/assistant-logic` workspace commands are lab
 compatibility helpers only; do not vendor, merge, or make them the production
 source of truth for servant runtime deployment.
 
+Deployment/update also refreshes the actual deployed repos. `brainctl stack
+apply` fetches or clones the configured branch/ref for `codex-chat` and
+`assistant-agent-logic`, verifies the resulting commit SHA, and stores the
+requested ref plus resolved SHA in deployment metadata. A deploy must not
+silently reuse stale embedded checkouts.
+
 Brain must not become the home for Tim-assistant domain behavior. Assistant
 workflows, prompts, skills, and intent rules belong in `assistant-agent-logic`;
 runtime/channel behavior belongs in `codex-chat` or in generic Brain
@@ -107,6 +117,8 @@ pnpm run brainctl workspace run --path ~/.brain/workspace todo-list.js
 
 - Brain is the control plane first; servant runtime execution belongs to
   `codex-chat` unless and until a future Brain runtime graduates from the lab.
+- Production setup/deploy starts `codex-chat.service`, not Brain's lab
+  supervisor. `brainctl run/start` are for tests and local lab smoke only.
 - Keep Brain free of Tim-assistant domain logic; it is a deployment/control-plane
   wrapper around `codex-chat` and `assistant-agent-logic`, not a replacement for
   their runtime or workflow responsibilities.

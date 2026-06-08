@@ -35,7 +35,7 @@ type SetupDefaultsTarget = "local" | "remote";
 
 program
   .name("brainctl")
-  .description("Operator CLI for validating and preparing Brain runtime workspaces.")
+  .description("Operator CLI for Brain control-plane setup/deployment. Production assistant runtime belongs to codex-chat.")
   .version("0.0.0");
 
 program.command("setup")
@@ -97,7 +97,7 @@ program.command("doctor")
   .action(async (options) => exitWith(await doctorCommand(options)));
 
 program.command("start")
-  .description("Prepare or foreground a long-running Brain supervisor. Defaults to a safe dry-run plan unless --foreground is supplied.")
+  .description("Lab-only Brain supervisor seam. Production assistant service deployment must use `brainctl stack ...` to run codex-chat.")
   .option("--foreground", "run the supervisor in this process instead of printing the start plan")
   .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
   .option("--workspace <id>", "workspace id", "personal")
@@ -129,7 +129,7 @@ program.command("start")
   .action(async (options) => exitWith(await startCommand(options)));
 
 program.command("run")
-  .description("Run the Brain supervisor in the foreground. Provider and entrypoint default to runtime config; pass --fake for test/dev smoke.")
+  .description("Run the lab Brain supervisor in the foreground. Do not use as a production assistant service; deploy codex-chat with `brainctl stack ...`.")
   .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--entrypoint <kind>", "override entrypoint kind from config: fake or telegram")
@@ -198,7 +198,7 @@ operations.command("plan")
   .option("--repo <path>", "deployment checkout path", process.cwd())
   .action(async (options) => exitWith(await operationsPlanCommand(options)));
 operations.command("systemd")
-  .description("Render a systemd service unit to stdout JSON without installing it.")
+  .description("Render the deprecated/lab Brain supervisor unit without installing it. Production uses stack/systemd codex-chat plans.")
   .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--state <path>", "runtime state root")
@@ -763,7 +763,7 @@ async function operationsPlanCommand(options: OperationsCommandOptions): Promise
   const plan = operationsPlan(options, selection.runtime);
   return {
     ok: true,
-    summary: "operations plan rendered without deployment side effects",
+    summary: "deprecated lab Brain runtime operations plan rendered without deployment side effects; use stack plan/apply for codex-chat production",
     details: {
       plan,
       sideEffects: "none",
@@ -779,12 +779,13 @@ async function operationsSystemdCommand(options: OperationsCommandOptions): Prom
   const plan = operationsPlan(options, selection.runtime);
   return {
     ok: true,
-    summary: "systemd unit rendered without installing or restarting services",
+    summary: "deprecated lab Brain runtime systemd unit rendered without installing or restarting services; use stack plan/apply for codex-chat production",
     details: {
       unitPath: plan.unitPath,
       serviceName: plan.serviceName,
       serviceUser: plan.serviceUser,
       unit: renderSystemdService(plan),
+      productionReplacement: "pnpm run brainctl stack plan --environment <env>; pnpm run brainctl stack apply --approve ... deploys codex-chat.service",
       sideEffects: "none",
     },
   };
@@ -806,7 +807,7 @@ async function operationsValidateCommand(options: OperationsCommandOptions): Pro
   ]);
   return {
     ok: true,
-    summary: "operations readiness validated without deployment side effects",
+    summary: "deprecated lab Brain runtime operations readiness validated without deployment side effects; use stack status for codex-chat production",
     details: {
       serviceName: plan.serviceName,
       unitPath: plan.unitPath,
@@ -884,10 +885,21 @@ interface StackRepoResolution {
   host: string;
   path: string;
   branch?: string;
+  requestedRef?: string;
   remoteUrl?: string;
   source: string;
   registryKey?: string;
   present: boolean;
+}
+
+interface DeploymentRepoRef {
+  role: StackRepoResolution["role"];
+  repoName: string;
+  host: string;
+  path: string;
+  requestedRef?: string;
+  resolvedSha?: string;
+  verified: boolean;
 }
 
 interface StackStatusDetails {
@@ -1013,11 +1025,16 @@ interface DeploymentMetadataRecord {
     deployHost?: string;
     deployPath?: string;
     branch?: string;
+    requestedRef?: string;
+    resolvedSha?: string;
+    deployResolvedSha?: string;
     remoteUrl?: string;
     serviceName?: string;
     runtimeUser?: string;
   };
-  assistantLogic: Pick<StackRepoResolution, "host" | "path" | "repoName" | "branch" | "remoteUrl">;
+  assistantLogic: Pick<StackRepoResolution, "host" | "path" | "repoName" | "branch" | "requestedRef" | "remoteUrl"> & {
+    resolvedSha?: string;
+  };
   assistantData: Pick<StackRepoResolution, "host" | "path" | "repoName" | "branch" | "remoteUrl"> & {
     promptRequired: boolean;
     migrationStatus: "placeholder";
@@ -1046,6 +1063,7 @@ interface DeploymentMetadataRecord {
     executedActionCount: number;
     failedActionCount: number;
   };
+  repositories: DeploymentRepoRef[];
   secretValuesStored: false;
 }
 
@@ -1060,6 +1078,7 @@ interface StackExecutorAction {
   displayCommand?: string;
   writesMetadata?: boolean;
   metadataOnly?: boolean;
+  repoUpdate?: Pick<DeploymentRepoRef, "role" | "repoName" | "host" | "path" | "requestedRef">;
   secretValuesPrinted: false;
   approved: boolean;
   sideEffectsIfExecuted: string;
@@ -1154,6 +1173,7 @@ async function stackApplyCommand(options: StackApplyOptions): Promise<CliResult>
       failedActionCount: actionResults.filter((result) => result.status === "failed").length,
       now: options.now,
       healthApproved: approvals.health,
+      repositories: collectResolvedRepoRefs(actionResults, status),
     });
     metadataWrite = await writeStackDeploymentMetadata(status, record, { executor: effectiveExecutor, metadataFile: options.metadataFile });
   }
@@ -1223,7 +1243,11 @@ async function resolveStackStatus(options: StackCommandOptions): Promise<StackSt
       healthChecks,
     },
   };
-  const assistantLogicResolution = stackRepoFromRegistry("assistant-logic" as const, assistantLogic);
+  const assistantLogicResolution = stackRepoWithEnvironmentOverride(
+    stackRepoFromRegistry("assistant-logic" as const, assistantLogic),
+    asRecord(codexEnvironment?.environment?.assistant_logic) ?? asRecord(codexDeploy?.assistant_logic),
+    "codex-chat environment assistant_logic",
+  );
   const assistantDataResolution = {
     ...stackRepoFromRegistry("assistant-data" as const, assistantData),
     workspacePath: asString(assistantData.repo?.path),
@@ -1565,7 +1589,8 @@ function stackRepoFromRegistry<R extends StackRepoResolution["role"]>(role: R, r
   const opsSource = asRecord(asRecord(asRecord(repo?.ops)?.repository)?.source);
   const host = asString(sourceOverride?.host) ?? asString(opsSource?.host) ?? asString(repo?.host) ?? "missing";
   const repoPath = asString(sourceOverride?.path) ?? asString(opsSource?.path) ?? asString(repo?.path) ?? "missing";
-  const branch = asString(sourceOverride?.branch) ?? asString(opsSource?.branch) ?? asString(repo?.current_branch) ?? asString(repo?.default_branch);
+  const requestedRef = asString(sourceOverride?.ref) ?? asString(sourceOverride?.branch) ?? asString(opsSource?.ref) ?? asString(opsSource?.branch) ?? asString(repo?.current_branch) ?? asString(repo?.default_branch);
+  const branch = requestedRef;
   const remoteUrl = redactRemoteUrl(asString(sourceOverride?.remote_url) ?? asString(opsSource?.remote_url) ?? asString(repo?.remote_url) ?? "");
   return {
     role,
@@ -1574,10 +1599,26 @@ function stackRepoFromRegistry<R extends StackRepoResolution["role"]>(role: R, r
     host,
     path: repoPath,
     branch,
+    requestedRef,
     remoteUrl: remoteUrl || undefined,
     source: resolved.repo ? "repo-registry" : "missing",
     registryKey: resolved.key,
     present: Boolean(resolved.repo),
+  };
+}
+
+function stackRepoWithEnvironmentOverride(repo: StackRepoResolution, override: Record<string, unknown> | undefined, source: string): StackRepoResolution {
+  if (!override) return repo;
+  const requestedRef = asString(override.ref) ?? asString(override.branch) ?? repo.requestedRef ?? repo.branch;
+  const remoteUrl = redactRemoteUrl(asString(override.remote_url) ?? repo.remoteUrl ?? "");
+  return {
+    ...repo,
+    host: asString(override.host) ?? repo.host,
+    path: asString(override.path) ?? repo.path,
+    branch: requestedRef,
+    requestedRef,
+    remoteUrl: remoteUrl || undefined,
+    source: `${repo.source}; ${source}`,
   };
 }
 
@@ -1635,30 +1676,106 @@ function renderCodexChatEnvPreview(status: StackStatusDetails): string {
 }
 
 function renderCodexChatConfigPreview(status: StackStatusDetails): string {
-  return YAML.stringify({
-    version: 1,
-    service: "codex-chat",
-    workspace: status.setupContext.context?.workspaceRoot ?? status.assistantData.workspacePath,
-    assistantLogicPath: status.assistantLogic.path,
-    assistantDataPath: status.assistantData.path,
-    runtimeContext: {
-      controlPlaneRoot: status.controlPlane.path,
-      codexChatRoot: status.servantRuntime.deploy.path ?? status.servantRuntime.path,
-      assistantLogicRoot: status.assistantLogic.path,
-      assistantDataRoot: status.assistantData.path,
-      repoRegistryPath: status.registry.path,
-      setupContextPath: status.setupContext.path,
-      assistantPackRoot: path.join(status.controlPlane.path, "assistant-packs", "core"),
-    },
-    controlPlane: {
-      metadataPath: status.deploymentMetadata.canonical.path,
-      metadataCanonical: status.deploymentMetadata.canonical.sourceOfTruth,
-    },
-    secrets: {
-      envFile: status.servantRuntime.deploy.envFile,
-      envVars: status.servantRuntime.deploy.envVars.map((name) => ({ name, value: "redacted", metadataOnly: true })),
-    },
-  }).trimEnd();
+  const codexChatRoot = status.servantRuntime.deploy.path ?? status.servantRuntime.path;
+  const workspaceRoot = status.setupContext.context?.workspaceRoot ?? status.assistantData.workspacePath ?? status.assistantData.path;
+  const controlPlaneRoot = status.setupContext.context?.repoPath ?? status.controlPlane.path;
+  const stateDir = path.posix.join(workspaceRoot, "state", "codex-chat");
+  const artifactDir = path.posix.join(workspaceRoot, "artifacts", "subagents");
+  const runDir = path.posix.join(workspaceRoot, "state", "run");
+  const addDirs = [
+    controlPlaneRoot,
+    codexChatRoot,
+    status.assistantLogic.path,
+    workspaceRoot,
+  ].filter((value, index, values) => value && values.indexOf(value) === index);
+  return [
+    "# codex-chat TOML rendered by Brain control plane.",
+    "# Secret values stay in the service environment or host secret store, never in deployment metadata.",
+    "version = 1",
+    "",
+    "[service]",
+    "name = \"codex-chat\"",
+    `workspace = ${tomlString(workspaceRoot)}`,
+    `stateDir = ${tomlString(stateDir)}`,
+    "logLevel = \"info\"",
+    "timezone = \"Etc/UTC\"",
+    `ipcSocket = ${tomlString(path.posix.join(runDir, "codex-chat.sock"))}`,
+    "",
+    "[codex]",
+    "binary = \"codex\"",
+    "transport = \"app-server\"",
+    "model = \"gpt-5.5\"",
+    "effort = \"medium\"",
+    "sandbox = \"danger-full-access\"",
+    "approvalPolicy = \"never\"",
+    "extraConfig = [\"model_reasoning_effort=\\\"medium\\\"\"]",
+    `addDirs = [${addDirs.map(tomlString).join(", ")}]`,
+    "",
+    "[telegram]",
+    "mode = \"polling\"",
+    "botTokenEnv = \"TELEGRAM_BOT_TOKEN\"",
+    "parseMode = \"plain\"",
+    "pairingEnabledOnEmptyAllowlist = true",
+    "downloadMaxBytes = 52428800",
+    "sendProgressUpdates = true",
+    "opsChatId = 0",
+    "",
+    "[telegram.allowlist]",
+    "userIds = []",
+    "chatIds = []",
+    "adminUserIds = []",
+    "",
+    "[behavior]",
+    `dir = ${tomlString(path.posix.join(codexChatRoot, "behavior"))}`,
+    "entrypoint = \"AGENTS.md\"",
+    "reloadOnSighup = true",
+    "",
+    "[subagents]",
+    "enabled = true",
+    "backend = \"codex_exec\"",
+    "maxConcurrent = 5",
+    "defaultEffort = \"medium\"",
+    "defaultTimeoutSec = 1800",
+    "maxTimeoutSec = 7200",
+    `artifactDir = ${tomlString(artifactDir)}`,
+    `childSocketDir = ${tomlString(path.posix.join(runDir, "subagents"))}`,
+    "cleanupArtifacts = true",
+    "",
+    "[employees]",
+    "enabled = false",
+    `rootDir = ${tomlString(path.posix.join(workspaceRoot, "data", "employees"))}`,
+    `socketDir = ${tomlString(path.posix.join(runDir, "employees"))}`,
+    "",
+    "[loops]",
+    "enabled = false",
+    `path = ${tomlString(path.posix.join(workspaceRoot, "config", "loops.json"))}`,
+    "namespace = \"codex-chat\"",
+    "runnerCommand = \"codex-chat loop run\"",
+    "",
+    "[monitors]",
+    "enabled = false",
+    `path = ${tomlString(path.posix.join(workspaceRoot, "config", "monitors.json"))}`,
+    "",
+    "[files]",
+    `dir = ${tomlString(path.posix.join(workspaceRoot, "documents", "files"))}`,
+    `artifactDir = ${tomlString(path.posix.join(workspaceRoot, "artifacts"))}`,
+    `allowedSendRoots = [${[workspaceRoot, path.posix.join(workspaceRoot, "artifacts"), codexChatRoot].map(tomlString).join(", ")}]`,
+    "",
+    "[transcription]",
+    "enabled = false",
+    "provider = \"openai\"",
+    "model = \"gpt-4o-mini-transcribe\"",
+    "apiKeyEnv = \"OPENAI_API_KEY\"",
+    "",
+    "[security]",
+    "redactSecretsInLogs = true",
+    "requireLocalFileForSend = true",
+    "allowShellActionsFromDirectives = false",
+  ].join("\n");
+}
+
+function tomlString(value: string): string {
+  return JSON.stringify(value);
 }
 
 function renderSystemdServicePreview(status: StackStatusDetails): string {
@@ -1666,9 +1783,11 @@ function renderSystemdServicePreview(status: StackStatusDetails): string {
   const workingDirectory = status.servantRuntime.deploy.path ?? status.servantRuntime.path;
   const runtimeUser = status.servantRuntime.deploy.runtimeUser ?? DEFAULT_SERVICE_USER;
   const envFile = status.servantRuntime.deploy.envFile;
+  const configPath = status.servantRuntime.deploy.configPath ?? status.servicePaths.setupContextConfigPath ?? path.posix.join(workingDirectory, "config", "codex-chat.toml");
   return [
     "[Unit]",
-    `Description=${serviceName}`,
+    "Description=codex-chat Telegram/Codex runtime (deployed by Brain control plane)",
+    "Conflicts=brain-personal.service",
     "After=network-online.target",
     "Wants=network-online.target",
     "",
@@ -1676,7 +1795,7 @@ function renderSystemdServicePreview(status: StackStatusDetails): string {
     `User=${runtimeUser}`,
     `WorkingDirectory=${workingDirectory}`,
     ...(envFile ? [`EnvironmentFile=${envFile}`] : []),
-    "ExecStart=/usr/bin/env pnpm start",
+    `ExecStart=/usr/bin/env node dist/main.js --config ${configPath} start`,
     "Restart=on-failure",
     "RestartSec=5s",
     "",
@@ -1721,13 +1840,14 @@ function renderStackExecutorActions(status: StackStatusDetails, approvals: Recor
     }),
     action({
       id: "clone-update-codex-chat-source",
-      title: "Clone/update codex-chat source checkout.",
+      title: "Clone/update codex-chat source checkout and verify resolved SHA.",
       phase: "git",
       executor: sourceIdentity ? "ssh" : "local",
       requiredGate: "apply",
       hostIdentity: sourceIdentity,
-      command: renderGitCloneOrUpdateShell({ path: servant.path, remoteUrl: servant.remoteUrl, branch: servant.branch }),
-      sideEffectsIfExecuted: "would clone/fetch/pull codex-chat source checkout only",
+      command: renderGitCloneOrUpdateShell({ path: servant.path, remoteUrl: servant.remoteUrl, branch: servant.requestedRef ?? servant.branch, role: "servant-runtime" }),
+      repoUpdate: { role: "servant-runtime", repoName: servant.repoName, host: servant.host, path: servant.path, requestedRef: servant.requestedRef ?? servant.branch },
+      sideEffectsIfExecuted: "would clone/fetch/update codex-chat source checkout to the configured ref and print resolved SHA",
     }),
     ...(deployPath !== servant.path ? [action({
       id: "clone-update-codex-chat-deploy",
@@ -1736,8 +1856,9 @@ function renderStackExecutorActions(status: StackStatusDetails, approvals: Recor
       executor: deployIdentity ? "ssh" : "local",
       requiredGate: "apply",
       hostIdentity: deployIdentity,
-      command: renderGitCloneOrUpdateShell({ path: deployPath, remoteUrl: servant.remoteUrl, branch: servant.branch }),
-      sideEffectsIfExecuted: "would clone/fetch/pull codex-chat deploy checkout only",
+      command: renderGitCloneOrUpdateShell({ path: deployPath, remoteUrl: servant.remoteUrl, branch: servant.requestedRef ?? servant.branch, role: "servant-runtime" }),
+      repoUpdate: { role: "servant-runtime", repoName: servant.repoName, host: deploy.host ?? servant.host, path: deployPath, requestedRef: servant.requestedRef ?? servant.branch },
+      sideEffectsIfExecuted: "would clone/fetch/update codex-chat deploy checkout to the configured ref and print resolved SHA",
     })] : []),
     action({
       id: "build-codex-chat",
@@ -1756,8 +1877,9 @@ function renderStackExecutorActions(status: StackStatusDetails, approvals: Recor
       executor: logicIdentity ? "ssh" : "local",
       requiredGate: "apply",
       hostIdentity: logicIdentity,
-      command: renderGitCloneOrUpdateShell({ path: logic.path, remoteUrl: logic.remoteUrl, branch: logic.branch }),
-      sideEffectsIfExecuted: "would clone/fetch/pull assistant-agent-logic only; never vendored into Brain or codex-chat",
+      command: renderGitCloneOrUpdateShell({ path: logic.path, remoteUrl: logic.remoteUrl, branch: logic.requestedRef ?? logic.branch, role: "assistant-logic" }),
+      repoUpdate: { role: "assistant-logic", repoName: logic.repoName, host: logic.host, path: logic.path, requestedRef: logic.requestedRef ?? logic.branch },
+      sideEffectsIfExecuted: "would clone/fetch/update assistant-agent-logic to the configured ref and print resolved SHA; never vendored into Brain or codex-chat",
     }),
     action({
       id: "validate-assistant-agent-logic",
@@ -1787,7 +1909,7 @@ function renderStackExecutorActions(status: StackStatusDetails, approvals: Recor
       requiredGate: "data",
       hostIdentity: dataIdentity,
       command: data.remoteUrl
-        ? renderGitCloneOrUpdateShell({ path: data.path, remoteUrl: data.remoteUrl, branch: data.branch })
+        ? renderGitCloneOrUpdateShell({ path: data.path, remoteUrl: data.remoteUrl, branch: data.requestedRef ?? data.branch, role: "assistant-data" })
         : `mkdir -p ${shellPathArg(data.path)} && test -d ${shellPathArg(`${data.path}/.git`)} || git -C ${shellPathArg(data.path)} init -b ${shellArg(data.branch ?? "main")}`,
       sideEffectsIfExecuted: "would clone or initialize assistant-agent-data only after data approval; migration placeholder only",
     }),
@@ -1835,11 +1957,39 @@ function renderStackExecutorActions(status: StackStatusDetails, approvals: Recor
   ];
 }
 
-function renderGitCloneOrUpdateShell(input: { path: string; remoteUrl?: string; branch?: string }): string {
-  const branch = input.branch ?? "main";
-  return input.remoteUrl
-    ? `if [ -d ${shellPathArg(`${input.path}/.git`)} ]; then git -C ${shellPathArg(input.path)} fetch --prune origin && git -C ${shellPathArg(input.path)} checkout ${shellArg(branch)} && git -C ${shellPathArg(input.path)} pull --ff-only; else git clone --branch ${shellArg(branch)} ${shellArg(input.remoteUrl)} ${shellPathArg(input.path)}; fi`
-    : `test -d ${shellPathArg(input.path)} && git -C ${shellPathArg(input.path)} status --short --branch`;
+function renderGitCloneOrUpdateShell(input: { path: string; remoteUrl?: string; branch?: string; role?: StackRepoResolution["role"] }): string {
+  const requestedRef = input.branch ?? "main";
+  const repoPath = shellPathArg(input.path);
+  const refArg = shellArg(requestedRef);
+  const role = input.role ?? "servant-runtime";
+  const marker = `BRAIN_REPO_SHA role=${role} path=${input.path} requestedRef=${requestedRef} resolvedSha=`;
+  if (!input.remoteUrl) {
+    return [
+      "set -euo pipefail",
+      `test -d ${repoPath}/.git`,
+      `git -C ${repoPath} fetch --all --tags --prune`,
+      `if git -C ${repoPath} rev-parse --verify --quiet ${shellArg(`origin/${requestedRef}^{commit}`)} >/dev/null; then git -C ${repoPath} checkout -B ${refArg} ${shellArg(`origin/${requestedRef}`)}; else git -C ${repoPath} checkout --detach ${refArg}; fi`,
+      `sha=$(git -C ${repoPath} rev-parse HEAD)`,
+      `printf '%s%s\\n' ${shellArg(marker)} "$sha"`,
+    ].join("\n");
+  }
+  return [
+    "set -euo pipefail",
+    `if [ -d ${repoPath}/.git ]; then`,
+    `  git -C ${repoPath} remote set-url origin ${shellArg(input.remoteUrl)}`,
+    "else",
+    `  mkdir -p ${shellPathArg(path.posix.dirname(input.path))}`,
+    `  git clone ${shellArg(input.remoteUrl)} ${repoPath}`,
+    "fi",
+    `git -C ${repoPath} fetch origin --tags --prune`,
+    `if git -C ${repoPath} rev-parse --verify --quiet ${shellArg(`origin/${requestedRef}^{commit}`)} >/dev/null; then`,
+    `  git -C ${repoPath} checkout -B ${refArg} ${shellArg(`origin/${requestedRef}`)}`,
+    "else",
+    `  git -C ${repoPath} checkout --detach ${refArg}`,
+    "fi",
+    `sha=$(git -C ${repoPath} rev-parse HEAD)`,
+    `printf '%s%s\\n' ${shellArg(marker)} "$sha"`,
+  ].join("\n");
 }
 
 function renderConfigEnvWriteShell(input: { configPath: string; configPreview: string; envFile?: string; envPreview: string }): string {
@@ -1896,25 +2046,25 @@ function renderStackNoNetworkPlan(status: StackStatusDetails) {
       },
       {
         id: "clone-update-codex-chat",
-        title: "Clone or update codex-chat servant runtime checkout.",
-        target: { host: servant.host, path: servant.path, deployHost: deploy.host, deployPath: deploy.path, branch: servant.branch, remoteUrl: servant.remoteUrl },
+        title: "Clone or fetch/update codex-chat servant runtime checkout, then verify the resolved SHA.",
+        target: { host: servant.host, path: servant.path, deployHost: deploy.host, deployPath: deploy.path, branch: servant.branch, requestedRef: servant.requestedRef, remoteUrl: servant.remoteUrl },
         commands: [
-          renderGitCloneOrUpdateCommand({ hostIdentity: sourceIdentity, path: servant.path, remoteUrl: servant.remoteUrl, branch: servant.branch }),
+          renderGitCloneOrUpdateCommand({ hostIdentity: sourceIdentity, path: servant.path, remoteUrl: servant.remoteUrl, branch: servant.requestedRef ?? servant.branch, role: "servant-runtime" }),
           deploy.path && deploy.path !== servant.path
-            ? renderGitCloneOrUpdateCommand({ hostIdentity: deployIdentity, path: deploy.path, remoteUrl: servant.remoteUrl, branch: servant.branch })
+            ? renderGitCloneOrUpdateCommand({ hostIdentity: deployIdentity, path: deploy.path, remoteUrl: servant.remoteUrl, branch: servant.requestedRef ?? servant.branch, role: "servant-runtime" })
             : undefined,
         ].filter(isString),
-        sideEffectsIfExecuted: "would clone/fetch/pull codex-chat only; not executed by this command",
+        sideEffectsIfExecuted: "would clone/fetch/update codex-chat to the configured latest ref and print resolved SHA; not executed by this command",
       },
       {
         id: "clone-update-assistant-agent-logic",
-        title: "Clone or update assistant-agent-logic as a separate repository.",
-        target: { host: logic.host, path: logic.path, branch: logic.branch, remoteUrl: logic.remoteUrl },
+        title: "Clone or fetch/update assistant-agent-logic as a separate repository, then verify the resolved SHA.",
+        target: { host: logic.host, path: logic.path, branch: logic.branch, requestedRef: logic.requestedRef, remoteUrl: logic.remoteUrl },
         commands: [
-          renderGitCloneOrUpdateCommand({ hostIdentity: sshIdentityFromHost(logic.host, undefined), path: logic.path, remoteUrl: logic.remoteUrl, branch: logic.branch }),
+          renderGitCloneOrUpdateCommand({ hostIdentity: sshIdentityFromHost(logic.host, undefined), path: logic.path, remoteUrl: logic.remoteUrl, branch: logic.requestedRef ?? logic.branch, role: "assistant-logic" }),
         ],
         boundary: "Do not vendor, copy, subtree, or merge assistant-agent-logic into Brain or codex-chat.",
-        sideEffectsIfExecuted: "would clone/fetch/pull assistant-agent-logic only; not executed by this command",
+        sideEffectsIfExecuted: "would clone/fetch/update assistant-agent-logic to the configured latest ref and print resolved SHA; not executed by this command",
       },
       {
         id: "assistant-data-workspace",
@@ -1988,6 +2138,7 @@ function renderStackNoNetworkPlan(status: StackStatusDetails) {
     forbidden: [
       "Do not deploy or mutate remote servers from stack status/plan.",
       "Do not vendor or merge codex-chat, assistant-agent-logic, or assistant-agent-data into Brain.",
+      "Do not silently reuse stale local checkouts; stack apply must fetch/update configured refs and record resolved SHAs for codex-chat and assistant-agent-logic.",
       "Do not print secret values; inspect env/secret files by metadata only.",
     ],
   };
@@ -2020,6 +2171,7 @@ async function executeStackAction(action: StackExecutorAction, input: { executor
       status: "mocked",
       executor: "mock",
       command: action.displayCommand,
+      repoUpdate: action.repoUpdate ? { ...action.repoUpdate, verified: false, note: "mock executor did not resolve a SHA" } : undefined,
       sideEffects: "none (mocked)",
       secretValuesPrinted: false,
     };
@@ -2047,16 +2199,66 @@ async function executeStackAction(action: StackExecutorAction, input: { executor
   const result = action.executor === "ssh" && action.hostIdentity
     ? spawnSync("ssh", [action.hostIdentity, action.command], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 })
     : spawnSync("bash", ["-lc", action.command], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
+  const stdout = String(result.stdout ?? "");
+  const repoUpdate = action.repoUpdate ? repoUpdateFromActionStdout(action.repoUpdate, stdout) : undefined;
   return {
     id: action.id,
     phase: action.phase,
     status: (result.status ?? 1) === 0 ? "succeeded" : "failed",
     exitCode: result.status,
     command: action.displayCommand,
-    stdout: redactSecrets(String(result.stdout ?? "")),
+    stdout: redactSecrets(stdout),
     stderr: redactSecrets(String(result.stderr ?? "")),
+    repoUpdate,
     secretValuesPrinted: false,
   };
+}
+
+function repoUpdateFromActionStdout(input: NonNullable<StackExecutorAction["repoUpdate"]>, stdout: string): DeploymentRepoRef {
+  const line = stdout.split(/\r?\n/).find((candidate) => candidate.startsWith("BRAIN_REPO_SHA "));
+  const fields: Record<string, string> = {};
+  for (const part of (line ?? "").replace(/^BRAIN_REPO_SHA\s+/, "").split(/\s+/)) {
+    const index = part.indexOf("=");
+    if (index <= 0) continue;
+    fields[part.slice(0, index)] = part.slice(index + 1);
+  }
+  const resolvedSha = fields.resolvedSha;
+  return {
+    ...input,
+    resolvedSha: resolvedSha && /^[0-9a-f]{40}$/i.test(resolvedSha) ? resolvedSha : undefined,
+    verified: Boolean(resolvedSha && /^[0-9a-f]{40}$/i.test(resolvedSha)),
+  };
+}
+
+function collectResolvedRepoRefs(actionResults: Array<Record<string, unknown>>, status: StackStatusDetails): DeploymentRepoRef[] {
+  const fallback = (repo: StackRepoResolution, pathOverride?: string, hostOverride?: string): DeploymentRepoRef => ({
+    role: repo.role,
+    repoName: repo.repoName,
+    host: hostOverride ?? repo.host,
+    path: pathOverride ?? repo.path,
+    requestedRef: repo.requestedRef ?? repo.branch,
+    verified: false,
+  });
+  const refs: DeploymentRepoRef[] = actionResults
+    .map((result) => asRecord(result.repoUpdate))
+    .filter((repo): repo is Record<string, unknown> => Boolean(repo))
+    .map((repo) => ({
+      role: asString(repo.role) as StackRepoResolution["role"],
+      repoName: asString(repo.repoName) ?? "missing",
+      host: asString(repo.host) ?? "missing",
+      path: asString(repo.path) ?? "missing",
+      requestedRef: asString(repo.requestedRef),
+      resolvedSha: asString(repo.resolvedSha),
+      verified: repo.verified === true,
+    }));
+  const ensure = (candidate: DeploymentRepoRef) => refs.some((ref) => ref.role === candidate.role && ref.path === candidate.path)
+    ? refs
+    : refs.push(candidate);
+  ensure(fallback(status.servantRuntime));
+  const deployPath = status.servantRuntime.deploy.path;
+  if (deployPath && deployPath !== status.servantRuntime.path) ensure(fallback(status.servantRuntime, deployPath, status.servantRuntime.deploy.host));
+  ensure(fallback(status.assistantLogic));
+  return refs.sort((a, b) => `${a.role}:${a.path}`.localeCompare(`${b.role}:${b.path}`));
 }
 
 function stackDeploymentRecord(status: StackStatusDetails, input: {
@@ -2070,6 +2272,7 @@ function stackDeploymentRecord(status: StackStatusDetails, input: {
   failedActionCount: number;
   now?: string;
   healthApproved: boolean;
+  repositories: DeploymentRepoRef[];
 }): DeploymentMetadataRecord {
   const updatedAt = input.now ?? new Date().toISOString();
   const stackStatus: DeploymentMetadataRecord["status"] = input.failedActionCount > 0
@@ -2090,8 +2293,10 @@ function stackDeploymentRecord(status: StackStatusDetails, input: {
     updatedAt,
     source: "brainctl stack apply",
     controlPlane: {
-      host: status.controlPlane.host,
-      path: status.controlPlane.path,
+      host: status.setupContext.context?.target === "remote"
+        ? sshIdentityFromSetupContext(status.setupContext.context) ?? status.setupContext.context.sshHost ?? status.controlPlane.host
+        : status.controlPlane.host,
+      path: status.setupContext.context?.repoPath ?? status.controlPlane.path,
       repoName: status.controlPlane.repoName,
     },
     servantRuntime: {
@@ -2101,6 +2306,9 @@ function stackDeploymentRecord(status: StackStatusDetails, input: {
       deployHost: status.servantRuntime.deploy.host,
       deployPath: status.servantRuntime.deploy.path,
       branch: status.servantRuntime.branch,
+      requestedRef: status.servantRuntime.requestedRef ?? status.servantRuntime.branch,
+      resolvedSha: input.repositories.find((repo) => repo.role === "servant-runtime" && repo.path === status.servantRuntime.path)?.resolvedSha,
+      deployResolvedSha: input.repositories.find((repo) => repo.role === "servant-runtime" && repo.path === status.servantRuntime.deploy.path)?.resolvedSha,
       remoteUrl: status.servantRuntime.remoteUrl,
       serviceName: status.servantRuntime.deploy.serviceName,
       runtimeUser: status.servantRuntime.deploy.runtimeUser,
@@ -2110,6 +2318,8 @@ function stackDeploymentRecord(status: StackStatusDetails, input: {
       path: status.assistantLogic.path,
       repoName: status.assistantLogic.repoName,
       branch: status.assistantLogic.branch,
+      requestedRef: status.assistantLogic.requestedRef ?? status.assistantLogic.branch,
+      resolvedSha: input.repositories.find((repo) => repo.role === "assistant-logic")?.resolvedSha,
       remoteUrl: status.assistantLogic.remoteUrl,
     },
     assistantData: {
@@ -2145,6 +2355,7 @@ function stackDeploymentRecord(status: StackStatusDetails, input: {
       executedActionCount: input.executedActionCount,
       failedActionCount: input.failedActionCount,
     },
+    repositories: input.repositories,
     secretValuesStored: false,
   };
 }
@@ -2300,6 +2511,7 @@ function analyzeStackRepoBoundaries(repos: Array<Pick<StackRepoResolution, "role
       "assistant-agent-logic remains a separate logic repository.",
       "assistant-agent-data/workspace remains a separate private data repository/workspace.",
       "Registry links/metadata are references, not vendored source.",
+      "Deployment/update fetches configured refs for codex-chat and assistant-agent-logic and records requested refs plus resolved SHAs.",
     ],
   };
 }
@@ -2330,7 +2542,7 @@ function normalizeRegistryHost(value: string): string {
   return !value || value === "local" ? "local" : value;
 }
 
-function renderGitCloneOrUpdateCommand(input: { hostIdentity?: string; path: string; remoteUrl?: string; branch?: string }): string {
+function renderGitCloneOrUpdateCommand(input: { hostIdentity?: string; path: string; remoteUrl?: string; branch?: string; role?: StackRepoResolution["role"] }): string {
   return remotePlanCommand(input.hostIdentity, renderGitCloneOrUpdateShell(input));
 }
 
@@ -2767,8 +2979,8 @@ async function workspaceRunCommand(script: string, scriptArgs: string[], options
       userFacingText,
       stderr: String(redactSecrets(stderr)),
       sideEffects: resolved.kind === "native"
-        ? "native assistant-logic CLI controlled the JSON workspace state"
-        : "vendored assistant-agent-logic script controlled workspace state or live integrations using private configuration",
+        ? "legacy/lab native assistant-logic CLI controlled the JSON workspace state"
+        : "legacy/lab assistant-agent-logic snapshot script controlled workspace state or account integrations using private configuration",
     },
   };
 }
@@ -3181,7 +3393,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "betting",
-      integration: "vendored-assistant-agent-logic",
+      integration: "legacy-lab-assistant-agent-logic-snapshot",
       state: path.join(workspaceRoot, "data", "bets.json"),
       scripts: ["bet-add.js", "bet-list.js", "bet-result.js", "bet-summary.js", "bet-delete.js"],
       examples: [
@@ -3191,7 +3403,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "gmail-email",
-      integration: "vendored-live-composio-gmail",
+      integration: "legacy-lab-composio-gmail-snapshot",
       state: [path.join(workspaceRoot, "data", "seen-emails.json"), path.join(workspaceRoot, "data", "dismissed-emails.json"), path.join(workspaceRoot, "data", "urgent-emails.json")],
       privateConfig: [path.join(workspaceRoot, ".env"), path.join(workspaceRoot, "composio.yaml")],
       scripts: ["gmail-recent.js", "gmail-search.js", "gmail-send.js", "gmail-actionable.js", "email-actionable.js", "urgent-email.js", "dismiss-email.js"],
@@ -3202,7 +3414,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "google-calendar",
-      integration: "vendored-live-composio-google-calendar",
+      integration: "legacy-lab-composio-google-calendar-snapshot",
       state: [path.join(workspaceRoot, "data", "calendar-allowlist.json"), path.join(workspaceRoot, "data", "seen-invites.json"), path.join(workspaceRoot, "data", "declined-invites-log.json"), path.join(workspaceRoot, "data", "flagged-events.json")],
       privateConfig: [path.join(workspaceRoot, ".env"), path.join(workspaceRoot, "composio.yaml")],
       scripts: ["calendar-events.js", "calendar-search.js", "calendar-create-event.js", "update-calendar-event.js", "calendar-add-guest.js", "calendar-check-invites.js", "calendar-allowlist.js", "flag-event.js", "fix-football-events.js"],
@@ -3213,7 +3425,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "composio",
-      integration: "vendored-live-composio-connection",
+      integration: "legacy-lab-composio-connection-snapshot",
       state: path.join(workspaceRoot, "composio.yaml"),
       privateConfig: [path.join(workspaceRoot, ".env"), path.join(workspaceRoot, "composio.yaml")],
       scripts: ["composio-connect.js"],
@@ -3224,7 +3436,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "protonmail",
-      integration: "vendored-live-protonmail-bridge",
+      integration: "legacy-lab-protonmail-bridge-snapshot",
       state: [path.join(workspaceRoot, "data", "protonmail-drafts.json"), path.join(workspaceRoot, "data", "protonmail-audit.jsonl")],
       privateConfig: [path.join(workspaceRoot, "protonmail.yaml")],
       scripts: ["protonmail-recent.js", "protonmail-search.js", "protonmail-send.js", "protonmail-actionable.js"],
@@ -3235,7 +3447,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "finance-mercury-plaid",
-      integration: "vendored-live-finance",
+      integration: "legacy-lab-finance-snapshot",
       state: [path.join(workspaceRoot, "data"), path.join(workspaceRoot, ".env")],
       privateConfig: [path.join(workspaceRoot, ".env")],
       scripts: ["finance-source.js", "finance-accounts.js", "finance-balances.js", "finance-transactions.js", "mercury-accounts.js", "mercury-balances.js", "mercury-transactions.js", "plaid-link.js"],
@@ -3246,7 +3458,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "whoop",
-      integration: "vendored-live-whoop",
+      integration: "legacy-lab-whoop-snapshot",
       state: path.join(workspaceRoot, ".env"),
       privateConfig: [path.join(workspaceRoot, ".env")],
       scripts: ["whoop-connect.js", "whoop-profile.js", "whoop-cycle.js", "whoop-recovery.js", "whoop-sleep.js", "whoop-workout.js"],
@@ -3257,7 +3469,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "telegram-user-client-and-messaging",
-      integration: "vendored-live-telegram-mtproto",
+      integration: "legacy-lab-telegram-mtproto-snapshot",
       state: [path.join(workspaceRoot, "data", "dismissed-messages.json"), path.join(workspaceRoot, "data", "urgent-messages.json")],
       privateConfig: [path.join(workspaceRoot, "messaging.yaml")],
       scripts: ["telegram-login.js", "telegram-history.js", "telegram-unread.js", "messages-unread.js", "urgent-message.js", "dismiss-message.js"],
@@ -3268,7 +3480,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "utility-live-support",
-      integration: "vendored-assistant-agent-logic-utilities",
+      integration: "legacy-lab-assistant-agent-logic-utilities",
       state: [path.join(workspaceRoot, "tasks"), path.join(workspaceRoot, "data")],
       scripts: ["dictionary-deploy.js", "transcribe-voice.js", "register-loops.sh", "dispatch-claude-sdk.mjs", "validate-repo.js"],
       examples: [
@@ -3288,8 +3500,8 @@ function renderInstructionsReadme(): string {
     "",
     "Do not use overlays to redefine commands, storage paths, JSON formats, approval requirements, or safety rules.",
     "",
-    "Brain ships native TypeScript commands for todo, projects, CRM, reminders, and file-save.",
-    "Brain also vendors the assistant-agent-logic live-integration command set for Composio/Gmail/Calendar, ProtonMail, finance/Mercury/Plaid, Whoop, Telegram user-client messaging, betting, dictionary, generated web pages, and loop utilities.",
+    "Brain ships legacy/lab native TypeScript commands for todo, projects, CRM, reminders, and file-save smoke checks.",
+    "Brain also includes a legacy/lab snapshot of assistant-agent-logic integration commands for Composio/Gmail/Calendar, ProtonMail, finance/Mercury/Plaid, Whoop, Telegram user-client messaging, betting, dictionary, generated web pages, and loop utilities; production uses the separate assistant-agent-logic checkout.",
     "Keep personal account IDs, OAuth/API tokens, Telegram sessions, ProtonMail Bridge credentials, and finance/Whoop secrets in this private workspace, not in the Brain repo.",
     "See `docs/assistant-logic-integration-audit.md` and `docs/migration.md` for the integrated/status table and private data migration guidance.",
     "",
@@ -3658,11 +3870,11 @@ function liveValidationWizard(
     },
     {
       step: "install-start-service",
-      title: "Install and start the Brain service.",
+      title: "Install and start the codex-chat service.",
       actions: [
-        `Review the service plan with: pnpm run brainctl operations systemd --config ${shellArg(options.config)} --workspace ${shellArg(options.workspace)}`,
-        "Install/enable systemd only after the user confirms the unit path, service user, working directory, and private env file.",
-        "Start the service only after Telegram token storage, private data setup, and Codex auth are verified.",
+        `Review the servant stack plan with: pnpm run brainctl stack plan --workspace ${shellArg(options.workspace)}`,
+        "Install/enable systemd only after the user confirms codex-chat.service, the codex-chat checkout, assistant-agent-logic checkout, assistant-agent-data workspace, and private env/config refs.",
+        "Start codex-chat only after Telegram token storage, private data setup, and Codex auth are verified for the service user.",
       ],
       requiresConfirmation: "Privileged systemd installation, enablement, and service start require explicit user confirmation.",
     },
@@ -4300,7 +4512,7 @@ async function setupDefaultsCommand(options: SetupDefaultsOptions): Promise<CliR
   const serviceHome = target === "remote" ? serviceUserHome(serviceUser) : "~";
   const workspaceRoot = remoteDefaults?.workspaceRoot ?? (options.path ?? defaultWorkspaceRootDisplay(options.workspace, serviceHome));
   const repoCheckout = remoteDefaults?.repoPath ?? "<this checkout>";
-  const serviceName = `brain-${options.workspace}`;
+  const serviceName = "codex-chat.service";
   const decisions = [
     { decision: "Setup mode", default: target === "remote" ? "Remote Ubuntu server over SSH" : "Local private workspace" },
     ...(target === "remote" ? [
@@ -4355,7 +4567,7 @@ async function setupDefaultsCommand(options: SetupDefaultsOptions): Promise<CliR
       nextCommands: [
         ...(target === "remote" && bootstrapSshUser ? [`pnpm run brainctl setup remote-bootstrap --workspace ${options.workspace} --ssh-host ${sshHost ?? "<host>"} --ssh-user ${bootstrapSshUser} --service-user ${serviceUser}`] : []),
         `pnpm run brainctl setup --workspace ${options.workspace} --path ${workspaceRoot}`,
-        `pnpm run brainctl setup status --config ${workspaceRoot}/config/runtime.yaml --workspace ${options.workspace}`,
+        `pnpm run brainctl stack status --workspace ${options.workspace}`,
       ],
     };
   }
@@ -4587,7 +4799,7 @@ function conciseSetupFlow() {
     coreSteps: [
       {
         step: "essential-runtime-choices",
-        prompt: "Confirm workspace, provider, entrypoint, and service target.",
+        prompt: "Confirm codex-chat checkout, assistant-agent-logic checkout, assistant-agent-data workspace, provider, entrypoint, and service target.",
       },
       {
         step: "configure-verify-codex-auth",
@@ -4599,11 +4811,11 @@ function conciseSetupFlow() {
       },
       {
         step: "personal-workspace",
-        prompt: "Create the JSON-backed assistant workspace for todos, projects, CRM, reminders, file-save metadata, overlays, tasks, and repo-registry state.",
+        prompt: "Create or validate the assistant-agent-data workspace; Brain records paths/metadata only and does not own assistant domain state.",
       },
       {
         step: "private-data-repo",
-        prompt: "Pull or initialize the private data/backup repo before relying on project memory.",
+        prompt: "Pull or initialize the private assistant-agent-data/backup repo before relying on project memory.",
       },
       {
         step: "composio-accounts",
@@ -4613,8 +4825,8 @@ function conciseSetupFlow() {
     orderingNotes: [
       "Codex auth is an explicit step whenever the provider is Codex.",
       "Verify Codex auth before starting the service or accepting live Telegram traffic.",
-      "Create JSON-backed assistant workspace paths before the first live provider turn so todos/projects/CRM/reminders and document metadata have an inspectable source.",
-      "Keep markdown notes as supporting project resources only; do not migrate or convert JSON state to markdown.",
+      "Validate assistant-agent-data workspace paths before the first live provider turn; domain state remains owned by assistant-agent-logic/data, not Brain.",
+      "Keep markdown notes and JSON stores in assistant-agent-data as private state; do not migrate them into Brain.",
       "Keep OpenAI transcription, web publishing, backup tuning, and first-user pairing as follow-up steps unless explicitly requested now.",
     ],
   };
@@ -5341,7 +5553,7 @@ async function setupInspectDetails(options: SetupInspectOptions) {
   const composio = await setupComposioStatus(workspace, {}, { workspaceId: options.workspace, workspaceRoot, envSources });
   const transcription = setupTranscriptionStatus(workspace);
   const assistantWorkspace = await assistantWorkspaceParityStatus({ workspaceRoot, workspaceId: options.workspace });
-  const serviceName = options.serviceName ?? `brain-${options.workspace}`;
+  const serviceName = normalizeSystemdServiceName(options.serviceName ?? "codex-chat.service");
   const service = setupServiceStatus(serviceName, workspaceRoot);
   const plan = buildSetupPlan({
     config,
@@ -5771,13 +5983,13 @@ function setupResumeWizard(details: {
     },
     {
       step: "install-start-service",
-      title: "Install and start the Brain service.",
+      title: "Install and start the codex-chat service.",
       complete: serviceStarted,
       evidence: serviceStarted
-        ? [`Service ${details.service?.serviceName ?? "Brain"} is active by systemd metadata.`]
+        ? [`Service ${details.service?.serviceName ?? "codex-chat"} is active by systemd metadata.`]
         : serviceInstalled
-          ? [`Service ${details.service?.serviceName ?? "Brain"} is installed but not active; start it after Codex auth and token metadata are verified.`]
-        : ["Service installation/start is never assumed by setup status; verify Codex auth first, then review the systemd plan and require explicit confirmation."],
+          ? [`Service ${details.service?.serviceName ?? "codex-chat"} is installed but not active; start it after Codex auth and token metadata are verified.`]
+        : ["codex-chat service installation/start is never assumed by setup status; verify Codex auth first, then review the stack/systemd plan and require explicit confirmation."],
       resumePrompt: "If the service is already installed and running, confirm with health/status output before accepting Telegram traffic.",
     },
     {
@@ -5823,22 +6035,23 @@ function setupServiceStatus(serviceName: string, workspaceRoot?: string): {
   workspaceMatched?: boolean;
 } {
   const runSystemctl = (args: string[]) => spawnSync("systemctl", args, { encoding: "utf8" });
-  const show = runSystemctl(["show", `${serviceName}.service`, "--property=LoadState", "--value"]);
+  const unitName = normalizeSystemdServiceName(serviceName);
+  const show = runSystemctl(["show", unitName, "--property=LoadState", "--value"]);
   if (show.error || (show.status ?? 1) !== 0) {
-    return { serviceName, inspected: false, installed: false, enabled: false, active: false, source: "systemctl-unavailable" };
+    return { serviceName: unitName, inspected: false, installed: false, enabled: false, active: false, source: "systemctl-unavailable" };
   }
   const loadState = String(show.stdout ?? "").trim();
-  const execStart = runSystemctl(["show", `${serviceName}.service`, "--property=ExecStart", "--value"]);
+  const execStart = runSystemctl(["show", unitName, "--property=ExecStart", "--value"]);
   const execStartText = (execStart.status ?? 1) === 0 ? String(execStart.stdout ?? "").trim() : "";
   const workspaceMatched = workspaceRoot && execStartText.includes(workspaceRoot)
     ? true
     : workspaceRoot && /(?:^|\s)(?:ExecStart=|\{|\w+=|\/)/.test(execStartText)
       ? false
       : undefined;
-  const enabled = runSystemctl(["is-enabled", `${serviceName}.service`]);
-  const active = runSystemctl(["is-active", `${serviceName}.service`]);
+  const enabled = runSystemctl(["is-enabled", unitName]);
+  const active = runSystemctl(["is-active", unitName]);
   return {
-    serviceName,
+    serviceName: unitName,
     inspected: true,
     installed: loadState === "loaded",
     enabled: (enabled.status ?? 1) === 0,
@@ -5846,6 +6059,10 @@ function setupServiceStatus(serviceName: string, workspaceRoot?: string): {
     source: "systemctl",
     workspaceMatched,
   };
+}
+
+function normalizeSystemdServiceName(serviceName: string): string {
+  return serviceName.endsWith(".service") ? serviceName : `${serviceName}.service`;
 }
 
 interface SetupProgressState {

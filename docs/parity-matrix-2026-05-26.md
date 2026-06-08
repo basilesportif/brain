@@ -4,7 +4,8 @@ Status: historical/lab parity audit. The current architecture is control-plane
 first: Brain manages the separate `codex-chat` servant runtime,
 `assistant-agent-logic` repo, and `assistant-agent-data` workspace through
 repo-registry metadata. Entries below describe compatibility work and must not
-be read as a production directive to vendor or merge those repos into Brain.
+be read as a production directive to vendor or merge those repos into Brain, or
+to run Brain Telegram polling instead of `codex-chat.service`.
 
 Audit date: 2026-05-26.
 
@@ -19,8 +20,8 @@ Private data/secrets were not read. Credential-dependent parity means the code p
 
 | Assistant feature | Brain support status | Implementation path | Test/validation | Live credential requirement |
 | --- | --- | --- | --- | --- |
-| Skills and behavior-pack rules | Supported | Runtime prompt builder in `packages/runtime-core/src/runtime.ts`; portable pack in `assistant-packs/core`; assistant-agent skill resources in `packages/assistant-logic/config/skills` | `packages/runtime-core/src/runtime.test.ts`; `brainctl pack validate` | None for static validation; workspace overlays private |
-| Assistant-agent-logic scripts/resources | Supported | Vendored scripts in `packages/assistant-logic/scripts`; resources/templates in `packages/assistant-logic/config` | `diff -qr` against source shows only Brain path/safety adaptations plus generated CommonJS package marker; `brainctl workspace commands/status/run` | Live integrations need private `.env`, account ids, sessions, OAuth tokens |
+| Skills and behavior-pack rules | Historical/lab only | Runtime prompt builder in `packages/runtime-core/src/runtime.ts`; portable pack in `assistant-packs/core`; assistant-agent skill resource snapshots in `packages/assistant-logic/config/skills` | `packages/runtime-core/src/runtime.test.ts`; `brainctl pack validate` | None for static validation; production domain prompts/skills come from `assistant-agent-logic` |
+| Assistant-agent-logic scripts/resources | Historical/lab snapshots only | Compatibility scripts in `packages/assistant-logic/scripts`; resources/templates in `packages/assistant-logic/config` | `brainctl workspace commands/status/run` for lab parity | Production deploys the live `assistant-agent-logic` checkout and records requested ref + resolved SHA |
 | Workspace JSON stores: todos, projects, CRM, reminders | Supported natively | `packages/assistant-logic/src/lib/*-store.ts`; CLI wrappers; workspace scaffold in `src/brainctl.ts` | `pnpm run check`; `brainctl workspace scaffold/status/run` | Private workspace JSON data only |
 | File-save / PDF attach | Supported natively | `packages/assistant-logic/src/lib/file-save-store.ts`; `file-save.js`; prompt and skill guidance | CLI compatibility tests; git-ignore destination guard | Source attachments and private saved bytes stay outside repo |
 | Telegram bot ingress/egress | Supported with guarded live mode | `entrypoints/telegram/src/index.ts`; `brainctl run/start --entrypoint telegram` | Telegram adapter tests; `brainctl entrypoint check`; `brainctl validate live --run-safe` | Bot token, paired users/chats, download/transcription files are private |
@@ -40,11 +41,11 @@ Private data/secrets were not read. Credential-dependent parity means the code p
 | codex-chat-web runtime-host compatibility | Supported after this audit | `runtimeHost` option and `CODEX_CHAT_WEB_*` env aliases in `@brain/web`; CLI `--runtime-host` | Web tests cover env aliases; remote path code mirrors codex-chat-web | SSH access to runtime host for remote publish/prune |
 | Setup / migration | Supported | `AGENTS.md`, `CLAUDE.md`, `docs/setup-plan.md`, `src/brainctl.ts setup*`, setup skill | `brainctl setup defaults/inspect/status`; CLI tests | Private remote host/service user/token details |
 | Backup/restore planning | Supported for safe metadata and init | `brainctl backup plan/init/check/status`; workspace schema backup config | CLI tests; metadata-only checks | Private backup remote/repo path and private data |
-| Calendar/Gmail/Composio | Supported as vendored live integrations | `packages/assistant-logic/scripts/calendar-*`, `gmail-*`, `composio-connect.js`; `composio.yaml` template | Command catalog; metadata-only `brainctl composio status`; vendored script execution through `workspace run` | Composio API key and connected account ids |
-| ProtonMail | Supported as vendored live integration | `protonmail-*.js`, ProtonMail libs, `protonmail.yaml` template | Command catalog and script import/build coverage | Bridge login/password/account state |
-| Messaging / Telegram user client | Supported as vendored live integration | `telegram-login/history/unread`, `messages-unread`, urgent/dismiss scripts and `messaging.yaml` | Command catalog | MTProto api id/hash/session and message state |
-| Finance / Mercury / Plaid | Supported as vendored live integrations | `finance-*`, `mercury-*`, `plaid-link.js`, finance provider libs | Command catalog; workspace scaffold | Bank/OAuth/API tokens and private financial outputs |
-| Health / WHOOP | Supported as vendored live integration | `whoop-*` scripts/libs and `.env.example` refs | Command catalog; workspace scaffold | WHOOP OAuth client secret/token data |
+| Calendar/Gmail/Composio | Historical/lab snapshots only | `packages/assistant-logic/scripts/calendar-*`, `gmail-*`, `composio-connect.js`; `composio.yaml` template | Command catalog; metadata-only `brainctl composio status`; optional lab execution through `workspace run` | Production account logic comes from the live `assistant-agent-logic` checkout; Composio API key and connected account ids stay private |
+| ProtonMail | Historical/lab snapshot only | `protonmail-*.js`, ProtonMail libs, `protonmail.yaml` template | Command catalog and script import/build coverage | Production account logic comes from the live `assistant-agent-logic` checkout; Bridge login/password/account state stays private |
+| Messaging / Telegram user client | Historical/lab snapshot only | `telegram-login/history/unread`, `messages-unread`, urgent/dismiss scripts and `messaging.yaml` | Command catalog | Production account logic comes from the live `assistant-agent-logic` checkout; MTProto api id/hash/session and message state stay private |
+| Finance / Mercury / Plaid | Historical/lab snapshots only | `finance-*`, `mercury-*`, `plaid-link.js`, finance provider libs | Command catalog; workspace scaffold | Production account logic comes from the live `assistant-agent-logic` checkout; bank/OAuth/API tokens and private financial outputs stay private |
+| Health / WHOOP | Historical/lab snapshot only | `whoop-*` scripts/libs and `.env.example` refs | Command catalog; workspace scaffold | Production account logic comes from the live `assistant-agent-logic` checkout; WHOOP OAuth client secret/token data stays private |
 | Betting | Supported as vendored no-network JSON workflow | `bet-*.js`, skill/prompt resources | `brainctl workspace run bet-*.js` no-secret test coverage | Private bets data only |
 | Web page design guidance | Supported | `packages/assistant-logic/config/skills/web-page-design.md`; generated-page skill split | Skill file presence and prompt routing | Private project notes optional |
 | Repo-registry authority | Supported | `packages/assistant-logic/config/skills/repo-registry`; `assistant-packs/core/skills/repo-registry`; setup scaffolds registry paths | Skill/resource file diff; workspace scaffold | Real repo registry entries may be private |

@@ -58,14 +58,22 @@ can be configured later after Telegram admin pairing is working.
 
 ## Current Brain SSH target
 
-The current Brain production SSH-in identity is `brain@178.104.221.223`.
+The current Brain/control-plane SSH-in identity for Anna is
+`brain@178.104.221.223`.
 Treat `root@178.104.221.223` as bootstrap/root access only when a separate
 privileged context is needed. Normal post-bootstrap setup/status/deployment
 commands should use the non-root `brain` service user, with source checkout
 `/home/brain/brain`, workspace parent `/home/brain/.brain`, private workspace
 `/home/brain/.brain/workspace`, runtime config
-`/home/brain/.brain/workspace/config/runtime.yaml`, and systemd service
-`brain-personal`.
+`/home/brain/.brain/workspace/config/runtime.yaml`.
+
+Production assistant traffic on Anna must run through
+`/home/brain/pkg/tim/codex-chat` and `codex-chat.service`.
+`brain-personal.service` is a legacy Brain lab runtime target and must be
+stopped/disabled when `codex-chat.service` is enabled to avoid double Telegram
+polling. The generated `codex-chat.service` unit conflicts with
+`brain-personal.service`; after a healthy migration, leave the Brain service
+disabled unless an explicit lab smoke test is being run offline.
 
 ## Current safe operations seams
 
@@ -81,21 +89,24 @@ non-deploying by default:
   config/env, plan service install/start, record deployment metadata, and plan
   health checks. It does not execute SSH, git, systemd, or secret reads.
 - `brainctl stack apply` is the explicit approval boundary. Without `--approve`
-  it is a dry-run. With `--approve` and an executor, it can run approved git,
-  build, and metadata steps. `--approve-data`, `--approve-config`,
+  it is a dry-run. With `--approve` and an executor, it fetches/clones the
+  configured latest refs for `codex-chat` and `assistant-agent-logic`, verifies
+  resolved SHAs, then can run approved build and metadata steps.
+  `--approve-data`, `--approve-config`,
   `--approve-service`, and `--approve-health` separately gate assistant data
   actions, config/env template writes, systemd install/start, and live/read-only
   health checks. Use `--executor mock --metadata-file <path>` for tests and
   rehearsals; use `--executor ssh` only after reviewing the rendered plan.
-- `brainctl start` prints a dry-run supervisor plan unless `--foreground` is supplied.
+- `brainctl start`/`brainctl run` are lab supervisor seams only. They are not
+  production deployment targets.
 - `brainctl health` inspects config/state/log readiness without starting live providers or Telegram.
 - `brainctl logs` tails Brain JSONL logs with redaction.
 - `brainctl operations plan` renders preflight, update, restart, rollback, and post-update smoke command lists.
-- `brainctl operations systemd` renders a systemd unit with explicit config,
-  workspace, provider, entrypoint, state/log/artifact paths. It resolves the
-  provider and primary entrypoint from runtime config, so a config declaring
-  Telegram + Codex renders Telegram + Codex rather than fake. It does not write
-  `/etc/systemd/system`, call `systemctl`, or restart anything.
+- `brainctl operations systemd` is deprecated/lab-only Brain supervisor
+  scaffolding. It does not write `/etc/systemd/system`, call `systemctl`, or
+  restart anything, and it must not be used for the Anna production assistant.
+  Production review/install goes through `brainctl stack plan/apply` and targets
+  `codex-chat.service`.
 - `brainctl validate live` renders a guarded Telegram/Codex readiness plan. `--run-safe` executes only no-network/no-secret checks by default.
 - Runtime chat commands such as `update`, `deploy`, and `agent backend` are recognized by the supervisor command interceptor, but they only return safe status text in this parity slice. They do not pull git, rebuild, restart systemd, or mutate crontabs.
 - Runtime `employees` and `employee status/start/stop/steer` commands update durable lifecycle records only; they do not start a real Employee app-server process.
@@ -115,5 +126,6 @@ To add a new deployment:
 6. Only then use an approved real executor. Store actual secret values on the
    server through the chosen env/secret-store mechanism; Brain records only
    redacted secret metadata.
-7. Verify `stack status` reports the canonical deployment metadata path and the
-   servant stack status.
+7. Verify `stack status` reports the canonical deployment metadata path, the
+   servant stack status, and the requested refs/resolved SHAs for the live
+   `codex-chat` and `assistant-agent-logic` checkouts.

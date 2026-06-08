@@ -7,6 +7,11 @@ registry, preserve repo boundaries, and render no-network plans without
 installing services, contacting hosts, or printing secrets. The older Brain
 runtime/provider commands remain validation/lab surfaces.
 
+Brain's supervisor is not the production assistant. Do not install
+`brainctl run`, `brainctl start --foreground`, or `brain-personal.service` as
+the live Telegram assistant. Production deployment uses `stack` commands to
+configure and run `codex-chat.service`.
+
 Setup output should be direct-action first. When a setup step requires the user
 to do something, print the exact copy-paste command or the exact UI message to
 send, not a conceptual instruction. For remote work, this means a full command
@@ -193,6 +198,20 @@ the `codex-chat` service, record deployment metadata, and run health checks. It
 blocks boundary violations such as nesting `assistant-agent-logic` under
 `codex-chat`.
 
+`stack apply` must not reuse stale checkouts. With `--approve` and a real
+executor it fetches or clones the configured branch/ref for `codex-chat` and
+`assistant-agent-logic`, verifies the resulting `git rev-parse HEAD`, and
+records both requested refs and resolved SHAs in the deployment ledger. Exact
+pinning can be represented by a configured ref, but the default behavior is to
+refresh the configured branch before service config/build/restart.
+
+For deployments where the service host needs its own live
+`assistant-agent-logic` checkout, the `codex-chat` environment may include an
+`assistant_logic` block with `host`, `path`, `branch`/`ref`, and `remote_url`.
+Brain uses that live checkout in the rendered `codex-chat` config and in the
+SHA-recorded git update action; it must not point the service at Brain's
+in-repo legacy snapshot.
+
 `stack apply` is dry-run unless explicitly approved. Approval gates are:
 
 - `--approve`: git/build/metadata execution gate.
@@ -328,9 +347,11 @@ pnpm run brainctl workspace run --path ~/.brain/workspace composio-connect.js --
 pnpm run brainctl workspace run --path ~/.brain/workspace composio-connect.js -- --generate --app gmail --user-id <label>
 ```
 
-## Supervisor commands added for parity smoke
+## Lab supervisor commands for parity smoke
 
-`brainctl start` and `brainctl run` now expose the long-running supervisor shape without making live side effects the default:
+`brainctl start` and `brainctl run` expose the deprecated/lab Brain supervisor
+shape without making live side effects the default. They are for fake smoke
+tests and runtime package development only, not production setup targets:
 
 ```bash
 # Prints the resolved start plan only; no providers, Telegram, deployment, or services start.
