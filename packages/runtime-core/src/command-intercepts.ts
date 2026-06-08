@@ -126,7 +126,7 @@ export class RuntimeCommandInterceptor {
   }
 
   private textResult(command: string, text: string): RuntimeCommandInterceptResult {
-    return { handled: true, command, actions: [{ type: "send_text", text, format: "markdown" }] };
+    return { handled: true, command, actions: [{ type: "send_text", text, format: "text" }] };
   }
 
   private async formatHealth(): Promise<string> {
@@ -318,14 +318,21 @@ export type TodoCommand =
 
 export function parseTodoCommand(text: string): TodoCommand {
   const trimmed = text.trim();
-  if (/^\/?(?:todos?|todo\s+list|list\s+todos?|show\s+todos?|current\s+todos?)$/i.test(trimmed)) return { isTodo: true, action: "list" };
+  const normalized = trimmed.replace(/\s+/g, " ");
+  if (/^\/?(?:todos?|todo list)$/i.test(normalized)) return { isTodo: true, action: "list" };
 
-  const add = trimmed.match(/^\/?(?:add\s+(?:a\s+)?todo|todo\s+add|new\s+todo)\s*:?\s+([\s\S]+)$/i);
+  // Keep deterministic todo interception intentionally narrow: only explicit
+  // slash-style todo commands are handled here. Natural language such as
+  // "todo: X", "todo X", "do X", "add todo X", or "delete #1" must flow to
+  // the provider prompt/tool path, where the todo skill workflow decides intent.
+  if (!trimmed.startsWith("/")) return { isTodo: false };
+
+  const add = trimmed.match(/^\/todo\s+add\s+([\s\S]+)$/i)
+    ?? trimmed.match(/^\/todos?\s+add\s+([\s\S]+)$/i);
   if (add?.[1]?.trim()) return { isTodo: true, action: "add", title: add[1].trim() };
 
-  const deleteMatch = trimmed.match(/^\/?(?:(?:delete|remove)\s+todo|todo\s+(?:delete|remove))\s+([\s\S]+)$/i)
-    ?? trimmed.match(/^\/?(?:delete|remove)\s+(#\d+|\d+)$/i)
-    ?? trimmed.match(/^\/?mark\s+(#\d+|\d+)\s+(?:done|complete|completed)$/i);
+  const deleteMatch = trimmed.match(/^\/todo\s+(?:delete|remove)\s+([\s\S]+)$/i)
+    ?? trimmed.match(/^\/todos?\s+(?:delete|remove)\s+([\s\S]+)$/i);
   if (deleteMatch?.[1]?.trim()) return { isTodo: true, action: "delete", ref: deleteMatch[1].trim() };
 
   return { isTodo: false };
@@ -392,7 +399,7 @@ export function parseDeployCommand(text: string): boolean {
 }
 
 function commandText(event: EntryPointInboundEvent): string | undefined {
-  if (event.command) return [event.command, ...(event.args ?? [])].join(" ").trim();
+  if (event.command) return [`/${event.command}`, ...(event.args ?? [])].join(" ").trim();
   return event.text?.trim();
 }
 

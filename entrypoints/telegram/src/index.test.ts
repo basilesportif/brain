@@ -29,6 +29,14 @@ test("maps Brain send_text actions into Telegram call intents", () => {
 });
 
 test("maps Telegram markdownv2 and terminal status conservatively", () => {
+  const plainMarkdown = outboundActionToTelegramIntent({
+    type: "send_text",
+    text: "main_loop: model=gpt-5.5 effort=medium",
+    format: "markdown",
+    target: { conversationId: "123" },
+  });
+  assert.equal(plainMarkdown?.payload.parse_mode, undefined);
+
   const markdown = outboundActionToTelegramIntent({
     type: "send_text",
     text: "*hello*",

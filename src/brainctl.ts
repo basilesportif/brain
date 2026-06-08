@@ -40,7 +40,7 @@ program
 
 program.command("setup")
   .description("Create a private workspace directory scaffold without writing secrets.")
-  .argument("[mode]", "optional mode: defaults, remote-bootstrap, inspect, status, reset, telegram-token-script, or codex-auth-script")
+  .argument("[mode]", "optional mode: defaults, remote-bootstrap, inspect, status, reset, telegram-token-script, composio-api-key-script, or codex-auth-script")
   .option("--workspace <name>", "workspace id", DEFAULT_WORKSPACE_ID)
   .option("--target <target>", "defaults target: local or remote")
   .option("--ssh-host <host>", "remote SSH IP/DNS host for setup defaults")
@@ -57,6 +57,7 @@ program.command("setup")
   .option("--adapter-config <path>", "private Telegram adapter config file for generated token storage script")
   .option("--service-env <path>", "private service env file for generated token storage script")
   .option("--secrets-env <path>", "private secrets env file for generated token storage script")
+  .option("--composio-env <path>", "private workspace .env file for generated Composio API key storage script")
   .option("--binary <path>", "provider binary for generated setup helper scripts")
   .option("--verbose", "include derived config, secrets, state, log, and command details in setup defaults")
   .option("--force", "allow explicitly requested non-destructive rewrites in future setup flows")
@@ -79,10 +80,13 @@ program.command("setup")
     if (mode === "telegram-token-script") {
       return exitWith(await setupTelegramTokenScriptCommand(options));
     }
+    if (mode === "composio-api-key-script") {
+      return exitWith(await setupComposioApiKeyScriptCommand(options));
+    }
     if (mode === "codex-auth-script") {
       return exitWith(await setupCodexAuthScriptCommand(options));
     }
-    if (mode) return exitWith({ ok: false, summary: `unknown setup mode: ${mode}`, details: { supported: ["defaults", "remote-bootstrap", "inspect", "status", "reset", "telegram-token-script", "codex-auth-script"] } });
+    if (mode) return exitWith({ ok: false, summary: `unknown setup mode: ${mode}`, details: { supported: ["defaults", "remote-bootstrap", "inspect", "status", "reset", "telegram-token-script", "composio-api-key-script", "codex-auth-script"] } });
     return exitWith(await setupCommand(options));
   });
 
@@ -359,7 +363,7 @@ workspaceCommands.command("run")
   .allowUnknownOption(true)
   .action(async (script: string, scriptArgs: string[], options) => exitWith(await workspaceRunCommand(script, scriptArgs, options)));
 
-const composio = program.command("composio").description("Optional Composio setup/status checks for Google Calendar and chat data sources");
+const composio = program.command("composio").description("Optional Composio setup/status checks for Gmail and Google Calendar data sources");
 composio.command("setup")
   .description("Render generic Composio setup prompts and missing metadata refs without using real credentials.")
   .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
@@ -1637,6 +1641,15 @@ function renderCodexChatConfigPreview(status: StackStatusDetails): string {
     workspace: status.setupContext.context?.workspaceRoot ?? status.assistantData.workspacePath,
     assistantLogicPath: status.assistantLogic.path,
     assistantDataPath: status.assistantData.path,
+    runtimeContext: {
+      controlPlaneRoot: status.controlPlane.path,
+      codexChatRoot: status.servantRuntime.deploy.path ?? status.servantRuntime.path,
+      assistantLogicRoot: status.assistantLogic.path,
+      assistantDataRoot: status.assistantData.path,
+      repoRegistryPath: status.registry.path,
+      setupContextPath: status.setupContext.path,
+      assistantPackRoot: path.join(status.controlPlane.path, "assistant-packs", "core"),
+    },
     controlPlane: {
       metadataPath: status.deploymentMetadata.canonical.path,
       metadataCanonical: status.deploymentMetadata.canonical.sourceOfTruth,
@@ -2520,10 +2533,12 @@ async function backupCommand(action: "plan" | "init" | "check" | "status", optio
 async function composioSetupStatusCommand(options: { config: string; workspace: string; apiKeyRef?: string; connectedAccountRef?: string }, mode: "setup" | "status"): Promise<CliResult> {
   const config = await loadValidConfig(options.config);
   const workspace = config.config?.workspaces[options.workspace];
+  const workspaceRoot = path.resolve(workspace?.workspacePath ?? defaultWorkspaceRoot(options.workspace));
+  const envSources = config.config ? await workspaceEnvSources(config.config, { workspaceId: options.workspace, workspaceRoot }) : undefined;
   const status = await setupComposioStatus(workspace, {
     apiKeyRef: options.apiKeyRef,
     connectedAccountRef: options.connectedAccountRef,
-  });
+  }, { workspaceId: options.workspace, workspaceRoot, envSources });
   return {
     ok: true,
     summary: mode === "setup" ? "Composio setup prompts rendered without using credentials" : "Composio status inspected without printing credentials",
@@ -2532,8 +2547,8 @@ async function composioSetupStatusCommand(options: { config: string; workspace: 
       config: config.ok ? { path: path.resolve(options.config), valid: true } : config,
       ...status,
       prompts: [
+        "Do you want optional Gmail access through Composio?",
         "Do you want optional Google Calendar access through Composio?",
-        "Do you want optional chat data-source access through Composio?",
         "Where should the Composio API key be referenced (env:NAME or file:/path) without storing the value in git?",
         "Where should connected account metadata refs live in the private workspace?",
       ],
@@ -3360,40 +3375,139 @@ function setupWebPublishingStatus(workspace: WorkspaceConfig | undefined) {
   };
 }
 
-async function setupComposioStatus(workspace: WorkspaceConfig | undefined, overrides: { apiKeyRef?: string; connectedAccountRef?: string } = {}) {
+async function setupComposioStatus(
+  workspace: WorkspaceConfig | undefined,
+  overrides: { apiKeyRef?: string; connectedAccountRef?: string } = {},
+  context: { workspaceId?: string; workspaceRoot?: string; envSources?: Map<string, EnvSecretSource[]> } = {},
+) {
   const config = workspace?.integrations?.composio;
+  const workspaceId = context.workspaceId ?? "workspace";
+  const workspaceRoot = path.resolve(context.workspaceRoot ?? workspace?.workspacePath ?? defaultWorkspaceRoot(workspaceId));
   const apiKeyRef = overrides.apiKeyRef ?? config?.apiKeyRef;
   const connectedAccountRef = overrides.connectedAccountRef ?? config?.connectedAccountRef;
   const googleCalendar = config?.dataSources?.googleCalendar;
-  const chat = config?.dataSources?.chat;
+  const gmail = config?.dataSources?.gmail ?? config?.dataSources?.chat;
+  const legacyChat = config?.dataSources?.chat;
   const refs: ConfigRef[] = [
-    ...maybeRef(apiKeyRef, "integrations.composio.apiKeyRef", workspace ? "workspace" : "cli"),
-    ...maybeRef(connectedAccountRef, "integrations.composio.connectedAccountRef", workspace ? "workspace" : "cli"),
-    ...maybeRef(config?.metadataRef, "integrations.composio.metadataRef"),
-    ...maybeRef(googleCalendar?.connectedAccountRef, "integrations.composio.dataSources.googleCalendar.connectedAccountRef"),
-    ...maybeRef(googleCalendar?.metadataRef, "integrations.composio.dataSources.googleCalendar.metadataRef"),
-    ...(googleCalendar?.requiredEnvRefs ?? []).map((ref) => ({ workspaceId: "workspace", ref: asSecretRef(ref), source: "integrations.composio.dataSources.googleCalendar.requiredEnvRefs" })),
-    ...maybeRef(chat?.connectedAccountRef, "integrations.composio.dataSources.chat.connectedAccountRef"),
-    ...maybeRef(chat?.metadataRef, "integrations.composio.dataSources.chat.metadataRef"),
-    ...(chat?.requiredEnvRefs ?? []).map((ref) => ({ workspaceId: "workspace", ref: asSecretRef(ref), source: "integrations.composio.dataSources.chat.requiredEnvRefs" })),
+    ...maybeRef(apiKeyRef, "integrations.composio.apiKeyRef", workspace ? workspaceId : "cli"),
+    ...maybeRef(connectedAccountRef, "integrations.composio.connectedAccountRef", workspace ? workspaceId : "cli"),
+    ...maybeRef(config?.metadataRef, "integrations.composio.metadataRef", workspaceId),
+    ...maybeRef(googleCalendar?.connectedAccountRef, "integrations.composio.dataSources.googleCalendar.connectedAccountRef", workspaceId),
+    ...maybeRef(googleCalendar?.metadataRef, "integrations.composio.dataSources.googleCalendar.metadataRef", workspaceId),
+    ...(googleCalendar?.requiredEnvRefs ?? []).map((ref) => ({ workspaceId, ref: asSecretRef(ref), source: "integrations.composio.dataSources.googleCalendar.requiredEnvRefs" })),
+    ...maybeRef(gmail?.connectedAccountRef, "integrations.composio.dataSources.gmail.connectedAccountRef", workspaceId),
+    ...maybeRef(gmail?.metadataRef, "integrations.composio.dataSources.gmail.metadataRef", workspaceId),
+    ...(gmail?.requiredEnvRefs ?? []).map((ref) => ({ workspaceId, ref: asSecretRef(ref), source: "integrations.composio.dataSources.gmail.requiredEnvRefs" })),
   ];
-  const refMetadata = await secretRefMetadata(refs);
+  const envSources = context.envSources ?? new Map([[workspaceId, await Promise.all([
+    readEnvSecretSource(path.join(workspaceRoot, ".env")),
+    readEnvSecretSource(path.join(workspaceRoot, "config", `brain-${workspaceId}.env`)),
+    readEnvSecretSource(path.join(workspaceRoot, "secrets", "secrets.env")),
+  ])]]);
+  const refMetadata = await secretRefMetadata(refs, { envSources });
+  const privateConfig = await composioPrivateConfigMetadata(workspaceRoot);
+  const refPresent = (source: string) => refMetadata.some((ref) => ref.source === source && ref.present === true);
+  const apiKeyPresent = Boolean(apiKeyRef && refPresent("integrations.composio.apiKeyRef")) || privateConfig.workspaceEnv.keys.includes("COMPOSIO_API_KEY");
+  const googleCalendarReady = privateConfig.composioYaml.googleCalendarAccounts > 0 || refPresent("integrations.composio.dataSources.googleCalendar.connectedAccountRef") || refPresent("integrations.composio.connectedAccountRef");
+  const gmailReady = privateConfig.composioYaml.gmailAccounts > 0 || refPresent("integrations.composio.dataSources.gmail.connectedAccountRef") || refPresent("integrations.composio.connectedAccountRef");
   const missing = [];
   const enabled = config?.enabled ?? Boolean(overrides.apiKeyRef || overrides.connectedAccountRef);
-  if (enabled && !apiKeyRef) missing.push("Composio API key ref");
-  if (enabled && !connectedAccountRef) missing.push("Composio connected account metadata ref");
-  if (googleCalendar?.enabled && !(googleCalendar.connectedAccountRef ?? connectedAccountRef)) missing.push("Google Calendar connected account ref");
-  if (chat?.enabled && !(chat.connectedAccountRef ?? connectedAccountRef)) missing.push("chat connected account ref");
+  if (enabled && !apiKeyPresent) missing.push("Composio API key");
+  if (enabled && !connectedAccountRef && !privateConfig.composioYaml.present) missing.push("Composio connected account metadata ref");
+  if (googleCalendar?.enabled && !googleCalendarReady) missing.push("Google Calendar connected account");
+  if (gmail?.enabled && !gmailReady) missing.push("Gmail connected account");
+  const nextMissing = [
+    ...(!apiKeyPresent ? ["Composio API key"] : []),
+    ...(!googleCalendarReady ? ["Google Calendar connected account"] : []),
+    ...(!gmailReady ? ["Gmail connected account"] : []),
+  ];
+  const ready = nextMissing.length === 0;
   return {
     enabled,
+    ready,
     apiKeyRefPresent: Boolean(apiKeyRef),
+    apiKeyPresent,
     connectedAccountRefPresent: Boolean(connectedAccountRef),
     dataSources: {
-      googleCalendar: { enabled: googleCalendar?.enabled ?? false, connectedAccountRefPresent: Boolean(googleCalendar?.connectedAccountRef ?? connectedAccountRef), metadataRefPresent: Boolean(googleCalendar?.metadataRef) },
-      chat: { enabled: chat?.enabled ?? false, connectedAccountRefPresent: Boolean(chat?.connectedAccountRef ?? connectedAccountRef), metadataRefPresent: Boolean(chat?.metadataRef) },
+      googleCalendar: { enabled: googleCalendar?.enabled ?? false, ready: googleCalendarReady, connectedAccountRefPresent: Boolean(googleCalendar?.connectedAccountRef ?? connectedAccountRef), metadataRefPresent: Boolean(googleCalendar?.metadataRef) },
+      gmail: { enabled: gmail?.enabled ?? false, ready: gmailReady, connectedAccountRefPresent: Boolean(gmail?.connectedAccountRef ?? connectedAccountRef), metadataRefPresent: Boolean(gmail?.metadataRef) },
+      legacyChat: legacyChat ? { enabled: legacyChat.enabled, mapsTo: "gmail" } : undefined,
     },
+    privateConfig,
     refs: refMetadata,
     missing,
+    nextDataSourceFlow: {
+      status: ready ? "ready" : "needs-user-input",
+      missing: nextMissing,
+      urls: [
+        { label: "Composio API keys", url: "https://app.composio.dev/settings" },
+        { label: "Composio connected accounts", url: "https://app.composio.dev/connected_accounts" },
+      ],
+      accountInfoNeeded: [
+        "Composio API key (enter only through the one-use helper; do not paste it into chat/logs).",
+        "Google Calendar OAuth connection for Tim; after OAuth, record the returned connected account id plus a non-secret email label.",
+        "Gmail OAuth connection for each Gmail inbox Tim wants Brain to read/send; after OAuth, record each returned connected account id plus a non-secret email label.",
+      ],
+      commands: {
+        generateApiKeyHelper: `pnpm run brainctl setup composio-api-key-script --workspace ${shellArg(workspaceId)} --path ${shellArg(workspaceRoot)}`,
+        checkStatus: `pnpm run brainctl composio status --workspace ${shellArg(workspaceId)} --config ${shellArg(path.join(workspaceRoot, "config", "runtime.yaml"))}`,
+        generateGoogleCalendarOauth: `pnpm run brainctl workspace run --path ${shellArg(workspaceRoot)} composio-connect.js -- --generate --app google_calendar --user-id <tim-email-or-label>`,
+        generateGmailOauth: `pnpm run brainctl workspace run --path ${shellArg(workspaceRoot)} composio-connect.js -- --generate --app gmail --user-id <tim-email-or-label>`,
+      },
+      assistantLogic: {
+        source: "in-repo:@brain/assistant-logic",
+        setupSkill: "packages/assistant-logic/config/skills/setup-composio-connect.md",
+        accountConfigPath: path.join(workspaceRoot, "composio.yaml"),
+        apiKeyEnvPath: path.join(workspaceRoot, ".env"),
+        valuesPrinted: false,
+      },
+    },
+  };
+}
+
+async function composioPrivateConfigMetadata(workspaceRoot: string) {
+  const workspaceEnvPath = path.join(workspaceRoot, ".env");
+  const composioPath = path.join(workspaceRoot, "composio.yaml");
+  const workspaceEnvSource = await readEnvSecretSource(workspaceEnvPath);
+  const composioMetadata = await fileMetadata(composioPath);
+  let googleCalendarAccounts = 0;
+  let gmailAccounts = 0;
+  let calendarAliases = 0;
+  let parseError: string | undefined;
+  if (composioMetadata.present) {
+    try {
+      const parsed = YAML.parse(await readFile(composioPath, "utf8")) as unknown;
+      const accounts = asRecord(asRecord(parsed)?.accounts);
+      const calendar = asRecord(accounts?.google_calendar);
+      const calendarId = asString(calendar?.id);
+      googleCalendarAccounts = calendarId && /^ca_/.test(calendarId) && calendarId !== "ca_XXXX" ? 1 : 0;
+      const gmail = Array.isArray(accounts?.gmail) ? accounts.gmail : [];
+      gmailAccounts = gmail.filter((entry) => {
+        const id = asString(asRecord(entry)?.id);
+        return id && /^ca_/.test(id) && id !== "ca_XXXX";
+      }).length;
+      calendarAliases = Object.keys(asRecord(asRecord(parsed)?.calendars) ?? {}).length;
+    } catch (error) {
+      parseError = errorMessage(error);
+    }
+  }
+  return {
+    workspaceEnv: {
+      path: workspaceEnvPath,
+      metadata: workspaceEnvSource.metadata,
+      keys: [...workspaceEnvSource.keys].sort(),
+      valuesPrinted: false,
+    },
+    composioYaml: {
+      ...composioMetadata,
+      path: composioPath,
+      googleCalendarAccounts,
+      gmailAccounts,
+      calendarAliases,
+      accountIdsPrinted: false,
+      accountEmailsPrinted: false,
+      parseError,
+    },
   };
 }
 
@@ -3422,6 +3536,9 @@ async function liveValidateCommand(options: {
   const setupStateUpdate = options.runSafe && ok
     ? await updateSetupProgressFromLiveValidation(config.config.workspaces[options.workspace]?.workspacePath ?? defaultWorkspaceRoot(options.workspace), options, safeResults)
     : undefined;
+  const ledgerReconciliation = options.runSafe && ok
+    ? await reconcileDeploymentLedgerAfterValidation(config.config, options, safeResults, setupStateUpdate)
+    : undefined;
   const wizard = liveValidationWizard(options, plan, safeResults, ok, setupStateUpdate);
   return {
     ok,
@@ -3432,9 +3549,10 @@ async function liveValidateCommand(options: {
       nextStep: wizard.nextStep,
       guidedSequence: wizard.guidedSequence,
       setupStateUpdate,
+      ledgerReconciliation,
       plan,
       results: safeResults,
-      sideEffects: options.runSafe ? "safe local checks and private setup progress metadata update when workspace state exists" : "none",
+      sideEffects: options.runSafe ? "safe local checks, private setup progress metadata update, and stale deployment-ledger blocker reconciliation when current health clears it" : "none",
     },
   };
 }
@@ -3509,11 +3627,12 @@ function liveValidationWizard(
     },
     {
       step: "composio-accounts",
-      title: "Connect Composio accounts.",
-      prompt: "Connect Google Calendar/chat accounts only if this workspace should use them.",
+      title: "Connect Gmail and Google Calendar through Composio.",
+      prompt: "After the base Telegram/Codex service is ready, connect Gmail and Google Calendar through Composio if this workspace should use those data sources.",
       actions: [
-        "Store Composio API keys and connected-account metadata as private secret refs.",
-        "Skip this step for a minimal Telegram + Codex setup and return later.",
+        `Generate the one-use API key helper with: pnpm run brainctl setup composio-api-key-script --workspace ${shellArg(options.workspace)} --path <workspace>`,
+        "Tim gets the key from https://app.composio.dev/settings and enters it only into the helper TTY prompt.",
+        "Then generate short-lived OAuth links with composio-connect.js for `google_calendar` and `gmail`; store only connected-account metadata in private workspace files.",
       ],
     },
     {
@@ -3959,7 +4078,8 @@ function redactSecrets(value: unknown): unknown {
 
 function redactString(value: string): string {
   return value.replace(/\b\d{5,}:[A-Za-z0-9_-]{16,}\b/g, "[redacted-telegram-token]")
-    .replace(/\b(sk-[A-Za-z0-9_-]{16,})\b/g, "[redacted-api-key]");
+    .replace(/\b(sk-[A-Za-z0-9_-]{16,})\b/g, "[redacted-api-key]")
+    .replace(/\b(comp_[A-Za-z0-9_-]{12,})\b/g, "[redacted-composio-api-key]");
 }
 
 function errorMessage(error: unknown): string {
@@ -4025,12 +4145,24 @@ const LOCAL_SETUP_CONTEXT_RELATIVE_PATH = path.join("private", "setup-context.js
 const PRIVATE_WORKSPACE_GITIGNORE = [
   "# Brain private workspace backup safety defaults",
   "# Keep secret-bearing, noisy, and local-cache paths out of private Git backups.",
+  ".env",
+  ".env.*",
+  "!.env.example",
+  "*.env",
+  "*.env.*",
+  "!*.env.example",
+  "config/*.env",
+  "config/*.env.*",
   "secrets/**",
   "logs/**",
   "tmp/**",
   "cache/**",
   "caches/**",
   "state/setup-progress.json",
+  "state/telegram-offset.json",
+  "state/telegram-pairing/**",
+  "state/jobs/**",
+  "state/events/**",
   "**/.cache/**",
   "**/node_modules/**",
   "**/*.log",
@@ -4039,8 +4171,8 @@ const PRIVATE_WORKSPACE_GITIGNORE = [
   "private/documents/files/**",
   "",
   "# Keep generated runtime scratch data local unless deliberately included.",
-  "artifacts/tmp/**",
-  "artifacts/generated/**",
+  "artifacts/**",
+  "!artifacts/metadata/**",
   "",
 ].join("\n");
 
@@ -4132,7 +4264,7 @@ interface SetupRemoteBootstrapOptions extends SetupDefaultsOptions {
   sshConfig?: string;
 }
 
-interface SetupTelegramTokenScriptOptions {
+interface SetupSecretScriptOptions {
   workspace: string;
   path?: string;
   config?: string;
@@ -4145,6 +4277,7 @@ interface SetupTelegramTokenScriptOptions {
   adapterConfig?: string;
   serviceEnv?: string;
   secretsEnv?: string;
+  composioEnv?: string;
   binary?: string;
 }
 
@@ -4474,7 +4607,7 @@ function conciseSetupFlow() {
       },
       {
         step: "composio-accounts",
-        prompt: "Connect Composio accounts if this workspace needs them.",
+        prompt: "After the base workspace/service are healthy, connect Gmail and Google Calendar through Composio with a one-use API-key helper and OAuth links.",
       },
     ],
     orderingNotes: [
@@ -4688,7 +4821,7 @@ async function setupResetCommand(options: SetupResetOptions): Promise<CliResult>
   };
 }
 
-async function setupTelegramTokenScriptCommand(options: SetupTelegramTokenScriptOptions): Promise<CliResult> {
+async function setupTelegramTokenScriptCommand(options: SetupSecretScriptOptions): Promise<CliResult> {
   const workspaceRoot = path.resolve(options.path ?? defaultWorkspaceRoot(options.workspace));
   const scriptDir = options.output ? path.dirname(path.resolve(options.output)) : await mkdtemp(path.join(os.tmpdir(), "brain-token-"));
   const scriptPath = path.resolve(options.output ?? path.join(scriptDir, "store-brain-telegram-token.sh"));
@@ -4736,7 +4869,68 @@ async function setupTelegramTokenScriptCommand(options: SetupTelegramTokenScript
   };
 }
 
-async function setupCodexAuthScriptCommand(options: SetupTelegramTokenScriptOptions): Promise<CliResult> {
+async function setupComposioApiKeyScriptCommand(options: SetupSecretScriptOptions): Promise<CliResult> {
+  const workspaceRoot = path.resolve(options.path ?? defaultWorkspaceRoot(options.workspace));
+  const defaultScriptParent = path.join(workspaceRoot, "tmp");
+  if (!options.output) {
+    await mkdir(defaultScriptParent, { recursive: true, mode: 0o700 });
+    await chmod(defaultScriptParent, 0o700).catch(() => undefined);
+  }
+  const scriptDir = options.output ? path.dirname(path.resolve(options.output)) : await mkdtemp(path.join(defaultScriptParent, "brain-composio-key-"));
+  const scriptPath = path.resolve(options.output ?? path.join(scriptDir, "store-brain-composio-api-key.sh"));
+  const workspaceEnv = path.resolve(options.composioEnv ?? path.join(workspaceRoot, ".env"));
+  const script = renderComposioApiKeyStorageScript({ workspaceRoot, workspaceEnv });
+  const sshRunCommand = remoteOneUseScriptSshCommand({
+    scriptPath,
+    sshHost: options.sshHost,
+    sshUser: options.sshUser,
+    serviceUser: options.serviceUser,
+    label: "brain-composio-key",
+  });
+
+  await mkdir(scriptDir, { recursive: true, mode: 0o700 });
+  await chmod(scriptDir, 0o700).catch(() => undefined);
+  await writeFile(scriptPath, script, { mode: 0o700 });
+  await chmod(scriptPath, 0o700);
+  const syntax = spawnSync("bash", ["-n", scriptPath], { encoding: "utf8" });
+  if ((syntax.status ?? 0) !== 0) {
+    return {
+      ok: false,
+      summary: "Composio API key script was written but failed bash syntax validation",
+      details: {
+        scriptPath,
+        stderr: redactSecrets(String(syntax.stderr ?? "")),
+        sideEffects: "wrote script only; no API key value read or stored",
+        secretValuesPrinted: false,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    summary: "Composio API key storage script written and syntax checked",
+    details: {
+      scriptPath,
+      runCommand: `bash ${shellArg(scriptPath)}`,
+      sshRunCommand,
+      workspaceRoot,
+      writes: {
+        workspaceEnv,
+        envKey: "COMPOSIO_API_KEY",
+      },
+      validation: "bash -n passed",
+      sideEffects: "wrote one-use private temporary script only; no API key value read or stored",
+      secretValuesPrinted: false,
+      nextCommands: {
+        verifyMetadata: `pnpm run brainctl composio status --workspace ${shellArg(options.workspace)} --config ${shellArg(path.join(workspaceRoot, "config", "runtime.yaml"))}`,
+        generateGoogleCalendarOauth: `pnpm run brainctl workspace run --path ${shellArg(workspaceRoot)} composio-connect.js -- --generate --app google_calendar --user-id <tim-email-or-label>`,
+        generateGmailOauth: `pnpm run brainctl workspace run --path ${shellArg(workspaceRoot)} composio-connect.js -- --generate --app gmail --user-id <tim-email-or-label>`,
+      },
+    },
+  };
+}
+
+async function setupCodexAuthScriptCommand(options: SetupSecretScriptOptions): Promise<CliResult> {
   const workspaceRoot = path.resolve(options.path ?? defaultWorkspaceRoot(options.workspace));
   const repoRoot = path.resolve(options.repo ?? process.cwd());
   const configPath = path.resolve(options.config ?? path.join(workspaceRoot, "config", "runtime.yaml"));
@@ -4836,6 +5030,17 @@ function remoteCodexLoginSshCommand(input: { sshHost?: string; sshUser?: string;
   return `ssh -t ${shellArg(destination)} ${shellArg(remoteCommand)}`;
 }
 
+function remoteOneUseScriptSshCommand(input: { scriptPath: string; sshHost?: string; sshUser?: string; serviceUser?: string; label: string }): string | undefined {
+  if (!input.sshHost) return undefined;
+  const destination = remoteSshDestination(input.sshHost, input.sshUser);
+  const sameUser = !input.serviceUser || !input.sshUser || input.serviceUser === input.sshUser;
+  const serviceUser = input.serviceUser ?? input.sshUser ?? "";
+  const remoteCommand = sameUser
+    ? `bash ${shellArg(input.scriptPath)}`
+    : `home=$(getent passwd ${shellArg(serviceUser)} | cut -d: -f6) && tmp=$(mktemp "$home/${input.label}.XXXXXX.sh") && install -o ${shellArg(serviceUser)} -g ${shellArg(serviceUser)} -m 700 ${shellArg(input.scriptPath)} "$tmp"; rc=$?; if [ "$rc" -eq 0 ]; then sudo -iu ${shellArg(serviceUser)} bash "$tmp"; rc=$?; fi; rm -f "$tmp"; exit "$rc"`;
+  return `ssh -t ${shellArg(destination)} ${shellArg(remoteCommand)}`;
+}
+
 function renderTelegramTokenStorageScript(input: { workspaceRoot: string; tokenFile: string; adapterConfig: string; serviceEnv: string; secretsEnv: string }): string {
   return `#!/usr/bin/env bash
 set -euo pipefail
@@ -4919,6 +5124,79 @@ update_env_file "$secrets_env" TELEGRAM_BOT_TOKEN_FILE "$token_file"
 
 unset token
 printf "Stored Telegram token in private Brain secret files. Token value was not printed.\\n" >&2
+`;
+}
+
+function renderComposioApiKeyStorageScript(input: { workspaceRoot: string; workspaceEnv: string }): string {
+  return `#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+script_path="\${BASH_SOURCE[0]:-$0}"
+workspace=${shellLiteral(input.workspaceRoot)}
+workspace_env=${shellLiteral(input.workspaceEnv)}
+
+restore_tty() {
+  if [ -t 0 ]; then stty echo 2>/dev/null || true; fi
+}
+
+cleanup() {
+  status="$?"
+  restore_tty
+  if [ "$status" -eq 0 ]; then rm -f -- "$script_path"; fi
+}
+trap cleanup EXIT
+
+mkdir -p "$workspace" "$workspace/tmp" "$(dirname "$workspace_env")"
+chmod 700 "$workspace" "$workspace/tmp"
+
+printf "Composio API key: " >&2
+if [ -t 0 ]; then stty -echo; fi
+IFS= read -r api_key
+restore_tty
+printf "\\n" >&2
+
+if [ -z "$api_key" ]; then
+  printf "No API key entered; nothing was written.\\n" >&2
+  exit 1
+fi
+if ! printf "%s" "$api_key" | grep -Eq "^[^[:space:]]{12,}$"; then
+  printf "API key format was not accepted; nothing was written.\\n" >&2
+  exit 1
+fi
+
+dotenv_quote() {
+  printf "'"
+  printf "%s" "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+update_env_file() {
+  file="$1"
+  key="$2"
+  value="$3"
+  mkdir -p "$(dirname "$file")"
+  tmp="$(mktemp "$file.tmp.XXXXXX")"
+  if [ -f "$file" ]; then
+    while IFS= read -r line; do
+      case "$line" in
+        "$key="*|"export $key="*) ;;
+        *) printf "%s\\n" "$line" ;;
+      esac
+    done < "$file" > "$tmp"
+  fi
+  printf "%s=%s\\n" "$key" "$value" >> "$tmp"
+  install -m 600 "$tmp" "$file"
+  rm -f "$tmp"
+}
+
+quoted_key="$(dotenv_quote "$api_key")"
+update_env_file "$workspace_env" COMPOSIO_API_KEY "$quoted_key"
+chmod 600 "$workspace_env"
+
+unset api_key quoted_key
+printf "Stored Composio API key in private Brain workspace .env. Key value was not printed.\\n" >&2
+printf "Next: run Brain Composio status, then generate Google Calendar and Gmail OAuth links with composio-connect.js.\\n" >&2
 `;
 }
 
@@ -5060,7 +5338,7 @@ async function setupInspectDetails(options: SetupInspectOptions) {
   const repo = await gitMetadata(repoRoot);
   const backup = setupBackupStatus(workspace, workspaceRoot);
   const webPublishing = setupWebPublishingStatus(workspace);
-  const composio = await setupComposioStatus(workspace);
+  const composio = await setupComposioStatus(workspace, {}, { workspaceId: options.workspace, workspaceRoot, envSources });
   const transcription = setupTranscriptionStatus(workspace);
   const assistantWorkspace = await assistantWorkspaceParityStatus({ workspaceRoot, workspaceId: options.workspace });
   const serviceName = options.serviceName ?? `brain-${options.workspace}`;
@@ -5362,8 +5640,8 @@ function buildSetupPlan(input: {
   if (!input.webPublishing.enabled) missing_optional.push("web publishing not configured/enabled");
   else configured.push("web publishing config present");
 
-  if (!input.composio.enabled) missing_optional.push("Composio Google Calendar/chat not configured/enabled");
-  else configured.push("Composio integration config present");
+  if (input.composio.ready) configured.push("Composio Gmail/Google Calendar data sources ready by metadata");
+  else missing_optional.push(`Composio Gmail/Google Calendar setup incomplete: ${input.composio.nextDataSourceFlow.missing.join(", ") || "not enabled"}`);
 
   if (!input.transcription.enabled) missing_optional.push("voice/audio transcription not configured/enabled");
   else if (!input.transcription.apiKeyRefPresent) missing_required.push("OpenAI transcription API key ref missing");
@@ -5397,13 +5675,14 @@ function setupResumeWizard(details: {
   const telegramEntrypoint = details.entrypoints.find((entrypoint) => entrypoint.kind === "telegram" && entrypoint.enabled);
   const telegramSecretRefPresent = Boolean(telegramEntrypoint?.configRefPresent && details.secretRefs.some((ref) => ref.source === "entrypoint.configRef" && ref.present === true));
   const backupConfigured = Boolean(details.backup && details.backup.strategy !== "none");
-  const composioConnected = Boolean(details.composio?.enabled && details.composio.missing.length === 0);
+  const composioReady = Boolean(details.composio?.ready);
   const state = details.setupState?.state;
   const codexAuthUser = state?.statuses.codexAuth.runAsUser;
   const codexAuthVerifiedByState = codexAuthMatchesServiceUser(state?.statuses.codexAuth, details.serviceUser);
   const serviceActiveForWorkspace = details.service?.active === true && details.service.workspaceMatched !== false;
   const serviceStarted = serviceActiveForWorkspace || state?.statuses.service.started === true;
   const serviceInstalled = details.service?.installed === true || state?.statuses.service.installed === true || serviceStarted;
+  const baseRuntimeReadyForDataSources = personalWorkspaceReady && backupConfigured && telegramSecretRefPresent && runtimeConfigReady && codexAuthVerifiedByState && serviceStarted;
   const steps = [
     {
       step: "telegram-connection",
@@ -5435,14 +5714,21 @@ function setupResumeWizard(details: {
     },
     {
       step: "composio-accounts",
-      title: "Connect Composio accounts.",
-      complete: composioConnected || details.composio?.enabled === false,
-      evidence: composioConnected
-        ? ["Composio API and connected-account refs are present by metadata only."]
-        : details.composio?.enabled === false
-          ? ["Composio is disabled for this workspace; skip unless the user wants calendar/chat data sources."]
-          : [`Composio refs missing: ${details.composio?.missing.join(", ") || "account metadata"}.`],
-      resumePrompt: "Connect Composio only if this workspace needs Google Calendar or chat data-source access.",
+      title: "Connect Gmail and Google Calendar through Composio.",
+      complete: composioReady || (!baseRuntimeReadyForDataSources && details.composio?.enabled === false),
+      evidence: composioReady
+        ? ["Composio API key plus Gmail and Google Calendar connected-account metadata are present by metadata only; values were not printed."]
+        : baseRuntimeReadyForDataSources
+          ? [`Base workspace/service are ready; next data-source inputs needed: ${details.composio?.nextDataSourceFlow.missing.join(", ") || "Composio account metadata"}.`]
+          : details.composio?.enabled === false
+            ? ["Composio is disabled for this workspace; skip until the base Telegram/Codex service is ready or the user asks for Gmail/Calendar."]
+            : [`Composio refs missing: ${details.composio?.missing.join(", ") || "account metadata"}.`],
+      actions: [
+        details.composio?.nextDataSourceFlow.commands.generateApiKeyHelper ?? "Generate the Composio API key helper with brainctl setup composio-api-key-script.",
+        details.composio?.nextDataSourceFlow.commands.generateGoogleCalendarOauth ?? "Generate a Google Calendar OAuth link with composio-connect.js.",
+        details.composio?.nextDataSourceFlow.commands.generateGmailOauth ?? "Generate a Gmail OAuth link with composio-connect.js.",
+      ],
+      resumePrompt: "Prompt Tim for only the Composio API key via the one-use helper, then use Composio OAuth links for Google Calendar and Gmail connected accounts.",
     },
     {
       step: "essential-runtime-choices",
@@ -5686,6 +5972,122 @@ async function updateSetupProgressFromLiveValidation(
   await writeFile(progressPath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
   await chmod(progressPath, 0o600);
   return { present: true, path: progressPath, metadata: await fileMetadata(progressPath), state: redactSetupProgress(state), wrote: true };
+}
+
+async function reconcileDeploymentLedgerAfterValidation(
+  config: BrainConfig,
+  options: { workspace: string },
+  results: SafeValidationResult[],
+  setupStateUpdate: Awaited<ReturnType<typeof updateSetupProgressFromLiveValidation>> | undefined,
+): Promise<Record<string, unknown>> {
+  const workspace = config.workspaces[options.workspace];
+  const workspaceRoot = path.resolve(workspace?.workspacePath ?? defaultWorkspaceRoot(options.workspace));
+  const ledgerPath = deploymentMetadataPath(workspaceRoot);
+  const metadata = await fileMetadata(ledgerPath);
+  if (!metadata.present) {
+    return { inspected: true, path: ledgerPath, present: false, wrote: false, skipped: "deployment ledger missing", secretValuesPrinted: false };
+  }
+
+  const resultOk = (id: string) => results.find((result) => result.id === id)?.ok === true;
+  const state = setupStateUpdate?.state;
+  const service = setupServiceStatus(`brain-${options.workspace}`, workspaceRoot);
+  const configHealthy = resultOk("config");
+  const secretsHealthy = resultOk("secrets");
+  const runtimeHealthy = resultOk("runtime-smoke");
+  const authHealthy = state?.statuses.codexAuth.status === "verified" || resultOk("codex-provider");
+  const telegramHealthy = state?.statuses.telegramToken.configured === true || telegramTokenPresent(results.find((result) => result.id === "telegram-entrypoint"));
+  const serviceHealthy = service.active === true && service.workspaceMatched !== false;
+  const blockersCleared = configHealthy && secretsHealthy && runtimeHealthy && authHealthy && telegramHealthy && serviceHealthy;
+
+  let store: Record<string, unknown>;
+  try {
+    store = JSON.parse(await readFile(ledgerPath, "utf8")) as Record<string, unknown>;
+  } catch (error) {
+    return { inspected: true, path: ledgerPath, present: true, wrote: false, error: `could not parse deployment ledger: ${errorMessage(error)}`, secretValuesPrinted: false };
+  }
+
+  const deployments = Array.isArray(store.deployments) ? store.deployments.filter(isRecord) : [];
+  const stale = deployments.filter(deploymentHasAuthSecretBlocker);
+  if (stale.length === 0) {
+    return { inspected: true, path: ledgerPath, present: true, wrote: false, staleBlockersFound: 0, blockersCleared, service, secretValuesPrinted: false };
+  }
+  if (!blockersCleared) {
+    return {
+      inspected: true,
+      path: ledgerPath,
+      present: true,
+      wrote: false,
+      staleBlockersFound: stale.length,
+      skipped: "current config/secrets/auth/telegram/service health has not cleared the stale blocker",
+      health: { configHealthy, secretsHealthy, runtimeHealthy, authHealthy, telegramHealthy, serviceHealthy },
+      service,
+      secretValuesPrinted: false,
+    };
+  }
+
+  const now = new Date().toISOString();
+  const updatedIds: string[] = [];
+  for (const deployment of stale) {
+    const id = asString(deployment.id);
+    if (id) updatedIds.push(id);
+    deployment.status = "healthy";
+    deployment.updatedAt = now;
+    deployment.secretValuesStored = false;
+    deployment.health = {
+      ...(asRecord(deployment.health) ?? {}),
+      status: "passed",
+      reconciledAt: now,
+      source: "brainctl validate live",
+    };
+    removeAuthSecretBlockerFields(deployment);
+  }
+  store.version = DEPLOYMENT_METADATA_VERSION;
+  store.kind = DEPLOYMENT_METADATA_KIND;
+  store.updatedAt = now;
+  store.secretValuesStored = false;
+  store.deployments = deployments;
+  await writeFile(ledgerPath, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+  await chmod(ledgerPath, 0o600);
+  return {
+    inspected: true,
+    path: ledgerPath,
+    present: true,
+    wrote: true,
+    staleBlockersFound: stale.length,
+    updatedDeployments: updatedIds,
+    removedBlocker: "blocked_on_user_auth_or_secret",
+    status: "healthy",
+    service,
+    metadata: await fileMetadata(ledgerPath),
+    secretValuesPrinted: false,
+  };
+}
+
+function deploymentHasAuthSecretBlocker(deployment: Record<string, unknown>): boolean {
+  const needle = "blocked_on_user_auth_or_secret";
+  const values = [
+    deployment.status,
+    deployment.blocker,
+    deployment.blockedReason,
+    deployment.blockerReason,
+    deployment.reason,
+    deployment.nextAction,
+    deployment.nextRecommendedStep,
+    ...(Array.isArray(deployment.blockers) ? deployment.blockers : []),
+  ];
+  return values.some((value) => typeof value === "string" && value.includes(needle));
+}
+
+function removeAuthSecretBlockerFields(deployment: Record<string, unknown>): void {
+  const needle = "blocked_on_user_auth_or_secret";
+  for (const key of ["blocker", "blockedReason", "blockerReason", "reason", "nextAction", "nextRecommendedStep"]) {
+    if (typeof deployment[key] === "string" && deployment[key].includes(needle)) delete deployment[key];
+  }
+  if (Array.isArray(deployment.blockers)) {
+    const remaining = deployment.blockers.filter((value) => !(typeof value === "string" && value.includes(needle)));
+    if (remaining.length > 0) deployment.blockers = remaining;
+    else delete deployment.blockers;
+  }
 }
 
 function telegramTokenPresent(result: SafeValidationResult | undefined): boolean {
@@ -6169,6 +6571,10 @@ function collectConfigRefs(config: BrainConfig): ConfigRef[] {
     if (calendar?.connectedAccountRef) refs.push({ workspaceId, ref: calendar.connectedAccountRef, source: "integrations.composio.dataSources.googleCalendar.connectedAccountRef" });
     if (calendar?.metadataRef) refs.push({ workspaceId, ref: calendar.metadataRef, source: "integrations.composio.dataSources.googleCalendar.metadataRef", optional: true });
     for (const ref of calendar?.requiredEnvRefs ?? []) refs.push({ workspaceId, ref: asSecretRef(ref), source: "integrations.composio.dataSources.googleCalendar.requiredEnvRefs" });
+    const gmail = composio?.dataSources?.gmail;
+    if (gmail?.connectedAccountRef) refs.push({ workspaceId, ref: gmail.connectedAccountRef, source: "integrations.composio.dataSources.gmail.connectedAccountRef" });
+    if (gmail?.metadataRef) refs.push({ workspaceId, ref: gmail.metadataRef, source: "integrations.composio.dataSources.gmail.metadataRef", optional: true });
+    for (const ref of gmail?.requiredEnvRefs ?? []) refs.push({ workspaceId, ref: asSecretRef(ref), source: "integrations.composio.dataSources.gmail.requiredEnvRefs" });
     const chat = composio?.dataSources?.chat;
     if (chat?.connectedAccountRef) refs.push({ workspaceId, ref: chat.connectedAccountRef, source: "integrations.composio.dataSources.chat.connectedAccountRef" });
     if (chat?.metadataRef) refs.push({ workspaceId, ref: chat.metadataRef, source: "integrations.composio.dataSources.chat.metadataRef", optional: true });
@@ -6189,6 +6595,7 @@ async function workspaceEnvSources(config: BrainConfig, override?: { workspaceId
   await Promise.all(Object.entries(config.workspaces).map(async ([workspaceId, workspace]) => {
     const workspaceRoot = path.resolve(override?.workspaceId === workspaceId ? override.workspaceRoot : workspace.workspacePath ?? defaultWorkspaceRoot(workspaceId));
     const candidates = [
+      path.join(workspaceRoot, ".env"),
       path.join(workspaceRoot, "config", `brain-${workspaceId}.env`),
       path.join(workspaceRoot, "secrets", "secrets.env"),
     ];

@@ -22,6 +22,12 @@ promotes it. Keep migration work bounded and inspectable.
   `assistant-agent-data`/workspace repos. Do not vendor, subtree, copy, or merge
   those repos into Brain. The in-repo `packages/assistant-logic` commands are
   lab compatibility helpers only.
+- Do **not** encode Tim-assistant domain workflows, prompts, skills, or intent
+  rules in Brain. Brain wraps deployment/control-plane operations for
+  `codex-chat` and `assistant-agent-logic`; domain behavior belongs in
+  `assistant-agent-logic`, while runtime/channel behavior belongs in
+  `codex-chat` or generic Brain transport/entrypoint code only when it is truly
+  provider- and domain-neutral.
 
 ## Entrypoint and provider direction
 

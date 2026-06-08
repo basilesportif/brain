@@ -127,7 +127,7 @@ The normal core setup flow is:
 3. Connect Telegram with exact BotFather messages or the generated token helper
    command; do not start polling/webhooks yet.
 4. Pull or initialize the private data/backup repo.
-5. Connect Composio accounts only if this workspace needs calendar/chat data
+5. Connect Composio accounts only if this workspace needs Gmail/Calendar data
    sources.
 6. Show exact operations/systemd command(s) for review/install/start, then wait
    for explicit confirmation before privileged changes.
@@ -309,8 +309,24 @@ DNS is reported as not needed; if it is a domain, DNS records are listed as
 operator work only.
 
 `composio setup/status` is optional and generic. It checks refs for Composio API
-key metadata, connected-account metadata, Google Calendar, and chat data-source
+key metadata, connected-account metadata, Google Calendar, and Gmail data-source
 config without using real credentials or printing values.
+
+For Composio API-key entry, use the reusable setup helper instead of pasting a
+key into chat or a shell command:
+
+```bash
+pnpm run brainctl setup composio-api-key-script --workspace personal --path ~/.brain/workspace
+bash <returned-store-brain-composio-api-key.sh>
+pnpm run brainctl composio status --config ~/.brain/workspace/config/runtime.yaml --workspace personal
+```
+
+Then create short-lived OAuth links through the vendored assistant-logic command:
+
+```bash
+pnpm run brainctl workspace run --path ~/.brain/workspace composio-connect.js -- --generate --app google_calendar --user-id <label>
+pnpm run brainctl workspace run --path ~/.brain/workspace composio-connect.js -- --generate --app gmail --user-id <label>
+```
 
 ## Supervisor commands added for parity smoke
 
@@ -438,7 +454,7 @@ future provider/service health checks can be skipped.
 - `automation run`, `automation due`, and `automation monitor` evaluate loops/monitor events without installing crontabs/watchers. They dry-run by default; `--dispatch` uses a local static subagent lifecycle plus file spool/locks for fake execution smoke.
 - `web` commands validate/publish/prune generated static page packages through the publisher boundary; publish/prune support `--dry-run`.
 - `web setup/status` checks domain vs direct-IP publishing fields and Caddy/reverse-proxy notes without changing DNS.
-- `composio setup/status` checks optional Google Calendar/chat refs through Composio without real credentials.
+- `composio setup/status` checks optional Gmail/Google Calendar refs through Composio without real credentials.
 - `doctor` combines the checks above with toolchain and private-boundary placeholder checks.
 
 The CLI is the place setup, health, runtime, migration, and publisher commands should attach instead of making entrypoint or provider packages own operator workflows.

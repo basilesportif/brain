@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { FakeEntrypointAdapter } from "@brain/entrypoint-protocol";
-import { BrainRuntime, BrainSupervisor, EmployeeLifecycle, FakeProviderAdapter, InMemoryEmployeeStore, InMemorySubagentJobStore, ProviderEmployeeRuntime, RuntimeCommandInterceptor, StaticSubagentExecutor, SubagentLifecycle } from "./index.js";
+import { BrainRuntime, BrainSupervisor, EmployeeLifecycle, FakeProviderAdapter, InMemoryEmployeeStore, InMemorySubagentJobStore, ProviderEmployeeRuntime, RuntimeCommandInterceptor, StaticSubagentExecutor, SubagentLifecycle, parseTodoCommand, type ProviderTurn } from "./index.js";
 
 test("RuntimeCommandInterceptor handles logs and deploy/update as safe service commands", async () => {
   const interceptor = new RuntimeCommandInterceptor({
@@ -100,16 +100,65 @@ test("RuntimeCommandInterceptor handles todo commands with main_loop formatting"
   assert.equal(list?.command, "todos");
   assert.equal(list?.actions[0]?.type === "send_text" ? list.actions[0].text : "", "main_loop: model=gpt-5.5 effort=medium\n\nCurrent todos:\n\n1. Pay card");
 
-  const add = await interceptor.handle(event("add todo Walk dog"));
+  const add = await interceptor.handle(event("/todo add Walk dog"));
   assert.match(add?.actions[0]?.type === "send_text" ? add.actions[0].text : "", /Added todo: Walk dog/);
 
-  const del = await interceptor.handle(event("delete #1"));
+  const del = await interceptor.handle(event("/todo delete #1"));
   assert.match(del?.actions[0]?.type === "send_text" ? del.actions[0].text : "", /Removed todo: Pay card/);
   assert.deepEqual(calls, [
     { script: "todo-list.js", args: [] },
     { script: "todo-add.js", args: ["--title", "Walk dog"] },
     { script: "todo-delete.js", args: ["--number", "1"] },
   ]);
+});
+
+test("RuntimeCommandInterceptor leaves natural todo phrasing to the provider prompt path", async () => {
+  assert.deepEqual(parseTodoCommand("todo: Walk dog"), { isTodo: false });
+  assert.deepEqual(parseTodoCommand("todo Walk dog"), { isTodo: false });
+  assert.deepEqual(parseTodoCommand("do Walk dog"), { isTodo: false });
+  assert.deepEqual(parseTodoCommand("add todo Walk dog"), { isTodo: false });
+  assert.deepEqual(parseTodoCommand("delete #1"), { isTodo: false });
+  assert.deepEqual(parseTodoCommand("/todo add Walk dog"), { isTodo: true, action: "add", title: "Walk dog" });
+  assert.deepEqual(parseTodoCommand("/todo delete #1"), { isTodo: true, action: "delete", ref: "#1" });
+
+  const seenTurns: ProviderTurn[] = [];
+  const entrypoint = new FakeEntrypointAdapter({ workspaceId: "personal", entrypointId: "fake-main" });
+  for (const text of ["todo: Walk dog", "todo Walk dog", "do Walk dog"]) {
+    entrypoint.enqueueText(text, { conversationId: "test" });
+  }
+  entrypoint.close();
+  const runtime = new BrainRuntime({
+    workspaceId: "personal",
+    workspace: {
+      workspacePath: "/tmp/personal",
+      primaryEntrypointId: "fake-main",
+      enabledEntrypoints: { "fake-main": { kind: "fake", enabled: true } },
+    },
+    provider: new FakeProviderAdapter((turn) => {
+      seenTurns.push(turn);
+      return [{ type: "final", text: "provider handled natural todo" }];
+    }),
+  });
+  const interceptor = new RuntimeCommandInterceptor({
+    assistantCommands: {
+      async run() {
+        throw new Error("natural todo text must not be intercepted as a deterministic command");
+      },
+    },
+  });
+  const supervisor = new BrainSupervisor({ runtime, entrypoint, commandInterceptor: interceptor });
+
+  const result = await supervisor.run({ maxEvents: 3 });
+  assert.equal(result.processed.length, 3);
+  assert.deepEqual(result.processed.map((item) => item.intercepted?.command), [undefined, undefined, undefined]);
+  assert.deepEqual(seenTurns.map((turn) => turn.inboundEvent.text), ["todo: Walk dog", "todo Walk dog", "do Walk dog"]);
+  for (const turn of seenTurns) {
+    assert.match(turn.prompt, /assistant-agent-logic todo skill/);
+    assert.match(turn.prompt, /workspace-command execution/);
+    assert.doesNotMatch(turn.prompt, /Natural todo intent/);
+    assert.doesNotMatch(turn.prompt, /todo: X/);
+    assert.doesNotMatch(turn.prompt, /todo-add\.js -- --title/);
+  }
 });
 
 test("RuntimeCommandInterceptor records safe Employee lifecycle commands", async () => {

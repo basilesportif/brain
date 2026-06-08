@@ -48,7 +48,7 @@ The setup docs and skills should be readable by Codex or Claude Code itself so a
   required for first bootstrap.
 - Running setup again should always offer missing optional components without
   overwriting existing private config: private Git/local-snapshot backup, web
-  publishing, Google Calendar/chat via Composio, provider/entrypoint refs, and
+  publishing, Gmail/Google Calendar via Composio, provider/entrypoint refs, and
   other integrations.
 - Setup progress state is only a resume aid. If saved progress does not match
   actual workspace/remote/server state, or setup cannot identify a safe next
@@ -72,7 +72,7 @@ Agents should use root-level `AGENTS.md`, `CLAUDE.md` when running under Claude 
 - `brainctl backup plan/init/check/status` for private workspace backup setup.
 - `brainctl web setup/status` for domain vs direct-IP generated-page publishing
   checks; DNS and Caddy changes stay manual/operator-confirmed.
-- `brainctl composio setup/status` for optional Google Calendar/chat metadata
+- `brainctl composio setup/status` for optional Gmail/Google Calendar metadata
   refs via Composio without real credentials.
 - `brainctl doctor` for environment and credential-readiness checks.
 - `brainctl config validate` for runtime config validation.

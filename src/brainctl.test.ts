@@ -438,6 +438,74 @@ test("brainctl live validation does not mark a missing Telegram token file confi
   }
 });
 
+test("brainctl validate live reconciles stale deployment ledger auth/secret blockers when health is clear", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-ledger-reconcile-"));
+  try {
+    const workspace = path.join(root, "workspace");
+    const backupRepo = path.join(root, "backup-repo");
+    const config = path.join(root, "runtime.yaml");
+    const tokenFile = path.join(workspace, "secrets", "telegram-bot-token");
+    const ledgerPath = path.join(workspace, "state", "control-plane", "deployments.json");
+    const bin = path.join(root, "bin");
+    await mkdir(path.dirname(tokenFile), { recursive: true });
+    await mkdir(path.dirname(ledgerPath), { recursive: true });
+    await mkdir(bin, { recursive: true });
+    await writeFile(config, testRuntimeConfig(workspace, backupRepo));
+    await writeFile(tokenFile, "123456:abcDEF_ghi-JKLmnop\n");
+    await writeFile(path.join(bin, "systemctl"), [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      "if [ \"${1:-}\" = \"show\" ] && [ \"${3:-}\" = \"--property=LoadState\" ]; then printf 'loaded\\n'; exit 0; fi",
+      "if [ \"${1:-}\" = \"show\" ] && [ \"${3:-}\" = \"--property=ExecStart\" ]; then printf 'ExecStart=pnpm run brainctl run --workspace personal --state " + workspace.replace(/'/g, "'\"'\"'") + "/state\\n'; exit 0; fi",
+      "if [ \"${1:-}\" = \"is-enabled\" ]; then exit 0; fi",
+      "if [ \"${1:-}\" = \"is-active\" ]; then exit 0; fi",
+      "exit 1",
+      "",
+    ].join("\n"));
+    await chmod(path.join(bin, "systemctl"), 0o700);
+    await writeFile(ledgerPath, `${JSON.stringify({
+      version: 1,
+      kind: "brain.control-plane.deployments",
+      updatedAt: "2026-06-07T00:00:00.000Z",
+      canonical: {
+        sourceOfTruth: "local-brain-workspace",
+        workspaceRoot: workspace,
+        path: ledgerPath,
+        relativePath: "state/control-plane/deployments.json",
+      },
+      deployments: [{
+        id: "personal:production:codex-chat",
+        stack: "codex-chat",
+        workspace: "personal",
+        environment: "production",
+        status: "blocked",
+        updatedAt: "2026-06-07T00:00:00.000Z",
+        blocker: "blocked_on_user_auth_or_secret",
+        blockers: ["blocked_on_user_auth_or_secret"],
+        health: { status: "failed" },
+        secretValuesStored: false,
+      }],
+      secretValuesStored: false,
+    }, null, 2)}\n`);
+
+    const result = spawnBrainctl(["validate", "live", "--config", config, "--workspace", "personal", "--telegram-token-file", tokenFile, "--run-safe"], {
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout) as { details: { ledgerReconciliation: { wrote: boolean; removedBlocker: string; status: string } } };
+    assert.equal(parsed.details.ledgerReconciliation.wrote, true);
+    assert.equal(parsed.details.ledgerReconciliation.removedBlocker, "blocked_on_user_auth_or_secret");
+    assert.equal(parsed.details.ledgerReconciliation.status, "healthy");
+    const ledger = JSON.parse(await readFile(ledgerPath, "utf8")) as { deployments: Array<Record<string, unknown>> };
+    assert.equal(ledger.deployments[0]?.status, "healthy");
+    assert.equal(ledger.deployments[0]?.blocker, undefined);
+    assert.equal(ledger.deployments[0]?.blockers, undefined);
+    assert.equal((ledger.deployments[0]?.health as { status?: string }).status, "passed");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("brainctl setup telegram-token-script writes a syntax-checked one-use secret script", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brainctl-token-script-"));
   try {
@@ -495,6 +563,56 @@ test("brainctl setup telegram-token-script writes a syntax-checked one-use secre
     assert.equal(telegramConfigRef?.envSource, "workspace-env-file");
     assert.equal(telegramConfigRef?.envFile?.path, serviceEnv);
     assert.equal(statusJson.details.setupWizard.nextIncompleteStep.step, "configure-verify-codex-auth");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brainctl setup composio-api-key-script writes a syntax-checked one-use secret script", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-composio-key-script-"));
+  try {
+    const workspace = path.join(root, "workspace");
+    const backupRepo = path.join(root, "backup-repo");
+    const config = path.join(root, "runtime.yaml");
+    const script = path.join(root, "store-brain-composio-api-key.sh");
+    const apiKey = "comp_test_key_123456789";
+    await mkdir(workspace, { recursive: true });
+    await writeFile(config, testRuntimeConfig(workspace, backupRepo, { composioEnabled: true }));
+
+    const generated = spawnBrainctl(["setup", "composio-api-key-script", "--workspace", "personal", "--path", workspace, "--output", script, "--ssh-host", "203.0.113.10", "--ssh-user", "brain"]);
+    assert.equal(generated.status, 0, generated.stderr);
+    const generatedJson = JSON.parse(generated.stdout) as { ok: boolean; details: { scriptPath: string; validation: string; secretValuesPrinted: boolean; sshRunCommand: string; nextCommands: { generateGmailOauth: string; generateGoogleCalendarOauth: string } } };
+    assert.equal(generatedJson.ok, true);
+    assert.equal(generatedJson.details.scriptPath, script);
+    assert.equal(generatedJson.details.validation, "bash -n passed");
+    assert.equal(generatedJson.details.secretValuesPrinted, false);
+    assert.equal(generatedJson.details.sshRunCommand, `ssh -t brain@203.0.113.10 'bash ${script}'`);
+    assert.match(generatedJson.details.nextCommands.generateGmailOauth, /--generate --app gmail/);
+    assert.match(generatedJson.details.nextCommands.generateGoogleCalendarOauth, /--generate --app google_calendar/);
+    assert.doesNotMatch(generated.stdout, new RegExp(apiKey));
+
+    const syntax = spawnSync("bash", ["-n", script], { encoding: "utf8" });
+    assert.equal(syntax.status, 0, syntax.stderr);
+
+    const stored = spawnSync("bash", [script], { input: `${apiKey}\n`, encoding: "utf8" });
+    assert.equal(stored.status, 0, stored.stderr);
+    assert.doesNotMatch(stored.stdout, new RegExp(apiKey));
+    assert.doesNotMatch(stored.stderr, new RegExp(apiKey));
+    await assert.rejects(stat(script));
+
+    const workspaceEnv = path.join(workspace, ".env");
+    assert.equal((await stat(workspaceEnv)).mode & 0o777, 0o600);
+    assert.match(await readFile(workspaceEnv, "utf8"), /^COMPOSIO_API_KEY='comp_test_key_123456789'$/m);
+
+    const status = spawnBrainctl(["composio", "status", "--config", config, "--workspace", "personal"]);
+    assert.equal(status.status, 0, status.stderr);
+    assert.doesNotMatch(status.stdout, new RegExp(apiKey));
+    const statusJson = JSON.parse(status.stdout) as { details: { apiKeyPresent: boolean; privateConfig: { workspaceEnv: { keys: string[]; valuesPrinted: boolean } }; nextDataSourceFlow: { missing: string[] } } };
+    assert.equal(statusJson.details.apiKeyPresent, true);
+    assert.deepEqual(statusJson.details.privateConfig.workspaceEnv.keys, ["COMPOSIO_API_KEY"]);
+    assert.equal(statusJson.details.privateConfig.workspaceEnv.valuesPrinted, false);
+    assert.ok(statusJson.details.nextDataSourceFlow.missing.includes("Google Calendar connected account"));
+    assert.ok(statusJson.details.nextDataSourceFlow.missing.includes("Gmail connected account"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -957,12 +1075,13 @@ test("brainctl setup status uses systemd state for service resume", async () => 
       PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
     });
     assert.equal(status.status, 0, status.stderr);
-    const statusJson = JSON.parse(status.stdout) as { details: { service: { installed: boolean; enabled: boolean; active: boolean }; setupWizard: { nextIncompleteStep: { step: string }; completedSteps: Array<{ step: string }> } } };
+    const statusJson = JSON.parse(status.stdout) as { details: { service: { installed: boolean; enabled: boolean; active: boolean }; setupWizard: { nextIncompleteStep: { step: string; evidence: string[] }; completedSteps: Array<{ step: string }> } } };
     assert.equal(statusJson.details.service.installed, true);
     assert.equal(statusJson.details.service.enabled, true);
     assert.equal(statusJson.details.service.active, true);
     assert.ok(statusJson.details.setupWizard.completedSteps.some((step) => step.step === "install-start-service"));
-    assert.equal(statusJson.details.setupWizard.nextIncompleteStep.step, "optional-follow-ups");
+    assert.equal(statusJson.details.setupWizard.nextIncompleteStep.step, "composio-accounts");
+    assert.ok(statusJson.details.setupWizard.nextIncompleteStep.evidence.some((item) => /Gmail connected account/.test(item) && /Google Calendar connected account/.test(item)));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1662,9 +1781,9 @@ function testRuntimeConfig(workspace: string, backupRepo: string, options: { com
     `            connectedAccountRef: file:${path.join(workspace, "config", "google-calendar-account.json")}`,
     "            requiredEnvRefs:",
     "              - env:COMPOSIO_API_KEY",
-    "          chat:",
+    "          gmail:",
     `            enabled: ${options.composioEnabled ? "true" : "false"}`,
-    `            connectedAccountRef: file:${path.join(workspace, "config", "chat-account.json")}`,
+    `            connectedAccountRef: file:${path.join(workspace, "config", "gmail-account.json")}`,
     "            requiredEnvRefs:",
     "              - env:COMPOSIO_API_KEY",
     "",

@@ -132,6 +132,9 @@ importers:
       '@brain/workspace-schema':
         specifier: workspace:*
         version: link:../config/workspace-schema
+      yaml:
+        specifier: ^2.8.1
+        version: 2.9.0
       zod:
         specifier: ^4.1.12
         version: 4.4.3

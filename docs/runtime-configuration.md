@@ -46,6 +46,14 @@ workspaces:
     promptContext:
       includeActiveEntrypointMetadata: true
       exposeChannelSecrets: false
+    runtimeContext:
+      controlPlaneRoot: /home/brain/brain
+      codexChatRoot: /home/brain/pkg/tim/codex-chat
+      assistantLogicRoot: /home/brain/pkg/tim/assistant-agent-logic
+      assistantDataRoot: /home/brain/.brain/workspace
+      repoRegistryPath: /home/brain/.brain/workspace/.claude/repo-registry/index.yaml
+      setupContextPath: /home/brain/brain/private/setup-context.json
+      assistantPackRoot: /home/brain/brain/assistant-packs/core
     backup:
       strategy: private-git # none | local-snapshot | private-git
       privateGit:
@@ -53,7 +61,7 @@ workspaces:
         remote: git@github.com:example/private-brain-backup.git
         branch: main
         include: [config/**, state/**, projects/**, notes/**, documents/metadata/**, artifacts/metadata/**]
-        exclude: [secrets/**, logs/**, tmp/**, cache/**, caches/**, "**/.cache/**", "**/node_modules/**", "**/*.log"]
+        exclude: [.env, ".env.*", "*.env", "*.env.*", config/*.env, config/*.env.*, secrets/**, logs/**, tmp/**, cache/**, caches/**, state/setup-progress.json, state/telegram-offset.json, state/telegram-pairing/**, state/jobs/**, state/events/**, private/documents/files/**, artifacts/**, "!artifacts/metadata/**", "**/.cache/**", "**/node_modules/**", "**/*.log"]
     webPublishing:
       enabled: false
       mode: disabled # disabled | domain | ip
@@ -81,9 +89,9 @@ workspaces:
             enabled: false
             connectedAccountRef: file:/home/brain/.brain/workspace/config/google-calendar-connected-account.json
             requiredEnvRefs: [env:COMPOSIO_API_KEY]
-          chat:
+          gmail:
             enabled: false
-            connectedAccountRef: file:/home/brain/.brain/workspace/config/chat-connected-account.json
+            connectedAccountRef: file:/home/brain/.brain/workspace/config/gmail-connected-account.json
             requiredEnvRefs: [env:COMPOSIO_API_KEY]
 ```
 
@@ -161,13 +169,19 @@ connectedAccountRef = "file:/home/brain/.brain/workspace/config/composio-connect
 These sections are optional and are reported by `brainctl setup inspect/status`
 as missing optional pieces when absent or disabled:
 
+- `runtimeContext`: explicit roots passed into provider turns so Codex can load
+  Brain AGENTS, assistant-pack prompt fragments, `codex-chat` behavior context,
+  `assistant-agent-logic` skill docs, and assistant-data/repo-registry state
+  without inferring them from the private workspace cwd. When roots are omitted,
+  Brain can resolve local paths from `repoRegistryPath` and `setupContextPath`
+  metadata if those files are present.
 - `backup`: `none`, `local-snapshot`, or `private-git`. `private-git` records a
   private repo path/remote/branch plus include/exclude policy. Safe defaults
   exclude secrets, logs, tmp, caches, `node_modules`, and `*.log`.
 - `webPublishing`: domain or direct-IP publishing metadata. `domain` mode needs
   operator-managed DNS; `ip` mode does not. Brain records base URL, publish
   root, manifest path, and Caddy/reverse-proxy notes but never changes DNS.
-- `integrations.composio`: optional Composio refs for Google Calendar and chat
+- `integrations.composio`: optional Composio refs for Gmail and Google Calendar
   data sources. Store real API keys and connected-account metadata in env/file
   refs outside git; status commands print only metadata.
 - `transcription`: optional voice/audio attachment transcription. The initial

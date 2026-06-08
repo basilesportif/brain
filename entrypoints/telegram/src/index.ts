@@ -1336,8 +1336,11 @@ async function* toAsyncIterable<T>(items: Iterable<T> | AsyncIterable<T>): Async
   for await (const item of items) yield item;
 }
 
-function telegramParseMode(format: "text" | "markdown" | "markdownv2" | undefined): "Markdown" | "MarkdownV2" | undefined {
-  if (format === "markdown") return "Markdown";
+function telegramParseMode(format: "text" | "markdown" | "markdownv2" | undefined): "MarkdownV2" | undefined {
+  // Telegram's legacy Markdown parser is brittle for ordinary assistant text
+  // (for example, unescaped underscores in "main_loop"). Treat both omitted,
+  // text, and markdown formats as plain text. Callers that need rich formatting
+  // must opt into MarkdownV2 and provide a fully escaped message.
   if (format === "markdownv2") return "MarkdownV2";
   return undefined;
 }

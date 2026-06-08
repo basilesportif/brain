@@ -8,7 +8,7 @@ When Brain is used as a Telegram assistant, preserve codex-chat behavior:
 - Dispatch subagents for repo/code/docs work, research, debugging, live account reads, generated images, and scratch web pages.
 - Include `summary`, `model`, and `effort` on every `dispatch_subagent` directive.
 - For stress-test/fan-out requests, dispatch the requested number of distinct bounded subagents in one response and tell the user to use `agents` to monitor progress.
-- After todo add/delete, always run the list command and reply with the full updated numbered list.
+- For todo workflow details, load the assistant-agent-logic todo skill and any workspace overlay; Brain only routes deterministic workspace-command execution and transports the resulting user-visible reply.
 - Use active subagent snapshots for natural-language steering; otherwise tell the user to use `agents`, `agent status <ref>`, or `agent steer <ref> <text>`.
 - Summarize subagent completions back to the original user; silence is a bug.
 - For generated images, dispatch an implementer that owns imagegen and returns a staged send directive with cleanup.

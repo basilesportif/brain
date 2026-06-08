@@ -24,6 +24,18 @@ export const promptContextSchema = z.object({
   exposeChannelSecrets: z.boolean().default(false),
 }).default({ includeActiveEntrypointMetadata: true, exposeChannelSecrets: false });
 
+export const runtimeContextConfigSchema = z.object({
+  controlPlaneRoot: z.string().min(1).optional(),
+  codexChatRoot: z.string().min(1).optional(),
+  assistantLogicRoot: z.string().min(1).optional(),
+  assistantDataRoot: z.string().min(1).optional(),
+  repoRegistryPath: z.string().min(1).optional(),
+  setupContextPath: z.string().min(1).optional(),
+  assistantPackRoot: z.string().min(1).optional(),
+  assistantPackPromptPath: z.string().min(1).optional(),
+}).strict().default({});
+export type RuntimeContextConfig = z.infer<typeof runtimeContextConfigSchema>;
+
 export const backupStrategySchema = z.enum(["none", "local-snapshot", "private-git"]);
 export type BackupStrategy = z.infer<typeof backupStrategySchema>;
 
@@ -46,13 +58,25 @@ export const defaultBackupInclude = [
   ".claude/repo-registry/repos/**/notes.md",
 ];
 export const defaultBackupExclude = [
+  ".env",
+  ".env.*",
+  "*.env",
+  "*.env.*",
+  "config/*.env",
+  "config/*.env.*",
   "secrets/**",
   "logs/**",
   "tmp/**",
   "cache/**",
   "caches/**",
   "state/setup-progress.json",
+  "state/telegram-offset.json",
+  "state/telegram-pairing/**",
+  "state/jobs/**",
+  "state/events/**",
   "private/documents/files/**",
+  "artifacts/**",
+  "!artifacts/metadata/**",
   ".claude/repo-registry/runtime/node_modules/**",
   ".claude/repo-registry/runtime/dist/**",
   ".claude/repo-registry/runtime/.turbo/**",
@@ -119,6 +143,9 @@ export const composioConfigSchema = z.object({
   metadataRef: z.string().min(1).optional(),
   dataSources: z.object({
     googleCalendar: composioDataSourceConfigSchema.optional(),
+    gmail: composioDataSourceConfigSchema.optional(),
+    // Back-compat alias from the first setup slice; Brain reports this as Gmail
+    // in setup/status output because the vendored live data-source is Gmail.
     chat: composioDataSourceConfigSchema.optional(),
   }).strict().default({}),
 }).strict().default({ enabled: false, dataSources: {} });
@@ -154,6 +181,7 @@ export const workspaceConfigSchema = z.object({
   enabledEntrypoints: z.record(z.string().min(1), entrypointConfigSchema),
   outboundDefaults: outboundDefaultsSchema.optional(),
   promptContext: promptContextSchema.optional(),
+  runtimeContext: runtimeContextConfigSchema.optional(),
   activeEntrypointMode: activeEntrypointModeSchema.optional(),
   backup: backupConfigSchema.optional(),
   webPublishing: webPublishingConfigSchema.optional(),

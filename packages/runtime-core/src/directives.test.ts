@@ -33,3 +33,11 @@ test("normalizes legacy codex-chat target and subagent control directives", () =
   assert.equal(notify?.type, "send_text");
   assert.equal(notify?.target?.route, "admins");
 });
+
+test("requires dispatch_subagent profile in Brain and legacy codex-chat directives", () => {
+  const result = parseBrainDirectives(`\`\`\`codex-chat
+{"version":1,"actions":[{"type":"dispatch_subagent","prompt":"Investigate","summary":"missing profile","model":"gpt-5.5","effort":"high","idempotencyKey":"child"}]}
+\`\`\``);
+  assert.equal(result.blocks.length, 0);
+  assert.equal(result.errors.some((error) => /profile/.test(error)), true);
+});

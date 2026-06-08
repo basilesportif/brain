@@ -1,3 +1,6 @@
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import path from "node:path";
+import YAML from "yaml";
 import { routeOutboundToOrigin, type BrainOutboundAction, type EntryPointInboundEvent } from "@brain/entrypoint-protocol";
 import type { WorkspaceConfig } from "@brain/workspace-schema";
 import { parseBrainDirectives } from "./directives.js";
@@ -41,6 +44,48 @@ export interface BrainRuntimeHandleOptions {
 
 export interface BuildPromptOptions {
   activeSubagents?: ActiveSubagentSnapshot;
+}
+
+interface LoadedContextFile {
+  label: string;
+  path: string;
+  present: boolean;
+  bytes?: number;
+  text?: string;
+  truncated?: boolean;
+}
+
+interface RuntimeContextResolution {
+  roots: {
+    workspaceRoot: string;
+    controlPlaneRoot?: string;
+    codexChatRoot?: string;
+    assistantLogicRoot?: string;
+    assistantDataRoot?: string;
+  };
+  setupContext: {
+    path?: string;
+    present: boolean;
+    used: boolean;
+  };
+  repoRegistry: {
+    path?: string;
+    present: boolean;
+    used: boolean;
+    resolvedAliases: Record<string, { host?: string; path?: string; localPath?: string; source?: string }>;
+  };
+  assistantPack: {
+    root?: string;
+    promptFiles: LoadedContextFile[];
+  };
+  instructionFiles: LoadedContextFile[];
+  assistantLogicSkills: {
+    root?: string;
+    directory?: string;
+    available: string[];
+    loaded: LoadedContextFile[];
+  };
+  warnings: string[];
 }
 
 export class BrainRuntime {
@@ -111,7 +156,7 @@ export class BrainRuntime {
       for (const action of block.actions) await this.collectRuntimeAction(event, action, actions, subagentJobIds, controlResults);
     }
     if (parsed.cleanText) {
-      actions.unshift(routeOutboundToOrigin(event, { type: "send_text", text: sanitizeUserFacingText(parsed.cleanText, { workspacePath: this.options.workspace.workspacePath }), format: "markdown" }));
+      actions.unshift(routeOutboundToOrigin(event, { type: "send_text", text: sanitizeUserFacingText(parsed.cleanText, { workspacePath: this.options.workspace.workspacePath }), format: "text" }));
     }
 
     return {
@@ -194,6 +239,7 @@ export class BrainRuntime {
 export function buildPrompt(event: EntryPointInboundEvent, workspace: WorkspaceConfig, options: BuildPromptOptions = {}): string {
   const entrypoint = workspace.enabledEntrypoints[event.entrypoint.entrypointId];
   const workspacePath = workspace.workspacePath;
+  const runtimeContext = resolveRuntimeContext(workspace);
   const activeMetadata = {
     workspaceId: event.workspaceId,
     workspace: {
@@ -227,8 +273,14 @@ export function buildPrompt(event: EntryPointInboundEvent, workspace: WorkspaceC
         documentsMetadata: `${workspacePath}/documents/metadata`,
       },
     },
+    runtimeContext: promptSafeRuntimeContext(runtimeContext),
     assistantLogic: {
-      skillDocs: "packages/assistant-logic/config/skills/*.md",
+      source: "configured assistant pack / registered assistant-agent-logic checkout",
+      root: runtimeContext.roots.assistantLogicRoot,
+      skillDocs: runtimeContext.assistantLogicSkills.directory
+        ? `${runtimeContext.assistantLogicSkills.directory}/*.md`
+        : undefined,
+      labFallbackSkillDocs: "packages/assistant-logic/config/skills/*.md",
       commandWrapper: `pnpm run brainctl workspace run --path ${workspacePath} <script>.js -- <args>`,
       commonScripts: {
         todos: ["todo-add.js", "todo-list.js", "todo-delete.js"],
@@ -259,6 +311,7 @@ export function buildPrompt(event: EntryPointInboundEvent, workspace: WorkspaceC
     "When asked about personal workspace state, inspect the private JSON paths and overlays in Active runtime context before answering.",
     "If filesystem or script inspection fails, report the exact command or path failure; do not claim no project/todo/CRM/reminder list exists from runtime metadata alone.",
     ...behaviorParityInstructions(workspacePath),
+    formatLoadedRuntimeContext(runtimeContext),
     `Active runtime context: ${JSON.stringify(activeMetadata)}`,
     formatActiveSubagentSnapshot(options.activeSubagents),
     event.text ? `Inbound text: ${event.text}` : "Inbound text: (none)",
@@ -274,12 +327,13 @@ function behaviorParityInstructions(workspacePath: string): string[] {
     "For every dispatch_subagent action include summary, model, and effort. Use model gpt-5.5; effort medium for mechanical scoped edits and straightforward calendar event creation/adding with needed details and no external lookup; high for normal research/inspection/account lookup including calendar/email lookup and calendar creation requiring research/external-data lookup; and xhigh for risky ambiguous scheduling debugging architecture multi-step deploy-sensitive work.",
     "For user-facing main-loop work, begin with the exact routing disclosure `main_loop: model=gpt-5.5 effort=medium` before the result, unless the message is only a terse service-command response.",
     "User-facing formatting parity: never paste raw assistant-logic JSON stdout, createdAt/updatedAt timestamps, or internal todo/reminder IDs into Telegram/user replies. Use clean lists/summaries from command results; Brain also applies a final sanitizer as a safety net.",
+    "Default replies are plain text. Do not request Telegram Markdown parsing unless you explicitly set format markdownv2 and have escaped the entire message for MarkdownV2.",
     "The runtime sends visible dispatch feedback for each dispatched subagent with summary, profile, model, effort, id, and ref. Do not hide delegation from the user.",
     "Subagent stress/fan-out requests: when the user asks to stress test or fan out N subagents, dispatch N distinct bounded researcher jobs in one response, avoid duplicating the same file/topic in the same batch, and send a short user-visible note telling them to use `agents` to monitor progress.",
     "Subagent callbacks with an origin entrypoint are user-originated work: summarize completion/failure back to the user. If the main turn is silent, Brain will send a direct fallback result.",
     "Natural-language subagent steering: use the Active subagent jobs snapshot when present. Emit steer_subagent only when exactly one matching job has steerable=true; otherwise ask which job or tell the user to run `agent steer <ref> <text>`. Use service commands `agents`, `agents detail`, `agent status <ref>`, `agent kill <ref>`, and `agent steer <ref> <text>` for mechanical control/status.",
-    "Before touching todos, projects, CRM, reminders, calendar/email, finance, health/Whoop, betting, messaging, generated web pages, or file-save, read the matching skill doc under packages/assistant-logic/config/skills and then any workspace overlay under instructions/skills. Follow the doc's command flags exactly.",
-    `Todos: direct main-loop operations only. For add/delete, run the mutation and then always run \`${wrapper} todo-list.js --\`; include the full updated numbered todo list in the same user reply and hide internal td_* IDs. For numeric deletes, pass \`--number N\` (or map #N to the internal ID) instead of treating the number as a title.`,
+    "Before touching todos, projects, CRM, reminders, calendar/email, finance, health/Whoop, betting, messaging, generated web pages, or file-save, read the matching assistant-agent-logic skill doc exposed by the configured assistant pack (lab fallback path: packages/assistant-logic/config/skills) and then any workspace overlay under instructions/skills. Follow the doc's command flags exactly.",
+    "Todo intent recognition, post-mutation display rules, and delete-reference semantics live in the assistant-agent-logic todo skill and workspace overlays; Brain should only route generic workspace-command execution and transport the user-visible reply.",
     `Reminders: direct deterministic reminder operations may stay in the main loop; list reminders as clean numbered human-readable schedules, hide rm_* IDs in user replies, and use \`--number N\` for numbered delete references.`,
     `Projects/resources: direct deterministic project mutations/listing may stay in the main loop using project-*.js commands, including project-resource.js and project-task.js. For broader project investigation or repo/account lookup, dispatch a subagent.`,
     `CRM/reminders: deterministic JSON-backed mutations/listing can use crm-*.js and reminder-*.js through \`${wrapper}\`; calendar/email/Gmail/Composio live account lookup should dispatch a subagent that reads the relevant skill docs and uses configured private refs.`,
@@ -290,6 +344,322 @@ function behaviorParityInstructions(workspacePath: string): string[] {
     "Setup/migration parity: Brain workspaces must keep assistant state JSON-backed under data/, private documents under private/documents, overlays under instructions/, and repo-registry state under .claude/repo-registry. Do not migrate private data into source repos or markdown-only stores.",
     "Directive syntax: emit fenced `brain-actions` or `codex-chat` JSON with version 1 and action objects. Side-effecting actions need idempotencyKey. Supported parity actions include send_text, send_image/send_document compatibility (normalized to send_artifact), send_artifact, dispatch_subagent, cancel_subagent/cancel_job, steer_subagent, react, request_clarification, edit_message, notify_owner, and enqueue_main.",
   ];
+}
+
+function resolveRuntimeContext(workspace: WorkspaceConfig): RuntimeContextResolution {
+  const cfg = workspace.runtimeContext ?? {};
+  const warnings: string[] = [];
+  const workspaceRoot = path.resolve(workspace.workspacePath);
+  let controlPlaneRoot = resolveOptionalPath(cfg.controlPlaneRoot);
+  let codexChatRoot = resolveOptionalPath(cfg.codexChatRoot);
+  let assistantLogicRoot = resolveOptionalPath(cfg.assistantLogicRoot);
+  let assistantDataRoot = resolveOptionalPath(cfg.assistantDataRoot) ?? workspaceRoot;
+
+  const setupContextPath = resolveOptionalPath(cfg.setupContextPath)
+    ?? (controlPlaneRoot ? path.join(controlPlaneRoot, "private", "setup-context.json") : undefined);
+  const setupContext = readJsonRecord(setupContextPath, warnings);
+  if (setupContext.record) {
+    controlPlaneRoot = controlPlaneRoot ?? resolveOptionalPath(stringValue(setupContext.record.repoPath));
+    assistantDataRoot = resolveOptionalPath(stringValue(setupContext.record.workspaceRoot)) ?? assistantDataRoot;
+  }
+
+  const repoRegistryPath = resolveOptionalPath(cfg.repoRegistryPath)
+    ?? path.join(assistantDataRoot, ".claude", "repo-registry", "index.yaml");
+  const repoRegistry = readYamlRecord(repoRegistryPath, warnings);
+  const registryAliases: RuntimeContextResolution["repoRegistry"]["resolvedAliases"] = {};
+  if (repoRegistry.record) {
+    const codex = registryRepo(repoRegistry.record, ["codex-chat"]);
+    const logic = registryRepo(repoRegistry.record, ["assistant-agent-logic", "assistant-claude"]);
+    const data = registryRepo(repoRegistry.record, ["assistant-agent-data", "assistant-data"]);
+    registryAliases.codexChat = repoDescriptor(codex);
+    registryAliases.assistantLogic = repoDescriptor(logic);
+    registryAliases.assistantData = repoDescriptor(data);
+    codexChatRoot = codexChatRoot ?? localPathFromRepo(codex);
+    assistantLogicRoot = assistantLogicRoot ?? localPathFromRepo(logic);
+    assistantDataRoot = localPathFromRepo(data) ?? assistantDataRoot;
+  }
+
+  const assistantPackRoot = resolveOptionalPath(cfg.assistantPackRoot)
+    ?? assistantPackRootFromPromptPath(cfg.assistantPackPromptPath)
+    ?? (controlPlaneRoot ? path.join(controlPlaneRoot, "assistant-packs", "core") : undefined);
+  const assistantPackPromptFiles = loadAssistantPackPrompts(assistantPackRoot, cfg.assistantPackPromptPath, warnings);
+  const instructionFiles = loadInstructionFiles({
+    controlPlaneRoot,
+    codexChatRoot,
+    assistantLogicRoot,
+  });
+  const assistantLogicSkills = loadAssistantLogicSkills(assistantLogicRoot);
+
+  return {
+    roots: {
+      workspaceRoot,
+      controlPlaneRoot,
+      codexChatRoot,
+      assistantLogicRoot,
+      assistantDataRoot,
+    },
+    setupContext: {
+      path: setupContextPath,
+      present: setupContext.present,
+      used: Boolean(setupContext.record),
+    },
+    repoRegistry: {
+      path: repoRegistryPath,
+      present: repoRegistry.present,
+      used: Boolean(repoRegistry.record),
+      resolvedAliases: registryAliases,
+    },
+    assistantPack: {
+      root: assistantPackRoot,
+      promptFiles: assistantPackPromptFiles,
+    },
+    instructionFiles,
+    assistantLogicSkills,
+    warnings,
+  };
+}
+
+function promptSafeRuntimeContext(context: RuntimeContextResolution): Record<string, unknown> {
+  return {
+    roots: context.roots,
+    setupContext: context.setupContext,
+    repoRegistry: context.repoRegistry,
+    assistantPack: {
+      root: context.assistantPack.root,
+      promptFiles: context.assistantPack.promptFiles.map(fileSummary),
+    },
+    instructionFiles: context.instructionFiles.map(fileSummary),
+    assistantLogicSkills: {
+      root: context.assistantLogicSkills.root,
+      directory: context.assistantLogicSkills.directory,
+      available: context.assistantLogicSkills.available,
+      loaded: context.assistantLogicSkills.loaded.map(fileSummary),
+    },
+    warnings: context.warnings,
+  };
+}
+
+function fileSummary(file: LoadedContextFile): Record<string, unknown> {
+  return {
+    label: file.label,
+    path: file.path,
+    present: file.present,
+    bytes: file.bytes,
+    truncated: file.truncated,
+  };
+}
+
+function formatLoadedRuntimeContext(context: RuntimeContextResolution): string {
+  const lines = [
+    "Resolved runtime roots (do not infer these from the private workspace cwd):",
+    JSON.stringify(promptSafeRuntimeContext(context), null, 2),
+  ];
+  const loadedFiles = [
+    ...context.instructionFiles.filter((file) => file.present && file.text),
+    ...context.assistantPack.promptFiles.filter((file) => file.present && file.text),
+    ...context.assistantLogicSkills.loaded.filter((file) => file.present && file.text),
+  ];
+  if (loadedFiles.length > 0) {
+    lines.push("Loaded AGENTS, assistant-pack prompt, and assistant-agent-logic skill excerpts:");
+    for (const file of loadedFiles) {
+      lines.push(`--- ${file.label}: ${file.path}${file.truncated ? " (truncated)" : ""} ---`);
+      lines.push(file.text ?? "");
+    }
+  }
+  if (context.assistantLogicSkills.directory) {
+    lines.push(`Assistant-agent-logic skill docs root: ${context.assistantLogicSkills.directory}`);
+    lines.push(`Available assistant-agent-logic skill docs: ${context.assistantLogicSkills.available.join(", ") || "(none found)"}`);
+  }
+  return lines.join("\n");
+}
+
+function resolveOptionalPath(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  if (trimmed === "~") return process.env.HOME ?? trimmed;
+  if (trimmed.startsWith("~/")) return path.join(process.env.HOME ?? ".", trimmed.slice(2));
+  return path.resolve(trimmed);
+}
+
+function readJsonRecord(filePath: string | undefined, warnings: string[]): { present: boolean; record?: Record<string, unknown> } {
+  if (!filePath) return { present: false };
+  if (!existsSync(filePath)) return { present: false };
+  try {
+    const parsed = JSON.parse(readFileSync(filePath, "utf8")) as unknown;
+    return { present: true, record: asRecord(parsed) };
+  } catch (error) {
+    warnings.push(`could not parse setup context at ${filePath}: ${errorMessage(error)}`);
+    return { present: true };
+  }
+}
+
+function readYamlRecord(filePath: string | undefined, warnings: string[]): { present: boolean; record?: Record<string, unknown> } {
+  if (!filePath) return { present: false };
+  if (!existsSync(filePath)) return { present: false };
+  try {
+    const parsed = YAML.parse(readFileSync(filePath, "utf8")) as unknown;
+    return { present: true, record: asRecord(parsed) };
+  } catch (error) {
+    warnings.push(`could not parse repo registry at ${filePath}: ${errorMessage(error)}`);
+    return { present: true };
+  }
+}
+
+function registryRepo(registry: Record<string, unknown>, aliases: readonly string[]): Record<string, unknown> | undefined {
+  const repos = asRecord(registry.repos) ?? {};
+  for (const alias of aliases) {
+    const direct = asRecord(repos[alias]);
+    if (direct) return direct;
+  }
+  for (const [key, value] of Object.entries(repos)) {
+    const repo = asRecord(value);
+    if (!repo) continue;
+    const values = [key, stringValue(repo.alias), stringValue(repo.repo_name)];
+    if (values.some((value) => value && aliases.includes(value))) return repo;
+  }
+  return undefined;
+}
+
+function repoDescriptor(repo: Record<string, unknown> | undefined): { host?: string; path?: string; localPath?: string; source?: string } {
+  return {
+    host: stringValue(repo?.host),
+    path: stringValue(repo?.path),
+    localPath: localPathFromRepo(repo),
+    source: stringValue(repo?.repo_name) ?? stringValue(repo?.alias),
+  };
+}
+
+function localPathFromRepo(repo: Record<string, unknown> | undefined): string | undefined {
+  const repoPath = stringValue(repo?.path);
+  if (!repoPath) return undefined;
+  const host = stringValue(repo?.host);
+  if (host && host !== "local" && host !== "localhost") return undefined;
+  return resolveOptionalPath(repoPath);
+}
+
+function assistantPackRootFromPromptPath(value: string | undefined): string | undefined {
+  const resolved = resolveOptionalPath(value);
+  if (!resolved) return undefined;
+  const info = safeStat(resolved);
+  if (info?.isDirectory()) return resolved;
+  if (info?.isFile()) {
+    const parent = path.basename(path.dirname(resolved)) === "prompts"
+      ? path.dirname(path.dirname(resolved))
+      : path.dirname(resolved);
+    return parent;
+  }
+  return undefined;
+}
+
+function loadAssistantPackPrompts(root: string | undefined, explicitPromptPath: string | undefined, warnings: string[]): LoadedContextFile[] {
+  const explicit = resolveOptionalPath(explicitPromptPath);
+  if (explicit && safeStat(explicit)?.isFile()) return [loadContextFile("assistant-pack prompt", explicit, 6_000)];
+  if (!root || !existsSync(root)) return [];
+  const manifestPath = path.join(root, "assistant-pack.json");
+  const manifest = readJsonRecord(manifestPath, warnings).record;
+  const promptEntries = Array.isArray(manifest?.prompts)
+    ? manifest.prompts.filter((item): item is string => typeof item === "string")
+    : [];
+  const promptFiles = promptEntries.length > 0
+    ? promptEntries.map((item) => path.resolve(root, item))
+    : safeReadDir(path.join(root, "prompts")).filter((item) => item.endsWith(".md")).map((item) => path.join(root, "prompts", item));
+  return promptFiles.map((file) => loadContextFile("assistant-pack prompt", file, 6_000));
+}
+
+function loadInstructionFiles(input: { controlPlaneRoot?: string; codexChatRoot?: string; assistantLogicRoot?: string }): LoadedContextFile[] {
+  const candidates = [
+    input.controlPlaneRoot ? { label: "Brain AGENTS", path: path.join(input.controlPlaneRoot, "AGENTS.md") } : undefined,
+    input.codexChatRoot ? { label: "codex-chat AGENTS", path: path.join(input.codexChatRoot, "AGENTS.md") } : undefined,
+    input.codexChatRoot ? { label: "codex-chat behavior AGENTS", path: path.join(input.codexChatRoot, "behavior", "AGENTS.md") } : undefined,
+    input.assistantLogicRoot ? { label: "assistant-agent-logic AGENTS", path: path.join(input.assistantLogicRoot, "AGENTS.md") } : undefined,
+    input.assistantLogicRoot ? { label: "assistant-agent-logic CLAUDE", path: path.join(input.assistantLogicRoot, "CLAUDE.md") } : undefined,
+  ].filter((item): item is { label: string; path: string } => Boolean(item));
+  return candidates.map((item) => loadContextFile(item.label, item.path, 5_000));
+}
+
+function loadAssistantLogicSkills(assistantLogicRoot: string | undefined): RuntimeContextResolution["assistantLogicSkills"] {
+  if (!assistantLogicRoot) return { root: undefined, directory: undefined, available: [], loaded: [] };
+  const skillDir = path.join(assistantLogicRoot, "config", "skills");
+  const available = discoverSkillDocs(skillDir);
+  const priority = [
+    "todo.md",
+    "projects.md",
+    "crm.md",
+    "reminders.md",
+    "file-save.md",
+    "generated-web-page.md",
+    "repo-registry/SKILL.md",
+    "setup-composio-connect.md",
+  ];
+  const loaded = priority
+    .filter((item) => available.includes(item))
+    .map((item) => loadContextFile(`assistant-agent-logic skill ${item}`, path.join(skillDir, item), 4_000));
+  return {
+    root: assistantLogicRoot,
+    directory: existsSync(skillDir) ? skillDir : undefined,
+    available,
+    loaded,
+  };
+}
+
+function discoverSkillDocs(skillDir: string): string[] {
+  if (!safeStat(skillDir)?.isDirectory()) return [];
+  const results: string[] = [];
+  const visit = (dir: string): void => {
+    for (const entry of safeReadDir(dir)) {
+      const full = path.join(dir, entry);
+      const info = safeStat(full);
+      if (info?.isDirectory()) visit(full);
+      else if (info?.isFile() && (entry.endsWith(".md") || entry === "SKILL.md")) {
+        results.push(path.relative(skillDir, full).split(path.sep).join("/"));
+      }
+    }
+  };
+  visit(skillDir);
+  return results.sort();
+}
+
+function loadContextFile(label: string, filePath: string, maxChars: number): LoadedContextFile {
+  const info = safeStat(filePath);
+  if (!info?.isFile()) return { label, path: filePath, present: false };
+  const raw = readFileSync(filePath, "utf8");
+  const truncated = raw.length > maxChars;
+  return {
+    label,
+    path: filePath,
+    present: true,
+    bytes: Number(info.size),
+    text: truncated ? `${raw.slice(0, maxChars).trimEnd()}\n...[truncated]` : raw.trimEnd(),
+    truncated,
+  };
+}
+
+function safeReadDir(dir: string): string[] {
+  try {
+    return readdirSync(dir).sort();
+  } catch {
+    return [];
+  }
+}
+
+function safeStat(filePath: string): ReturnType<typeof statSync> | undefined {
+  try {
+    return statSync(filePath);
+  } catch {
+    return undefined;
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function formatActiveSubagentSnapshot(snapshot: ActiveSubagentSnapshot | undefined): string {
@@ -327,7 +697,7 @@ function dispatchFeedbackAction(action: Extract<BrainOutboundAction, { type: "di
     type: "send_text",
     idempotencyKey: `subagent-dispatch-status-${jobId}`,
     text: formatSubagentDispatchFeedback(action, jobId),
-    format: "markdown",
+    format: "text",
     metadata: { runtimeDispatchFeedback: true },
   };
 }

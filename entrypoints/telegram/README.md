@@ -49,7 +49,11 @@ Current implementation includes:
   `codex-chat` handler failures;
 - outbound mapping for replies, edits, photo/document/voice/audio/video
   artifacts, status actions, reactions, and delete-after-send cleanup for staged
-  local artifacts.
+  local artifacts;
+- plain-text Telegram replies by default. The adapter intentionally does not
+  enable Telegram's brittle legacy Markdown parser for default or `markdown`
+  text actions; rich formatting must opt into `markdownv2` with correctly
+  escaped text.
 
 It is suitable for runtime smoke tests and mapping checks. Live polling/webhook startup is still intentionally a skeleton: no process manager, reverse proxy, token file, or deployment side effects are installed by this package.
 

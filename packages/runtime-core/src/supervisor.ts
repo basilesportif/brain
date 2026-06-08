@@ -135,7 +135,7 @@ export class BrainSupervisor {
     } catch (error) {
       this.lastError = errorMessage(error);
       await this.log("error", "supervisor", `Event handling failed: ${this.lastError}`, event.id);
-      const fallback = routeOutboundToOrigin(event, { type: "send_text", text: `⚠️ Brain runtime error: ${this.lastError}`, format: "markdown" });
+      const fallback = routeOutboundToOrigin(event, { type: "send_text", text: `⚠️ Brain runtime error: ${this.lastError}`, format: "text" });
       const dispatchResults = await this.dispatchActions(event, [fallback]).catch(() => []);
       this.processedEvents++;
       return { event, dispatchResults, streamingDispatchResults };
@@ -269,14 +269,14 @@ function subagentDeliveryActions(job: SubagentJob, result: SubagentRunResult): B
   const artifactPath = resultArtifactPath(job, result);
   if (job.route === "send_to_admins" || job.resultTarget === "admins") {
     return [
-      { type: "send_text", text, format: "markdown", target: { route: "admins" } },
+      { type: "send_text", text, format: "text", target: { route: "admins" } },
       ...artifactActions(artifactPath, { route: "admins" }),
     ];
   }
   if (job.route === "send_to_user" || job.route === "send_progress_and_return" || job.resultTarget === "user") {
     const target = originTargetFromJob(job);
     return [
-      { type: "send_text", text, format: "markdown", target },
+      { type: "send_text", text, format: "text", target },
       ...artifactActions(artifactPath, target),
     ];
   }
@@ -287,7 +287,7 @@ function subagentFallbackAction(job: SubagentJob, result: SubagentRunResult): Br
   return {
     type: "send_text",
     text: formatSubagentResult(job, result),
-    format: "markdown",
+    format: "text",
     target: originTargetFromJob(job),
     metadata: { source: "subagent-result-fallback" },
   };

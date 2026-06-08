@@ -73,6 +73,11 @@ older in-repo `packages/assistant-logic` workspace commands are lab
 compatibility helpers only; do not vendor, merge, or make them the production
 source of truth for servant runtime deployment.
 
+Brain must not become the home for Tim-assistant domain behavior. Assistant
+workflows, prompts, skills, and intent rules belong in `assistant-agent-logic`;
+runtime/channel behavior belongs in `codex-chat` or in generic Brain
+transport/entrypoint code only when the behavior is domain-neutral.
+
 ## Initial commands
 
 ```bash
@@ -102,6 +107,9 @@ pnpm run brainctl workspace run --path ~/.brain/workspace todo-list.js
 
 - Brain is the control plane first; servant runtime execution belongs to
   `codex-chat` unless and until a future Brain runtime graduates from the lab.
+- Keep Brain free of Tim-assistant domain logic; it is a deployment/control-plane
+  wrapper around `codex-chat` and `assistant-agent-logic`, not a replacement for
+  their runtime or workflow responsibilities.
 - Preserve repo boundaries using repo-registry links/metadata; never vendor or
   merge `codex-chat`, `assistant-agent-logic`, or `assistant-agent-data` into
   Brain.

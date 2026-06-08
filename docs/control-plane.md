@@ -4,6 +4,12 @@ Brain is the setup and operations control plane for Tim's assistant stack. The
 production servant runtime remains `codex-chat`; Brain does not vendor or merge
 runtime repositories.
 
+Brain must not encode Tim-assistant domain workflows, prompts, skills, or intent
+rules. It wraps deployment and control-plane operations for `codex-chat` and
+`assistant-agent-logic`; assistant domain behavior belongs in
+`assistant-agent-logic`, and runtime/channel behavior belongs in `codex-chat` or
+generic Brain transport/entrypoint code only when it is domain-neutral.
+
 ## Source of truth
 
 `brainctl stack status` and `brainctl stack plan` read repo-registry metadata and
@@ -127,3 +133,11 @@ The ledger schema is:
 
 The deployment list is keyed by `id` and records each servant stack status
 without private filenames beyond configured paths and without secret values.
+
+Guarded live validation may reconcile stale ledger blockers. When
+`brainctl validate live --run-safe` confirms current config, secret-ref
+metadata, provider/auth metadata, Telegram token metadata, runtime smoke, and
+systemd service health, it removes obsolete `blocked_on_user_auth_or_secret`
+blocker fields from existing deployment records and marks the record healthy.
+This reconciliation never reads or prints secret values; it only updates the
+private workspace ledger.
