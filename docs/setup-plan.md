@@ -68,15 +68,18 @@ resolved from repo-registry metadata. The legacy/lab in-repo
 `.claude/repo-registry/` state. `projects/`, `notes/`, `documents/`, and
 `documents/metadata/` are still created, but only as markdown/resource folders;
 do not migrate existing markdown notes or convert JSON state to markdown.
-Codex should run from that private workspace path for live Brain turns, with
-non-interactive approval behavior, `TMPDIR` pointed at
-`<workspace>/tmp`, and self-host service sandbox mode set to
-`danger-full-access`. Telegram has no interactive approval channel, and common
-Ubuntu server sandboxes can fail before shell commands start; the safety
-boundary is the dedicated service user plus private workspace path, not a
-per-turn approval prompt. This lets questions like "do I have projects?" inspect
-the JSON stores through native assistant-logic CLI commands instead of answering from
-active entrypoint metadata or markdown folders alone.
+Codex should run with explicit `runtimeContext` roots for Brain,
+`codex-chat`, `assistant-agent-logic`, and assistant-data/repo-registry; it
+must not infer those roots from the private workspace cwd. The default provider
+cwd is the configured Brain control-plane root when present, while `TMPDIR`
+still points at `<workspace>/tmp`, approval behavior is non-interactive, and the
+self-host service sandbox mode is `danger-full-access`. Telegram has no
+interactive approval channel, and common Ubuntu server sandboxes can fail before
+shell commands start; the safety boundary is the dedicated service user plus
+explicit private workspace paths, not a per-turn approval prompt. This lets
+questions like "do I have projects?" inspect the JSON stores through native
+assistant-logic CLI commands instead of answering from active entrypoint
+metadata or markdown folders alone.
 Ask whether the user wants to initialize, pull, or validate the
 `assistant-agent-data` private workspace/repo; never commit secrets, logs,
 Telegram IDs, transcripts, or provider session material. Do not auto-migrate

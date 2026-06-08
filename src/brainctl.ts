@@ -3824,7 +3824,7 @@ function createCliProvider(selection: ResolvedSupervisorRuntime, options: Superv
     model: DEFAULT_MAIN_LOOP_MODEL,
     effort: DEFAULT_MAIN_LOOP_EFFORT,
     binary: options.binary,
-    cwd: options.cwd ?? selection.workspace.workspacePath ?? process.cwd(),
+    cwd: providerCwdForWorkspace(selection.workspace, options.cwd),
     tmpDir: path.join(selection.workspace.workspacePath, "tmp"),
     sandbox: "danger-full-access",
     approvalPolicy: "never",
@@ -6219,7 +6219,11 @@ async function configuredCodexContext(options: { config?: string; workspace: str
   if (!workspace) {
       return { ok: false, result: { ok: false, summary: `workspace not found: ${options.workspace}`, details: { available: Object.keys(loaded.config.workspaces) } } };
   }
-  return { ok: true, transcriptionApiKeyRef: workspace.transcription?.apiKeyRef, cwd: options.cwd ?? workspace.workspacePath ?? process.cwd(), tmpDir: path.join(workspace.workspacePath, "tmp") };
+  return { ok: true, transcriptionApiKeyRef: workspace.transcription?.apiKeyRef, cwd: providerCwdForWorkspace(workspace, options.cwd), tmpDir: path.join(workspace.workspacePath, "tmp") };
+}
+
+function providerCwdForWorkspace(workspace: WorkspaceConfig, override?: string): string {
+  return path.resolve(override ?? workspace.runtimeContext?.controlPlaneRoot ?? workspace.workspacePath ?? process.cwd());
 }
 
 async function providerCheckCommand(providerId: string, options: { config?: string; workspace: string; transport?: string; binary?: string; cwd?: string; appServerUrl?: string; timeoutMs?: number }): Promise<CliResult> {

@@ -105,15 +105,19 @@ deployment handoff.
   `projects/`, `notes/`, `documents/`, and `documents/metadata/` remain
   supporting markdown/resource paths only; do not migrate current markdown notes
   or convert JSON state to markdown. Before the first live provider turn, make
-  sure Codex is launched from the private
-  workspace path with `TMPDIR=<workspace>/tmp`, `approval_policy=never`, and
-  self-host service sandbox mode `danger-full-access`. Telegram cannot service
+  sure runtime config has explicit `runtimeContext` roots for Brain,
+  `codex-chat`, `assistant-agent-logic`, and assistant-data/repo-registry.
+  Codex must not infer those roots from the private workspace cwd; the default
+  provider cwd is the configured Brain control-plane root when present, while
+  `TMPDIR=<workspace>/tmp`, `approval_policy=never`, and self-host service
+  sandbox mode `danger-full-access` remain required. Telegram cannot service
   interactive approval prompts, and server sandboxes can fail before shell
-  commands start; isolate Brain with the dedicated service user and private
-  workspace path instead. Todos/projects/CRM/reminders and file-save questions
-  should be answered by using Brain's native assistant-logic CLI commands through
-  `brainctl workspace run` with `ASSISTANT_WORKSPACE=<path>` and private roots set,
-  not from active entrypoint metadata or markdown folders alone.
+  commands start; isolate Brain with the dedicated service user and explicit
+  private workspace paths instead. Todos/projects/CRM/reminders and file-save
+  questions should be answered by using Brain's native assistant-logic CLI
+  commands through `brainctl workspace run` with `ASSISTANT_WORKSPACE=<path>` and
+  private roots set, not from active entrypoint metadata or markdown folders
+  alone.
 - Ensure the in-repo `packages/assistant-logic` package is present in the Brain
   checkout. No sibling assistant-agent-logic checkout is required; validate with
   `pnpm run brainctl workspace status --path <workspace>`.
