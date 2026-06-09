@@ -86,17 +86,22 @@ non-deploying by default:
   health checks from repo registry and setup context without contacting hosts.
 - `brainctl stack plan` renders the no-network servant stack flow: clone/update
   separate repos, prompt/validate assistant data, render `codex-chat`
-  config/env, plan service install/start, record deployment metadata, and plan
-  health checks. It does not execute SSH, git, systemd, or secret reads.
+  config/env, plan Telegram pairing/admin state preservation, plan service
+  install/start, record deployment metadata, and plan health checks. It does
+  not execute SSH, git, systemd, or secret reads.
 - `brainctl stack apply` is the explicit approval boundary. Without `--approve`
   it is a dry-run. With `--approve` and an executor, it fetches/clones the
   configured latest refs for `codex-chat` and `assistant-agent-logic`, verifies
   resolved SHAs, then can run approved build and metadata steps.
   `--approve-data`, `--approve-config`,
   `--approve-service`, and `--approve-health` separately gate assistant data
-  actions, config/env template writes, systemd install/start, and live/read-only
-  health checks. Use `--executor mock --metadata-file <path>` for tests and
-  rehearsals; use `--executor ssh` only after reviewing the rendered plan.
+  actions, config/env template writes, Telegram pairing/admin state migration
+  plus systemd install/start, and live/read-only health checks. The migration
+  step merges legacy `state/telegram-pairing` identities into
+  `state/codex-chat`, backs up existing files, removes stale bootstrap pairing
+  codes once identities exist, and prints metadata only (never raw Telegram IDs).
+  Use `--executor mock --metadata-file <path>` for tests and rehearsals; use
+  `--executor ssh` only after reviewing the rendered plan.
 - `brainctl start`/`brainctl run` are lab supervisor seams only. They are not
   production deployment targets.
 - `brainctl health` inspects config/state/log readiness without starting live providers or Telegram.

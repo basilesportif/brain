@@ -1097,7 +1097,7 @@ interface DeploymentMetadataRecord {
 interface StackExecutorAction {
   id: string;
   title: string;
-  phase: "preflight" | "git" | "assistant-data" | "config" | "systemd" | "health" | "metadata";
+  phase: "preflight" | "git" | "assistant-data" | "config" | "state" | "systemd" | "health" | "metadata";
   executor: "local" | "ssh" | "operator-prompt" | "metadata-file";
   requiredGate: StackApprovalGate;
   hostIdentity?: string;
@@ -1741,7 +1741,7 @@ function renderCodexChatEnvPreview(status: StackStatusDetails): string {
 
 function renderCodexChatConfigPreview(status: StackStatusDetails): string {
   const codexChatRoot = status.servantRuntime.deploy.path ?? status.servantRuntime.path;
-  const workspaceRoot = status.setupContext.context?.workspaceRoot ?? status.assistantData.workspacePath ?? status.assistantData.path;
+  const workspaceRoot = codexChatWorkspaceRoot(status);
   const controlPlaneRoot = status.setupContext.context?.repoPath ?? status.controlPlane.path;
   const stateDir = path.posix.join(workspaceRoot, "state", "codex-chat");
   const artifactDir = path.posix.join(workspaceRoot, "artifacts", "subagents");
@@ -1838,6 +1838,10 @@ function renderCodexChatConfigPreview(status: StackStatusDetails): string {
   ].join("\n");
 }
 
+function codexChatWorkspaceRoot(status: StackStatusDetails): string {
+  return status.setupContext.context?.workspaceRoot ?? status.assistantData.workspacePath ?? status.assistantData.path;
+}
+
 function tomlString(value: string): string {
   return JSON.stringify(value);
 }
@@ -1882,6 +1886,7 @@ function renderStackExecutorActions(status: StackStatusDetails, approvals: Recor
   const serviceName = deploy.serviceName ?? "codex-chat.service";
   const envFile = deploy.envFile;
   const configPath = deploy.configPath ?? status.servicePaths.setupContextConfigPath;
+  const workspaceRoot = codexChatWorkspaceRoot(status);
   const configPreview = renderCodexChatConfigPreview(status);
   const envPreview = renderCodexChatEnvPreview(status);
   const systemdPreview = renderSystemdServicePreview(status);
@@ -1987,6 +1992,16 @@ function renderStackExecutorActions(status: StackStatusDetails, approvals: Recor
       command: renderConfigEnvWriteShell({ configPath, configPreview, envFile, envPreview }),
       sideEffectsIfExecuted: "would write codex-chat config and env template placeholders only; no secret values",
     })] : []),
+    action({
+      id: "migrate-telegram-pairing-state",
+      title: "Migrate legacy Brain Telegram pairing/admin state into codex-chat state.",
+      phase: "state",
+      executor: deployIdentity ? "ssh" : "local",
+      requiredGate: "service",
+      hostIdentity: deployIdentity,
+      command: renderTelegramPairingMigrationShell({ workspaceRoot }),
+      sideEffectsIfExecuted: "would copy existing Telegram paired/admin identities into codex-chat state, back up previous state, remove stale bootstrap pairing codes, and print metadata only",
+    }),
     action({
       id: "install-codex-chat-systemd",
       title: "Install/enable/restart codex-chat systemd service.",
@@ -2102,11 +2117,105 @@ function renderTelegramBotIdentityGuardShell(input: { envFile: string; expected:
     "  const bot = body.result || {};",
     "  const actualId = String(bot.id || '');",
     "  const actualUsername = String(bot.username || '');",
-    "  if (expectedId && actualId !== expectedId) fail(`Telegram bot id mismatch: expected ${expectedId}, got ${actualId || 'unknown'}`);",
+    "  if (expectedId && actualId !== expectedId) fail('Telegram bot id mismatch (raw ids redacted)');",
     "  if (expectedUsername && actualUsername !== expectedUsername) fail(`Telegram bot username mismatch: expected ${expectedUsername}, got ${actualUsername || 'unknown'}`);",
-    "  console.error(`Verified Telegram bot identity: @${actualUsername} (${actualId})`);",
+    "  console.error(`Verified Telegram bot identity: @${actualUsername} (id verified, raw id redacted)`);",
     "})().catch((error) => fail(error && error.message ? error.message : String(error)));",
     "BRAIN_TELEGRAM_BOT_GUARD",
+  ].join("\n");
+}
+
+function renderTelegramPairingMigrationShell(input: { workspaceRoot: string }): string {
+  const legacyStateDir = path.posix.join(input.workspaceRoot, "state", "telegram-pairing");
+  const codexStateDir = path.posix.join(input.workspaceRoot, "state", "codex-chat");
+  return [
+    "set -euo pipefail",
+    `BRAIN_LEGACY_TELEGRAM_PAIRING_STATE=${shellArg(legacyStateDir)} BRAIN_CODEX_CHAT_STATE=${shellArg(codexStateDir)} node <<'BRAIN_TELEGRAM_PAIRING_MIGRATION'`,
+    "const fs = require('fs');",
+    "const path = require('path');",
+    "const legacyDir = process.env.BRAIN_LEGACY_TELEGRAM_PAIRING_STATE;",
+    "const codexDir = process.env.BRAIN_CODEX_CHAT_STATE;",
+    "const now = new Date().toISOString();",
+    "const readJson = (file, fallback) => {",
+    "  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }",
+    "  catch { return fallback; }",
+    "};",
+    "const asId = (value) => {",
+    "  if (typeof value === 'number' && Number.isFinite(value)) return value;",
+    "  if (typeof value === 'string' && /^-?\\d+$/.test(value.trim())) return Number(value);",
+    "  return undefined;",
+    "};",
+    "const backup = () => {",
+    "  if (!fs.existsSync(codexDir)) return undefined;",
+    "  const backupDir = path.join(codexDir, 'migration-backups', `telegram-pairing-${now.replace(/[:.]/g, '-')}`);",
+    "  fs.mkdirSync(backupDir, { recursive: true, mode: 0o700 });",
+    "  for (const rel of ['telegram_users.json', 'telegram_chats.json', path.join('data', 'pairing_code.txt')]) {",
+    "    const src = path.join(codexDir, rel);",
+    "    if (!fs.existsSync(src)) continue;",
+    "    const dst = path.join(backupDir, rel.replace(/[\\\\/]/g, '__'));",
+    "    fs.copyFileSync(src, dst);",
+    "    fs.chmodSync(dst, 0o600);",
+    "  }",
+    "  return backupDir;",
+    "};",
+    "const mergeUsers = (target, records, source) => {",
+    "  let added = 0;",
+    "  for (const record of Array.isArray(records) ? records : []) {",
+    "    if (!record || typeof record !== 'object') continue;",
+    "    const userId = asId(record.userId);",
+    "    if (userId === undefined) continue;",
+    "    const key = String(userId);",
+    "    const existing = target.get(key);",
+    "    const next = { userId, isAdmin: record.isAdmin !== false, pairedAt: typeof record.pairedAt === 'string' ? record.pairedAt : now, source };",
+    "    if (existing) existing.isAdmin = existing.isAdmin || next.isAdmin;",
+    "    else { target.set(key, next); added += 1; }",
+    "  }",
+    "  return added;",
+    "};",
+    "const mergeChats = (target, records, source) => {",
+    "  let added = 0;",
+    "  for (const record of Array.isArray(records) ? records : []) {",
+    "    if (!record || typeof record !== 'object') continue;",
+    "    const chatId = asId(record.chatId);",
+    "    if (chatId === undefined) continue;",
+    "    const key = String(chatId);",
+    "    if (!target.has(key)) {",
+    "      target.set(key, { chatId, pairedAt: typeof record.pairedAt === 'string' ? record.pairedAt : now, source });",
+    "      added += 1;",
+    "    }",
+    "  }",
+    "  return added;",
+    "};",
+    "fs.mkdirSync(codexDir, { recursive: true, mode: 0o700 });",
+    "fs.mkdirSync(path.join(codexDir, 'data'), { recursive: true, mode: 0o700 });",
+    "const backupDir = backup();",
+    "const users = new Map();",
+    "const chats = new Map();",
+    "mergeUsers(users, readJson(path.join(codexDir, 'telegram_users.json'), []), 'codex-chat-existing');",
+    "mergeChats(chats, readJson(path.join(codexDir, 'telegram_chats.json'), []), 'codex-chat-existing');",
+    "const legacyUsers = readJson(path.join(legacyDir, 'telegram_users.json'), []);",
+    "const legacyChats = readJson(path.join(legacyDir, 'telegram_chats.json'), []);",
+    "const legacyAdmins = readJson(path.join(legacyDir, 'telegram_admins.json'), {});",
+    "const adminPairs = Array.isArray(legacyAdmins.admins) ? legacyAdmins.admins : [];",
+    "const addedUsers = mergeUsers(users, legacyUsers, 'brain-legacy-pairing') + mergeUsers(users, adminPairs, 'brain-legacy-admins');",
+    "const addedChats = mergeChats(chats, legacyChats, 'brain-legacy-pairing') + mergeChats(chats, adminPairs, 'brain-legacy-admins');",
+    "const writeJson = (rel, value) => {",
+    "  const file = path.join(codexDir, rel);",
+    "  const tmp = `${file}.tmp`;",
+    "  fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\\n`, { mode: 0o600 });",
+    "  fs.renameSync(tmp, file);",
+    "  fs.chmodSync(file, 0o600);",
+    "};",
+    "writeJson('telegram_users.json', Array.from(users.values()));",
+    "writeJson('telegram_chats.json', Array.from(chats.values()));",
+    "const pairingCode = path.join(codexDir, 'data', 'pairing_code.txt');",
+    "let pairingCodeRemoved = false;",
+    "if ((users.size > 0 || chats.size > 0) && fs.existsSync(pairingCode)) {",
+    "  fs.rmSync(pairingCode, { force: true });",
+    "  pairingCodeRemoved = true;",
+    "}",
+    "console.error(`BRAIN_PAIRING_MIGRATION legacyUsers=${Array.isArray(legacyUsers) ? legacyUsers.length : 0} legacyChats=${Array.isArray(legacyChats) ? legacyChats.length : 0} legacyAdminPairs=${adminPairs.length} addedUsers=${addedUsers} addedChats=${addedChats} finalUsers=${users.size} finalChats=${chats.size} pairingCodeRemoved=${pairingCodeRemoved} backup=${backupDir ? 'created' : 'not-needed'} rawIdentifiersPrinted=false`);",
+    "BRAIN_TELEGRAM_PAIRING_MIGRATION",
   ].join("\n");
 }
 
@@ -2203,6 +2312,20 @@ function renderStackNoNetworkPlan(status: StackStatusDetails) {
           "codex-chat runtime config template/path binding when configured",
         ],
         sideEffectsIfExecuted: "would write private env/config files only after explicit operator confirmation; not executed by this command",
+      },
+      {
+        id: "migrate-telegram-pairing-state",
+        title: "Preserve Telegram paired/admin identities when moving from brain-personal to codex-chat.",
+        target: {
+          host: deploy.host,
+          sshIdentity: deployIdentity,
+          legacyStateDir: path.posix.join(codexChatWorkspaceRoot(status), "state", "telegram-pairing"),
+          codexChatStateDir: path.posix.join(codexChatWorkspaceRoot(status), "state", "codex-chat"),
+        },
+        commands: [
+          remotePlanCommand(deployIdentity, "merge state/telegram-pairing users/chats/admins into state/codex-chat and remove stale pairing_code.txt when identities exist"),
+        ],
+        sideEffectsIfExecuted: "would preserve existing Telegram access metadata without printing raw user/chat IDs; not executed by this command",
       },
       {
         id: "install-start-codex-chat-service",
