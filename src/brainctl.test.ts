@@ -1548,11 +1548,11 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
     assert.ok(steps.get("render-codex-chat-config-env")?.target?.envFile);
     assert.doesNotMatch(steps.get("render-codex-chat-config-env")?.renderedEnvPreview ?? "", new RegExp(secretValue));
     assert.ok(steps.get("install-start-codex-chat-service")?.commands?.some((command) => /systemctl disable --now brain-personal\.service/.test(command)));
-    assert.ok(steps.get("install-start-codex-chat-service")?.commands?.some((command) => /systemctl enable --now codex-chat\.service/.test(command)));
+    assert.ok(steps.get("install-start-codex-chat-service")?.commands?.some((command) => /systemctl enable codex-chat\.service.*systemctl restart codex-chat\.service/.test(command)));
     assert.ok(steps.get("record-deployment-metadata")?.target?.path.includes("state/control-plane/deployments.json"));
     assert.ok(steps.get("health-check-codex-chat")?.commands?.some((command) => /codex-chat health --json/.test(command)));
     assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "clone-update-codex-chat-deploy" && action.executor === "ssh" && /ssh codex@app\.example\.test/.test(action.displayCommand ?? "")));
-    assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "install-codex-chat-systemd" && /BRAIN_EXPECTED_BOT_USERNAME=AnnaBrainBot/.test(action.displayCommand ?? "")));
+    assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "install-codex-chat-systemd" && /BRAIN_EXPECTED_BOT_USERNAME=AnnaBrainBot/.test(action.displayCommand ?? "") && /systemctl restart codex-chat\.service/.test(action.displayCommand ?? "")));
     assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "assistant-agent-data-clone-or-init-placeholder" && action.executor === "ssh" && /ssh brain@brain\.example\.test/.test(action.displayCommand ?? "")));
     assert.ok(planJson.details.plan.forbidden.some((line) => /Do not vendor or merge/.test(line)));
   } finally {

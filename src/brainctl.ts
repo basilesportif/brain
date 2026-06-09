@@ -1989,15 +1989,15 @@ function renderStackExecutorActions(status: StackStatusDetails, approvals: Recor
     })] : []),
     action({
       id: "install-codex-chat-systemd",
-      title: "Install/enable/start codex-chat systemd service.",
+      title: "Install/enable/restart codex-chat systemd service.",
       phase: "systemd",
       executor: deployIdentity ? "ssh" : "local",
       requiredGate: "service",
       hostIdentity: deployIdentity,
       command: renderSystemdInstallShell({ serviceName, unit: systemdPreview, envFile, expectedTelegramBot: deploy.expectedTelegramBot }),
       sideEffectsIfExecuted: deploy.expectedTelegramBot
-        ? "would verify Telegram bot identity from remote env file, stop/disable legacy brain-personal.service, then install service unit, reload systemd, enable and start codex-chat"
-        : "would stop/disable legacy brain-personal.service, then install service unit, reload systemd, enable and start codex-chat",
+        ? "would verify Telegram bot identity from remote env file, stop/disable legacy brain-personal.service, then install service unit, reload systemd, enable and restart codex-chat"
+        : "would stop/disable legacy brain-personal.service, then install service unit, reload systemd, enable and restart codex-chat",
     }),
     ...((deploy.healthChecks.length > 0 ? deploy.healthChecks : [{ kind: "systemd", command: `systemctl status ${shellArg(serviceName)} --no-pager` }]).map((check, index) => action({
       id: `health-check-${index + 1}`,
@@ -2118,7 +2118,7 @@ function renderSystemdInstallShell(input: { serviceName: string; unit: string; e
     `cat <<'BRAIN_CODEX_CHAT_SERVICE' | sudo tee ${shellPathArg(`/etc/systemd/system/${input.serviceName}`)} >/dev/null`,
     input.unit.trimEnd(),
     "BRAIN_CODEX_CHAT_SERVICE",
-    `sudo systemctl daemon-reload && sudo systemctl enable --now ${shellArg(input.serviceName)}`,
+    `sudo systemctl daemon-reload && sudo systemctl enable ${shellArg(input.serviceName)} && sudo systemctl restart ${shellArg(input.serviceName)}`,
   ].join("\n");
 }
 
@@ -2206,15 +2206,15 @@ function renderStackNoNetworkPlan(status: StackStatusDetails) {
       },
       {
         id: "install-start-codex-chat-service",
-        title: "Install, enable, and start the codex-chat servant service.",
+        title: "Install, enable, and restart the codex-chat servant service.",
         target: { host: deploy.host, sshIdentity: deployIdentity, path: deploy.path, serviceName, runtimeUser: deploy.runtimeUser },
         commands: [
           remotePlanCommand(deployIdentity, `cd ${shellPathArg(deploy.path ?? servant.path)} && pnpm install --frozen-lockfile && pnpm run build`),
           remotePlanCommand(deployIdentity, `sudo systemctl disable --now brain-personal.service >/dev/null 2>&1 || true`),
-          remotePlanCommand(deployIdentity, `sudo systemctl daemon-reload && sudo systemctl enable --now ${shellArg(serviceName)}`),
+          remotePlanCommand(deployIdentity, `sudo systemctl daemon-reload && sudo systemctl enable ${shellArg(serviceName)} && sudo systemctl restart ${shellArg(serviceName)}`),
           remotePlanCommand(deployIdentity, `systemctl is-active ${shellArg(serviceName)} --quiet`),
         ],
-        sideEffectsIfExecuted: "would install dependencies/build, stop legacy Brain polling if present, and start systemd service; not executed by this command",
+        sideEffectsIfExecuted: "would install dependencies/build, stop legacy Brain polling if present, and restart systemd service; not executed by this command",
       },
       {
         id: "record-deployment-metadata",
