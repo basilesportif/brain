@@ -1859,7 +1859,7 @@ function renderSystemdServicePreview(status: StackStatusDetails): string {
     `User=${runtimeUser}`,
     `WorkingDirectory=${workingDirectory}`,
     ...(envFile ? [`EnvironmentFile=${envFile}`] : []),
-    `ExecStart=/usr/bin/env bun dist/main.js --config ${configPath} start`,
+    `ExecStart=/usr/bin/env node dist/main.js --config ${configPath} start`,
     "Restart=on-failure",
     "RestartSec=5s",
     "",
