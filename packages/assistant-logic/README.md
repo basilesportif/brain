@@ -28,4 +28,4 @@ legacy lab commands. Core commands run from compiled `dist/cli/*.js`;
 compatibility scripts run from in-repo `scripts/*` with `ASSISTANT_WORKSPACE`,
 `ASSISTANT_PRIVATE_DIR`, and `BRAIN_PRIVATE_DIR` set.
 
-Personal data and credentials stay in the private Brain workspace. See `../../docs/assistant-logic-integration-audit.md` for the integrated/status table and live validation checklist.
+Personal data and credentials stay in the private assistant workspace/assistant-agent-data boundary. See `../../docs/assistant-logic-integration-audit.md` for the integrated/status table and live validation checklist.

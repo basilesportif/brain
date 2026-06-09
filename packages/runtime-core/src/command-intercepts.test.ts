@@ -153,8 +153,8 @@ test("RuntimeCommandInterceptor leaves natural todo phrasing to the provider pro
   assert.deepEqual(result.processed.map((item) => item.intercepted?.command), [undefined, undefined, undefined]);
   assert.deepEqual(seenTurns.map((turn) => turn.inboundEvent.text), ["todo: Walk dog", "todo Walk dog", "do Walk dog"]);
   for (const turn of seenTurns) {
-    assert.match(turn.prompt, /assistant-agent-logic todo skill/);
-    assert.match(turn.prompt, /workspace-command execution/);
+    assert.match(turn.prompt, /assistant-agent-logic resources/);
+    assert.match(turn.prompt, /legacy\/lab compatibility wrapper/);
     assert.doesNotMatch(turn.prompt, /Natural todo intent/);
     assert.doesNotMatch(turn.prompt, /todo: X/);
     assert.doesNotMatch(turn.prompt, /todo-add\.js -- --title/);

@@ -141,11 +141,11 @@ an exact phrase unless they must run a command verbatim.
 12. When setup reaches Codex auth verification, give concrete commands. Prefer
    generating `pnpm run brainctl setup codex-auth-script --config
    <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root>
-   --ssh-host <host> --ssh-user <ssh-login-user> --service-user <brain-service-user>`
+   --ssh-host <host> --ssh-user <ssh-login-user> --service-user <codex-chat-service-user>`
    on the target host or via SSH context, then print the exact `sshRunCommand`
    value as a copy-paste command for the user, for example
    `ssh -t root@host 'sudo -iu brain bash /tmp/verify-brain-codex-auth.sh'`.
-   Verify auth as the same non-root service user that will run Brain; root's
+   Verify auth as the same non-root service user that will run codex-chat; root's
    Codex session is not sufficient for a `User=brain` systemd service.
    Setup progress must record which OS user verified Codex auth and must not
    treat auth verified as one user as sufficient for a different service user.

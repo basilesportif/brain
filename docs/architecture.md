@@ -8,9 +8,9 @@ and operate the separate servant runtime stack:
 2. `assistant-agent-logic` — reusable logic/scripts/prompts repository.
 3. `assistant-agent-data` / workspace — private data and repo-registry state.
 
-The in-repo Brain runtime remains experimental/lab until explicitly promoted.
-It should not be treated as the production runtime or as a reason to vendor or
-merge the servant repositories.
+The in-repo Brain runtime is experimental/lab-only and is not a promotion
+path for production assistant traffic. It must not be treated as the production
+runtime or as a reason to vendor or merge the servant repositories.
 
 The lab code in `brain` is still separated into four layers:
 

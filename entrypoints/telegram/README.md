@@ -96,8 +96,8 @@ as closely as possible without leaking Telegram concepts into runtime-core:
 
 The adapter still exposes `transcriptionFailureMode: "generic-metadata"` for
 experiments that need Brain events carrying transcription error metadata, but
-that is not the codex-chat parity mode used by `brainctl` Telegram runtime
-wiring.
+that is not the lab-only codex-chat compatibility mode used by Brain adapter
+tests.
 
 ## Bootstrap minimum
 
@@ -107,7 +107,7 @@ The setup flow should make Telegram usable enough for future configuration work:
    message `@BotFather`, send `/newbot`, choose a display name, choose a unique
    username ending in `bot`, and store the returned token only through a
    one-use private temporary script that prompts with hidden input and writes to
-   Brain's private `secrets.env` or configured secret-store reference. Never
+   the private `codex-chat` service env file or configured secret-store reference. Never
    commit, print, echo, log, paste into chat, or leave the token in shell
    history.
 2. Configure `telegram-main` as the only enabled entrypoint in `single-primary` mode.
@@ -125,7 +125,8 @@ The setup flow should make Telegram usable enough for future configuration work:
 6. After admin pairing, allow future integration setup commands to be received through Telegram.
 
 If the bot token is leaked, rotate it immediately in `@BotFather` with
-`/revoke`, update the private Brain secret, restart Brain, and re-run
-metadata-only checks. Check output must stay redacted.
+`/revoke`, update the private service secret/env reference, restart the owning
+runtime service (`codex-chat.service` for production), and re-run metadata-only
+checks. Check output must stay redacted.
 
 Composio and other optional integration tokens are not required for this bootstrap.

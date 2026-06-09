@@ -196,15 +196,14 @@ config/secrets/log paths, and command lists unless the user asks for details or
    - if no bot exists, show the BotFather steps;
    - store only a private token ref, not the token value;
    - do not start polling/webhooks yet.
-2. Create personal workspace memory:
-   - run or rely on `brainctl setup` / `brainctl workspace scaffold` to create
-     `data/*.json`, `instructions/**`, `tasks/**`,
-     `private/documents/metadata.jsonl`, selected `.claude/repo-registry/`
-     state paths, and markdown resource folders;
-   - tell the user todos/projects/CRM/reminders are JSON-backed and accessed by
-     native assistant-logic CLI commands via `brainctl workspace run`;
-   - ask whether to initialize or connect a private Git backup so non-secret
-     workspace state can be committed privately.
+2. Validate private assistant-agent-data/workspace state:
+   - `brainctl setup` creates only generic private workspace directories and
+     metadata; it must not create Brain-owned domain stores as production
+     authority;
+   - resolve or initialize the separate `assistant-agent-data` workspace through
+     repo-registry/stack data steps before relying on private memory;
+   - treat `brainctl workspace scaffold/run` as legacy/lab compatibility only,
+     not as the production source for todos/projects/CRM/reminders.
 3. Pull or initialize the private data/backup repo:
    - prefer an existing private-git remote when supplied;
    - otherwise initialize a private local repo/path and add a remote later;
@@ -227,7 +226,7 @@ config/secrets/log paths, and command lists unless the user asks for details or
 8. After the core choices are captured, configure or verify Codex auth before
    service start or live Telegram traffic:
    first generate a target-host helper with
-   `pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <workspace-name> --repo <repo-root> --ssh-host <host> --ssh-user <ssh-login-user> --service-user <brain-service-user>`.
+   `pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <workspace-name> --repo <repo-root> --ssh-host <host> --ssh-user <ssh-login-user> --service-user <codex-chat-service-user>`.
    For remote setup, show the exact returned `sshRunCommand` as a copy-paste
    command, for example `ssh -t root@host 'sudo -iu brain bash
    /tmp/verify-brain-codex-auth.sh'`, so device-auth can happen in the user's
@@ -344,9 +343,10 @@ on private workspace knowledge.
   `.claude/repo-registry/`, `private/documents/`, `projects/`, `notes/`,
   `documents/`, and `documents/metadata/` with restrictive
   ownership/permissions.
-- JSON stores exist and validate for Brain assistant-logic parity:
-  `data/todos.json`, `data/projects.json`, `data/crm.json`, and
-  `data/reminders.json`.
+- Generic private workspace directories exist for codex-chat state/artifacts
+  and assistant-agent-data. Domain-specific stores are owned by
+  `assistant-agent-data` and interpreted by the separate
+  `assistant-agent-logic` checkout, not by Brain setup.
 - The in-repo `packages/assistant-logic` package is present only for lab
   compatibility; validate with
   `pnpm run brainctl workspace status --path <workspace>` as a smoke check. A
@@ -427,7 +427,7 @@ on private workspace knowledge.
 - Once paired, the Telegram entrypoint should be able to receive setup commands
   so future integrations can be configured through Telegram.
 - If the token is leaked, rotate it in `@BotFather` with `/revoke`, replace the
-  private Brain secret reference, restart Brain, and re-run metadata-only secret
+  private codex-chat service secret/env reference, restart codex-chat, and re-run metadata-only secret
   checks. Setup output still reports only redacted token metadata.
 - No Composio or third-party integration token is required for this bootstrap.
 - After the base workspace, private backup, Codex auth, Telegram token, and

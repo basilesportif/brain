@@ -99,7 +99,8 @@ test("brainctl operations and live validation commands are non-mutating by defau
     assert.equal(systemd.status, 0, systemd.stderr);
     const systemdJson = JSON.parse(systemd.stdout) as { ok: boolean; details: { unit: string; sideEffects: string } };
     assert.equal(systemdJson.ok, true);
-    assert.match(systemdJson.details.unit, /ExecStart=pnpm run brainctl run/);
+    assert.match(systemdJson.details.unit, /Brain lab runtime systemd service is disabled by policy/);
+    assert.doesNotMatch(systemdJson.details.unit, /--telegram-polling/);
     assert.equal(systemdJson.details.sideEffects, "none");
 
     const validate = spawnBrainctl(["operations", "validate", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--repo", repoRoot, "--state", state, "--artifacts", artifacts, "--log", log]);
@@ -238,6 +239,13 @@ test("brainctl run/start/operations resolve Telegram and Codex from runtime conf
     assert.equal(runJson.details.entrypointKind, "telegram");
     assert.equal(runJson.details.entrypointSource, "config");
     assert.equal(runJson.details.subagentExecutor, "provider:codex");
+
+    const disabledLivePolling = spawnBrainctl(["run", "--config", "examples/config/runtime.yaml", "--workspace", "personal", "--telegram-polling"]);
+    assert.equal(disabledLivePolling.status, 1, disabledLivePolling.stderr);
+    const disabledLivePollingJson = JSON.parse(disabledLivePolling.stdout) as { summary: string; details: { replacement: string; secretValuesPrinted: boolean } };
+    assert.match(disabledLivePollingJson.summary, /Brain live Telegram polling is disabled/);
+    assert.match(disabledLivePollingJson.details.replacement, /codex-chat\.service|stack apply/);
+    assert.equal(disabledLivePollingJson.details.secretValuesPrinted, false);
     assert.equal(runJson.details.processed, 0);
     assert.equal(runJson.details.stoppedReason, "entrypoint-closed");
 
@@ -245,9 +253,9 @@ test("brainctl run/start/operations resolve Telegram and Codex from runtime conf
     assert.equal(systemd.status, 0, systemd.stderr);
     const systemdJson = JSON.parse(systemd.stdout) as { ok: boolean; details: { unit: string; sideEffects: string } };
     assert.equal(systemdJson.ok, true);
-    assert.match(systemdJson.details.unit, /--config .*runtime\.yaml --workspace personal/);
-    assert.match(systemdJson.details.unit, /--entrypoint telegram --provider codex/);
-    assert.doesNotMatch(systemdJson.details.unit, /--entrypoint fake|--provider fake/);
+    assert.match(systemdJson.details.unit, /Brain lab runtime systemd service is disabled by policy/);
+    assert.match(systemdJson.details.unit, /production uses codex-chat\.service/);
+    assert.doesNotMatch(systemdJson.details.unit, /--telegram-polling|--entrypoint telegram --provider codex/);
     assert.equal(systemdJson.details.sideEffects, "none");
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -516,13 +524,20 @@ test("brainctl setup telegram-token-script writes a syntax-checked one-use secre
     const token = "123456:abcDEF_ghi-JKLmnop";
     await writeFile(config, testRuntimeConfig(workspace, backupRepo));
 
-    const generated = spawnBrainctl(["setup", "telegram-token-script", "--workspace", "personal", "--path", workspace, "--output", script]);
+    const codexChatEnv = path.join(root, "codex-chat.env");
+    const localPollution = "999999:localPollutionMustNotBeCopied";
+    const generated = spawnBrainctl(["setup", "telegram-token-script", "--workspace", "personal", "--path", workspace, "--output", script, "--codex-chat-env", codexChatEnv], {
+      TELEGRAM_BOT_TOKEN: localPollution,
+    });
     assert.equal(generated.status, 0, generated.stderr);
-    const generatedJson = JSON.parse(generated.stdout) as { ok: boolean; details: { scriptPath: string; validation: string; secretValuesPrinted: boolean } };
+    assert.doesNotMatch(generated.stdout, new RegExp(localPollution));
+    const generatedJson = JSON.parse(generated.stdout) as { ok: boolean; details: { scriptPath: string; validation: string; secretValuesPrinted: boolean; writes: { codexChatEnv?: string } } };
     assert.equal(generatedJson.ok, true);
     assert.equal(generatedJson.details.scriptPath, script);
+    assert.equal(generatedJson.details.writes.codexChatEnv, codexChatEnv);
     assert.equal(generatedJson.details.validation, "bash -n passed");
     assert.equal(generatedJson.details.secretValuesPrinted, false);
+    assert.doesNotMatch(await readFile(script, "utf8"), new RegExp(localPollution));
 
     const syntax = spawnSync("bash", ["-n", script], { encoding: "utf8" });
     assert.equal(syntax.status, 0, syntax.stderr);
@@ -546,6 +561,8 @@ test("brainctl setup telegram-token-script writes a syntax-checked one-use secre
     assert.doesNotMatch(await readFile(secretsEnv, "utf8"), new RegExp(token));
     assert.match(await readFile(serviceEnv, "utf8"), new RegExp(`TELEGRAM_BOT_TOKEN_FILE=${escapeRegExp(tokenFile)}`));
     assert.match(await readFile(secretsEnv, "utf8"), new RegExp(`TELEGRAM_MAIN_CONFIG=${escapeRegExp(adapterConfig)}`));
+    assert.equal(await readFile(codexChatEnv, "utf8"), `TELEGRAM_BOT_TOKEN=${token}\n`);
+    assert.equal((await stat(codexChatEnv)).mode & 0o777, 0o600);
     const scaffold = spawnBrainctl(["workspace", "scaffold", "--path", workspace]);
     assert.equal(scaffold.status, 0, scaffold.stderr);
 
@@ -840,7 +857,7 @@ test("brainctl setup inspect is idempotent and redacts secret values", async () 
   }
 });
 
-test("brainctl scaffolds and reuses in-repo assistant-logic JSON workspace stores", async () => {
+test("brainctl keeps setup coordinator-only and exposes legacy/lab assistant-logic JSON workspace scaffold separately", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brainctl-assistant-workspace-"));
   try {
     const workspace = path.join(root, "workspace");
@@ -850,15 +867,20 @@ test("brainctl scaffolds and reuses in-repo assistant-logic JSON workspace store
 
     const setup = spawnBrainctl(["setup", "--config", config, "--workspace", "personal", "--path", workspace]);
     assert.equal(setup.status, 0, setup.stderr);
-    const setupJson = JSON.parse(setup.stdout) as { details: { plan: { configured: string[] }; assistantWorkspaceScaffold: { writtenFiles: string[] } } };
-    assert.ok(setupJson.details.plan.configured.some((item) => /assistant JSON store ready: todos/.test(item)));
-    assert.ok(setupJson.details.plan.configured.some((item) => /assistant-logic native and vendored commands available/.test(item)));
-    assert.ok(setupJson.details.assistantWorkspaceScaffold.writtenFiles.includes(path.join("data", "todos.json")));
-    assert.ok(setupJson.details.assistantWorkspaceScaffold.writtenFiles.includes(path.join("data", "bets.json")));
-    assert.ok(setupJson.details.assistantWorkspaceScaffold.writtenFiles.includes(".env.example"));
-    assert.ok(setupJson.details.assistantWorkspaceScaffold.writtenFiles.includes("composio.yaml.example"));
-    assert.ok(setupJson.details.assistantWorkspaceScaffold.writtenFiles.includes(path.join("instructions", "skills", "projects.md")));
-    assert.ok(setupJson.details.assistantWorkspaceScaffold.writtenFiles.includes(path.join("private", "documents", "metadata.jsonl")));
+    const setupJson = JSON.parse(setup.stdout) as { details: { plan: { missing_optional: string[] }; assistantWorkspaceScaffold: { deprecatedLabOnly: boolean; skipped: string } } };
+    assert.equal(setupJson.details.assistantWorkspaceScaffold.deprecatedLabOnly, true);
+    assert.match(setupJson.details.assistantWorkspaceScaffold.skipped, /production setup does not scaffold Brain's legacy assistant-domain JSON stores/);
+    assert.ok(setupJson.details.plan.missing_optional.some((item) => /legacy\/lab Brain assistant workspace scaffold absent/.test(item)));
+
+    const scaffold = spawnBrainctl(["workspace", "scaffold", "--path", workspace]);
+    assert.equal(scaffold.status, 0, scaffold.stderr);
+    const scaffoldJson = JSON.parse(scaffold.stdout) as { details: { scaffold: { writtenFiles: string[] } } };
+    assert.ok(scaffoldJson.details.scaffold.writtenFiles.includes(path.join("data", "todos.json")));
+    assert.ok(scaffoldJson.details.scaffold.writtenFiles.includes(path.join("data", "bets.json")));
+    assert.ok(scaffoldJson.details.scaffold.writtenFiles.includes(".env.example"));
+    assert.ok(scaffoldJson.details.scaffold.writtenFiles.includes("composio.yaml.example"));
+    assert.ok(scaffoldJson.details.scaffold.writtenFiles.includes(path.join("instructions", "skills", "projects.md")));
+    assert.ok(scaffoldJson.details.scaffold.writtenFiles.includes(path.join("private", "documents", "metadata.jsonl")));
 
     for (const [file, rootKey] of [
       ["todos.json", "todos"],
@@ -1173,7 +1195,7 @@ test("brainctl setup defaults renders concise remote choices and persists ignore
     assert.equal(parsed.details.decisions.find((item) => item.decision === "Future remote SSH user")?.default, "brain");
     assert.equal(parsed.details.decisions.find((item) => item.decision === "Source checkout")?.default, "/home/brain/brain");
     assert.equal(parsed.details.decisions.find((item) => item.decision === "Private workspace")?.default, "/home/brain/.brain/workspace");
-    assert.deepEqual(parsed.details.setupFlow.coreSteps.map((item) => item.step), ["essential-runtime-choices", "configure-verify-codex-auth", "telegram-connection", "personal-workspace", "private-data-repo", "composio-accounts"]);
+    assert.deepEqual(parsed.details.setupFlow.coreSteps.map((item) => item.step), ["essential-runtime-choices", "configure-verify-codex-auth", "telegram-connection", "personal-workspace", "private-data-repo", "openai-transcription", "composio-accounts"]);
     assert.ok(parsed.details.setupFlow.orderingNotes.some((item) => /provider is Codex/.test(item)));
     assert.ok(parsed.details.setupFlow.orderingNotes.some((item) => /Codex auth before starting the service/.test(item)));
     assert.ok(parsed.details.setupFlow.orderingNotes.some((item) => /assistant-agent-data/.test(item) && /not Brain/.test(item)));
@@ -1450,7 +1472,7 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
         networkAccess: boolean;
         sideEffects: string;
         secretValuesPrinted: boolean;
-        servantRuntime: { repoName: string; deploy: { sshIdentity: string; serviceName: string; envFile: string; configPath: string; envVars: string[] } };
+        servantRuntime: { repoName: string; deploy: { sshIdentity: string; serviceName: string; envFile: string; configPath: string; envVars: string[]; expectedTelegramBot?: { id?: string; username?: string } } };
         assistantLogic: { alias: string; repoName: string; path: string };
         assistantData: { workspacePath: string; promptRequired: boolean; migrationPlaceholder: string };
         servicePaths: { deployHost: string; sshIdentity: string; envFile: string; configPath: string; setupContextConfigPath: string };
@@ -1472,10 +1494,11 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
     assert.equal(statusJson.details.servantRuntime.deploy.envFile, "/etc/codex-chat/env");
     assert.equal(statusJson.details.servantRuntime.deploy.configPath, "/etc/codex-chat/codex-chat.toml");
     assert.deepEqual(statusJson.details.servantRuntime.deploy.envVars, ["TELEGRAM_BOT_TOKEN", "OPENAI_API_KEY"]);
+    assert.deepEqual(statusJson.details.servantRuntime.deploy.expectedTelegramBot, { id: "8820527937", username: "AnnaBrainBot" });
     assert.equal(statusJson.details.assistantLogic.alias, "assistant-claude");
     assert.equal(statusJson.details.assistantLogic.repoName, "assistant-agent-logic");
     assert.equal(statusJson.details.assistantLogic.path, "/srv/src/assistant-agent-logic");
-    assert.equal(statusJson.details.assistantData.workspacePath, assistantData);
+    assert.equal(statusJson.details.assistantData.workspacePath, "/srv/brain/workspace");
     assert.equal(statusJson.details.assistantData.promptRequired, true);
     assert.match(statusJson.details.assistantData.migrationPlaceholder, /do not auto-migrate/);
     assert.equal(statusJson.details.servicePaths.deployHost, "app.example.test");
@@ -1494,6 +1517,7 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
     assert.ok(statusJson.details.secretMetadataChecks.every((check) => check.value === "redacted" && check.metadataOnly));
     assert.ok(statusJson.details.secretMetadataChecks.some((check) => check.plannedCheck.includes("stat -c") && check.plannedCheck.includes("/etc/codex-chat/env")));
     assert.ok(statusJson.details.secretMetadataChecks.some((check) => check.kind === "env" && check.plannedCheck.includes("grep -qE")));
+    assert.ok(statusJson.details.secretMetadataChecks.some((check) => check.kind === "telegram-getMe" && check.plannedCheck.includes("BRAIN_EXPECTED_BOT_USERNAME=AnnaBrainBot")));
 
     const plan = spawnBrainctl(["stack", "plan", "--registry", registry, "--repo", brainRepo, "--setup-context", setupContext, "--workspace", "personal"], {
       TELEGRAM_BOT_TOKEN: secretValue,
@@ -1523,11 +1547,13 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
     assert.match(steps.get("assistant-data-workspace")?.migrationPlaceholder ?? "", /do not auto-migrate/);
     assert.ok(steps.get("render-codex-chat-config-env")?.target?.envFile);
     assert.doesNotMatch(steps.get("render-codex-chat-config-env")?.renderedEnvPreview ?? "", new RegExp(secretValue));
+    assert.ok(steps.get("install-start-codex-chat-service")?.commands?.some((command) => /systemctl disable --now brain-personal\.service/.test(command)));
     assert.ok(steps.get("install-start-codex-chat-service")?.commands?.some((command) => /systemctl enable --now codex-chat\.service/.test(command)));
     assert.ok(steps.get("record-deployment-metadata")?.target?.path.includes("state/control-plane/deployments.json"));
     assert.ok(steps.get("health-check-codex-chat")?.commands?.some((command) => /codex-chat health --json/.test(command)));
     assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "clone-update-codex-chat-deploy" && action.executor === "ssh" && /ssh codex@app\.example\.test/.test(action.displayCommand ?? "")));
-    assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "assistant-agent-data-clone-or-init-placeholder" && action.executor === "local" && !/ssh /.test(action.displayCommand ?? "")));
+    assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "install-codex-chat-systemd" && /BRAIN_EXPECTED_BOT_USERNAME=AnnaBrainBot/.test(action.displayCommand ?? "")));
+    assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "assistant-agent-data-clone-or-init-placeholder" && action.executor === "ssh" && /ssh brain@brain\.example\.test/.test(action.displayCommand ?? "")));
     assert.ok(planJson.details.plan.forbidden.some((line) => /Do not vendor or merge/.test(line)));
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -1932,6 +1958,7 @@ function stackRegistryFixture(options: {
   sshIdentity?: string;
   envFile?: string;
   configPath?: string;
+  expectedTelegramBot?: { id?: string; username?: string };
   codexRemoteUrl?: string;
   assistantLogicRemoteUrl?: string;
 }): string {
@@ -1944,6 +1971,7 @@ function stackRegistryFixture(options: {
   const sshIdentity = options.sshIdentity ?? "codex@app.example.test";
   const envFile = options.envFile ?? "/etc/codex-chat/env";
   const configPath = options.configPath ?? "/etc/codex-chat/codex-chat.toml";
+  const expectedTelegramBot = options.expectedTelegramBot ?? { id: "8820527937", username: "AnnaBrainBot" };
   const codexRemoteUrl = options.codexRemoteUrl ?? "git@github.com:example/codex-chat.git";
   const assistantLogicRemoteUrl = options.assistantLogicRemoteUrl ?? "git@github.com:example/assistant-agent-logic.git";
   const assistantLogicEnvironment = options.assistantLogicDeployHost || options.assistantLogicDeployPath
@@ -1985,6 +2013,11 @@ function stackRegistryFixture(options: {
     ...(sshIdentity ? [`              ssh_identity: ${JSON.stringify(sshIdentity)}`] : []),
     `              env_file: ${JSON.stringify(envFile)}`,
     `              config_path: ${JSON.stringify(configPath)}`,
+    ...(expectedTelegramBot ? [
+      "              expected_telegram_bot:",
+      ...(expectedTelegramBot.id ? [`                id: ${JSON.stringify(expectedTelegramBot.id)}`] : []),
+      ...(expectedTelegramBot.username ? [`                username: ${JSON.stringify(expectedTelegramBot.username)}`] : []),
+    ] : []),
     "              env_vars:",
     "                - TELEGRAM_BOT_TOKEN",
     "                - OPENAI_API_KEY",

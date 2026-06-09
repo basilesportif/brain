@@ -260,8 +260,10 @@ include/exclude rules; the template excludes `secrets/**`, `logs/**`, `tmp/**`,
 caches, `node_modules`, and `*.log` by default. `backup status` summarizes Git
 presence, remotes, branch, and status counts without printing private filenames.
 
-The default include policy now covers the Brain assistant-logic JSON workspace
-state:
+The default include policy covers non-secret private workspace state. In
+production that state belongs to assistant-agent-data/workspace and is consumed
+by codex-chat plus the separate assistant-agent-logic checkout; Brain's in-repo
+JSON stores are lab compatibility only:
 
 - `data/**` for todos, projects, CRM, reminders, and related JSON stores;
 - `instructions/**` for skill/prompt overlays;
@@ -370,7 +372,7 @@ pnpm run brainctl health --config examples/config/runtime.yaml --workspace perso
 pnpm run brainctl logs --file ~/.brain/workspace/logs/runtime.jsonl --lines 100
 ```
 
-`start` defaults to a dry-run plan. Use `start --foreground` or `run` to enter the foreground supervisor. Provider and entrypoint default to the selected workspace's runtime config; pass `--fake` or explicit `--provider fake --entrypoint fake` for CI/fresh-checkout smoke. Explicit live Telegram polling requires `--entrypoint telegram --telegram-polling` plus `--telegram-token-env` or `--telegram-token-file`; polling offsets remain Telegram-native state only. Telegram bootstrap uses first-user pairing by default and stores exact admin user/chat pairs under the private state root. The default cap is two distinct admin pairs, after which pairing closes; pass `--telegram-max-admin-pairs 1` to keep a single-admin deployment closed after the first pair. Pass `--telegram-pairing` only for the optional advanced `/pair` code flow. Attachment download is opt-in with `--telegram-downloads`/`--telegram-download-dir`; voice/audio transcription can come from workspace `transcription.provider: openai` with an `apiKeyRef` such as `env:OPENAI_API_KEY`, or from the private `--telegram-transcription-command` seam. Brainctl wires the Telegram adapter in codex-chat parity mode: disabled/unavailable voice transcription replies `Voice transcription is not enabled.` and is not sent to the provider, disabled audio stays an attachment event, and configured voice/audio transcription errors are dropped before provider dispatch. No transcription provider keys belong in the repo.
+`start` defaults to a dry-run plan. Use fake/no-network invocations only for CI/fresh-checkout smoke. The former live Telegram polling path is disabled: `brainctl run --telegram-polling` exits with a boundary error, and production Telegram traffic must go through `codex-chat.service`. Telegram token, pairing, download, and transcription metadata remain private runtime/env refs carried by the codex-chat deployment, not Brain prompt behavior. No transcription provider keys belong in the repo.
 
 The supervisor intercepts service commands before provider turns when configured: `help`, `health`, `logs`/`introspect`, `agents`, `agent status`, `agent kill`, `agent steer`, `agent backend`, `employees`, `employee status/start/stop/steer`, and `update`/`deploy`. Backend mutation and deploy/update remain safe seams only. Employee commands update durable lifecycle records; pass `--employee-runtime` when running the supervisor to back Employee start/steer/stop with the selected provider session.
 
@@ -418,14 +420,14 @@ chat, shell history, command output, or logs.
 When the wizard reaches Codex auth, generate a target-host verification helper:
 
 ```bash
-pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root> --ssh-host <host> --ssh-user <ssh-login-user> --service-user <brain-service-user>
+pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root> --ssh-host <host> --ssh-user <ssh-login-user> --service-user <codex-chat-service-user>
 ```
 
 For remote setup, give the user the returned
 `ssh -t ... 'sudo -iu brain bash .../verify-brain-codex-auth.sh'` command when
 the SSH login user differs from the service user. For local setup, run the
 returned `bash .../verify-brain-codex-auth.sh` command as the same user that
-will run Brain. A root Codex login is not enough for a `User=brain` systemd
+will run codex-chat. A root Codex login is not enough for a `User=brain` systemd
 service. The helper checks `codex login status`. If auth is missing during
 remote setup, the helper itself prints the exact SSH command to run from the
 operator's terminal, such as

@@ -32,7 +32,7 @@ test("BrainRuntime turns provider final text into origin-routed outbound action"
   assert.deepEqual(result.subagentJobIds, []);
 });
 
-test("buildPrompt exposes private workspace paths and codex-chat parity behavior rules", () => {
+test("buildPrompt exposes control-plane boundaries without making Brain production domain logic", () => {
   const prompt = buildPrompt({
     id: "evt_projects",
     kind: "message",
@@ -48,33 +48,21 @@ test("buildPrompt exposes private workspace paths and codex-chat parity behavior
     promptContext: { includeActiveEntrypointMetadata: true, exposeChannelSecrets: false },
   });
 
-  assert.match(prompt, /data\/projects\.json/);
-  assert.match(prompt, /data\/todos\.json/);
-  assert.match(prompt, /data\/crm\.json/);
-  assert.match(prompt, /data\/reminders\.json/);
-  assert.match(prompt, /private\/documents\/metadata\.jsonl/);
-  assert.match(prompt, /native assistant-logic CLI commands/);
-  assert.match(prompt, /packages\/assistant-logic/);
-  assert.match(prompt, /registered assistant-agent-logic checkout/);
-  assert.match(prompt, /Markdown project\/notes\/documents directories are supporting resources only/);
-  assert.match(prompt, /do not claim no project\/todo\/CRM\/reminder list exists/);
-  assert.match(prompt, /Main-loop routing parity/);
-  assert.match(prompt, /main_loop: model=gpt-5\.5 effort=medium/);
-  assert.match(prompt, /Dispatch a subagent for repo\/file inspection/);
-  assert.match(prompt, /stress\/fan-out requests/);
-  assert.match(prompt, /Todo intent recognition, post-mutation display rules, and delete-reference semantics live in the assistant-agent-logic todo skill/);
+  assert.match(prompt, /lab-only provider-neutral runtime seam/);
+  assert.match(prompt, /Production live assistant traffic must run through codex-chat\.service/);
+  assert.match(prompt, /separate assistant-agent-logic checkout and assistant-agent-data\/workspace/);
+  assert.match(prompt, /Do not treat Brain's in-repo lab compatibility commands/);
+  assert.match(prompt, /legacy\/lab compatibility wrapper only/);
+  assert.match(prompt, /Do not migrate private data into Brain source repos/);
+  assert.match(prompt, /assistantLogicSkills/);
+  assert.match(prompt, /send_image\/send_document compatibility/);
+  assert.doesNotMatch(prompt, /Todos, projects, CRM, reminders/);
+  assert.doesNotMatch(prompt, /Main-loop routing parity/);
+  assert.doesNotMatch(prompt, /Generated images/);
+  assert.doesNotMatch(prompt, /Scratch web pages \/ codex-chat-web/);
   assert.doesNotMatch(prompt, /Natural todo intent/);
   assert.doesNotMatch(prompt, /todo: X/);
   assert.doesNotMatch(prompt, /todo-add\.js -- --title/);
-  assert.match(prompt, /project-resource\.js/);
-  assert.match(prompt, /calendar\/email\/Gmail\/Composio live account lookup should dispatch a subagent/);
-  assert.match(prompt, /effort medium for mechanical scoped edits and straightforward calendar event creation\/adding/);
-  assert.match(prompt, /high for normal research\/inspection\/account lookup including calendar\/email lookup/);
-  assert.match(prompt, /File-save\/PDF attach/);
-  assert.match(prompt, /Generated images/);
-  assert.match(prompt, /Scratch web pages \/ codex-chat-web/);
-  assert.match(prompt, /Loops\/monitors/);
-  assert.match(prompt, /send_image\/send_document compatibility/);
 });
 
 test("buildPrompt loads runtime roots, AGENTS, pack prompts, and assistant-agent-logic skills from configured roots", async () => {
@@ -154,8 +142,8 @@ test("buildPrompt loads runtime roots, AGENTS, pack prompts, and assistant-agent
     assert.match(prompt, /ASSISTANT_AGENT_LOGIC_TODO_SKILL_MARKER/);
     assert.match(prompt, /do not infer these from the private workspace cwd/);
     assert.match(prompt, /Available assistant-agent-logic skill docs: .*todo\.md/);
-    assert.match(prompt, /For every dispatch_subagent action include profile, summary, model, and effort/);
-    assert.match(prompt, /Use profile researcher for research\/inspection\/account lookup/);
+    assert.match(prompt, /For any lab dispatch_subagent directive include profile, summary, model, effort, and idempotencyKey/);
+    assert.doesNotMatch(prompt, /Use profile researcher for research\/inspection\/account lookup/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

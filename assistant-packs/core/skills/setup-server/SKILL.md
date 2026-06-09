@@ -78,7 +78,7 @@ control plane and `codex-chat.service` servant runtime.
    Generate `pnpm run brainctl setup codex-auth-script --config
    <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root>
    --ssh-host <host> --ssh-user <ssh-login-user> --service-user
-   <brain-service-user>` and give the user the returned `sshRunCommand`. Verify
+   <codex-chat-service-user>` and give the user the returned `sshRunCommand`. Verify
    auth as the same service user that systemd will run; root's Codex login is
    not sufficient for `User=brain`. Setup progress must record the verified OS
    user and resume from auth if it differs from the service user. If auth is

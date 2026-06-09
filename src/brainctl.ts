@@ -56,6 +56,7 @@ program.command("setup")
   .option("--token-file <path>", "private Telegram token file for generated token storage script")
   .option("--adapter-config <path>", "private Telegram adapter config file for generated token storage script")
   .option("--service-env <path>", "private service env file for generated token storage script")
+  .option("--codex-chat-env <path>", "private codex-chat service env file to receive TELEGRAM_BOT_TOKEN from operator input")
   .option("--secrets-env <path>", "private secrets env file for generated token storage script")
   .option("--composio-env <path>", "private workspace .env file for generated Composio API key storage script")
   .option("--binary <path>", "provider binary for generated setup helper scripts")
@@ -115,7 +116,7 @@ program.command("start")
   .option("--app-server-url <url>", "Codex app-server WebSocket URL")
   .option("--telegram-token-env <name>", "Telegram token env var for explicit live polling")
   .option("--telegram-token-file <path>", "Telegram token file for explicit live polling")
-  .option("--telegram-polling", "enable live Telegram getUpdates polling; requires a token ref")
+  .option("--telegram-polling", "deprecated/disabled: Brain must not own live Telegram polling; deploy codex-chat.service")
   .option("--telegram-max-polls <n>", "maximum Telegram polls before stopping", parseNumberOption)
   .option("--polling-state <path>", "Telegram polling offset state path")
   .option("--telegram-pairing", "use optional one-time /pair code bootstrap instead of default first-user pairing")
@@ -146,7 +147,7 @@ program.command("run")
   .option("--app-server-url <url>", "Codex app-server WebSocket URL")
   .option("--telegram-token-env <name>", "Telegram token env var for explicit live polling")
   .option("--telegram-token-file <path>", "Telegram token file for explicit live polling")
-  .option("--telegram-polling", "enable live Telegram getUpdates polling; requires a token ref")
+  .option("--telegram-polling", "deprecated/disabled: Brain must not own live Telegram polling; deploy codex-chat.service")
   .option("--telegram-max-polls <n>", "maximum Telegram polls before stopping", parseNumberOption)
   .option("--polling-state <path>", "Telegram polling offset state path")
   .option("--telegram-pairing", "use optional one-time /pair code bootstrap instead of default first-user pairing")
@@ -333,28 +334,28 @@ backup.command("status")
   .option("--path <path>", "private workspace path override")
   .action(async (options) => exitWith(await backupCommand("status", options)));
 
-const workspaceCommands = program.command("workspace").description("Brain assistant workspace helpers for native stores and vendored integrations");
+const workspaceCommands = program.command("workspace").description("Legacy/lab Brain assistant workspace helpers; production uses assistant-agent-logic plus assistant-agent-data");
 workspaceCommands.command("scaffold")
-  .description("Create the Brain assistant workspace scaffold without overwriting stores or secrets.")
+  .description("Create the legacy/lab Brain assistant workspace scaffold without overwriting stores or secrets.")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--path <path>", "private workspace path")
   .option("--assistant-repo <path>", "deprecated; ignored because Brain uses the native @brain/assistant-logic package")
   .option("--dry-run", "show planned scaffold paths without writing files")
   .action(async (options) => exitWith(await workspaceScaffoldCommand(options)));
 workspaceCommands.command("status")
-  .description("Inspect Brain assistant workspace parity metadata, including vendored live-integration scripts.")
+  .description("Inspect legacy/lab Brain assistant workspace parity metadata, including vendored live-integration scripts.")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--path <path>", "private workspace path")
   .option("--assistant-repo <path>", "deprecated; ignored because Brain uses the native @brain/assistant-logic package")
   .action(async (options) => exitWith(await workspaceStatusCommand(options)));
 workspaceCommands.command("commands")
-  .description("List Brain assistant-logic commands, including native stores and vendored live integrations.")
+  .description("List legacy/lab Brain assistant-logic commands, including native stores and vendored live integrations.")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--path <path>", "private workspace path")
   .option("--assistant-repo <path>", "deprecated; ignored because Brain uses the native @brain/assistant-logic package")
   .action(async (options) => exitWith(await workspaceCommandsCommand(options)));
 workspaceCommands.command("run")
-  .description("Run a Brain assistant-logic command with ASSISTANT_WORKSPACE and private roots set.")
+  .description("Run a legacy/lab Brain assistant-logic command with ASSISTANT_WORKSPACE and private roots set.")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--path <path>", "private workspace path")
   .option("--assistant-repo <path>", "deprecated; ignored because Brain uses the native @brain/assistant-logic package")
@@ -553,6 +554,7 @@ type ResolvedSupervisorRuntimeResult =
   | (CliResult & { ok: false; runtime?: undefined });
 
 async function startCommand(options: SupervisorRunCommandOptions & { foreground?: boolean }): Promise<CliResult> {
+  if (options.telegramPolling) return disabledBrainLiveTelegramPollingResult();
   const config = await loadValidConfig(options.config);
   if (!config.ok || !config.config) return config;
   const selection = resolveSupervisorRuntime(config.config, options);
@@ -587,6 +589,7 @@ async function startCommand(options: SupervisorRunCommandOptions & { foreground?
 }
 
 async function runCommand(options: SupervisorRunCommandOptions): Promise<CliResult> {
+  if (options.telegramPolling) return disabledBrainLiveTelegramPollingResult();
   const config = await loadValidConfig(options.config);
   if (!config.ok || !config.config) return config;
   const selection = resolveSupervisorRuntime(config.config, options);
@@ -679,6 +682,24 @@ async function runCommand(options: SupervisorRunCommandOptions): Promise<CliResu
     process.off("SIGTERM", onSignal);
     await subagents.shutdown("brainctl run stopped").catch(() => undefined);
   }
+}
+
+function disabledBrainLiveTelegramPollingResult(): CliResult {
+  return {
+    ok: false,
+    summary: "Brain live Telegram polling is disabled; deploy/start codex-chat.service instead",
+    details: {
+      replacement: "pnpm run brainctl stack plan --environment <env>; pnpm run brainctl stack apply --approve --approve-service --approve-health ...",
+      policy: [
+        "Brain is the deployment/control-plane coordinator only.",
+        "The live assistant runtime is codex-chat.service.",
+        "assistant-agent-logic remains the canonical assistant-domain logic checkout.",
+        "Keeping Brain polling disabled prevents double polling and stale domain behavior.",
+      ],
+      sideEffects: "none",
+      secretValuesPrinted: false,
+    },
+  };
 }
 
 async function healthCommand(options: { config: string; workspace: string; state?: string; log?: string }): Promise<CliResult> {
@@ -929,6 +950,7 @@ interface StackStatusDetails {
       envFile?: string;
       configPath?: string;
       envVars: string[];
+      expectedTelegramBot?: TelegramBotIdentity;
       healthChecks: Array<{ kind: string; command: string }>;
     };
   };
@@ -951,6 +973,11 @@ interface StackStatusDetails {
   deploymentMetadata: StackDeploymentMetadataStatus;
   repoBoundaries: ReturnType<typeof analyzeStackRepoBoundaries>;
   missing: string[];
+}
+
+interface TelegramBotIdentity {
+  id?: string;
+  username?: string;
 }
 
 interface StackDeploymentMetadataStatus {
@@ -1226,6 +1253,7 @@ async function resolveStackStatus(options: StackCommandOptions): Promise<StackSt
   const envFile = asString(codexDeploy?.env_file);
   const configPath = asString(codexDeploy?.config_path) ?? asString(codexDeploy?.config);
   const envVars = asStringArray(codexDeploy?.env_vars);
+  const expectedTelegramBot = readExpectedTelegramBot(codexDeploy, codexEnvironment?.environment);
   const healthChecks = readStackHealthChecks(codexEnvironment?.environment);
   const controlPlane = stackRepoFromLocalBrain(repoRoot);
   const servantRuntime = {
@@ -1240,6 +1268,7 @@ async function resolveStackStatus(options: StackCommandOptions): Promise<StackSt
       envFile,
       configPath,
       envVars,
+      expectedTelegramBot,
       healthChecks,
     },
   };
@@ -1248,9 +1277,24 @@ async function resolveStackStatus(options: StackCommandOptions): Promise<StackSt
     asRecord(codexEnvironment?.environment?.assistant_logic) ?? asRecord(codexDeploy?.assistant_logic),
     "codex-chat environment assistant_logic",
   );
+  const assistantDataOverride = asRecord(codexEnvironment?.environment?.assistant_data) ?? asRecord(codexDeploy?.assistant_data);
+  const assistantDataBase = stackRepoWithEnvironmentOverride(
+    stackRepoFromRegistry("assistant-data" as const, assistantData),
+    assistantDataOverride,
+    "codex-chat environment assistant_data",
+  );
+  const remoteWorkspaceHost = setupContext.context?.target === "remote" ? sshIdentityFromSetupContext(setupContext.context) : undefined;
+  const remoteWorkspaceRoot = setupContext.context?.target === "remote" ? setupContext.context.workspaceRoot : undefined;
+  const assistantDataPath = asString(assistantDataOverride?.path) ?? remoteWorkspaceRoot ?? assistantDataBase.path;
+  const assistantDataHost = asString(assistantDataOverride?.host) ?? remoteWorkspaceHost ?? assistantDataBase.host;
   const assistantDataResolution = {
-    ...stackRepoFromRegistry("assistant-data" as const, assistantData),
-    workspacePath: asString(assistantData.repo?.path),
+    ...assistantDataBase,
+    host: assistantDataHost,
+    path: assistantDataPath,
+    workspacePath: assistantDataPath,
+    source: remoteWorkspaceRoot && !assistantDataOverride
+      ? `${assistantDataBase.source}; remote setup context workspaceRoot`
+      : assistantDataBase.source,
     promptRequired: true,
     migrationPlaceholder: "Prompt the operator to confirm/pull/init the assistant-agent-data workspace; do not auto-migrate private data in this phase.",
   };
@@ -1263,7 +1307,7 @@ async function resolveStackStatus(options: StackCommandOptions): Promise<StackSt
     configPath,
     setupContextConfigPath: setupContext.context?.configPath,
   };
-  const secretMetadataChecks = stackSecretMetadataChecks(envVars, envFile, sshIdentity);
+  const secretMetadataChecks = stackSecretMetadataChecks(envVars, envFile, sshIdentity, expectedTelegramBot);
   const deploymentMetadata = await readStackDeploymentMetadataStatus({
     workspace: options.workspace,
     setupContext,
@@ -1641,7 +1685,18 @@ function readStackHealthChecks(environment: Record<string, unknown> | undefined)
   });
 }
 
-function stackSecretMetadataChecks(envVars: string[], envFile: string | undefined, sshIdentity: string | undefined): Array<Record<string, unknown>> {
+function readExpectedTelegramBot(deploy: Record<string, unknown> | undefined, environment: Record<string, unknown> | undefined): TelegramBotIdentity | undefined {
+  const candidate = asRecord(deploy?.expected_telegram_bot)
+    ?? asRecord(environment?.expected_telegram_bot)
+    ?? asRecord(deploy?.telegram_bot)
+    ?? asRecord(environment?.telegram_bot);
+  const idValue = candidate?.id;
+  const id = typeof idValue === "number" ? String(idValue) : asString(idValue);
+  const username = asString(candidate?.username)?.replace(/^@/, "");
+  return id || username ? { id, username } : undefined;
+}
+
+function stackSecretMetadataChecks(envVars: string[], envFile: string | undefined, sshIdentity: string | undefined, expectedTelegramBot?: TelegramBotIdentity): Array<Record<string, unknown>> {
   if (!envFile && envVars.length === 0) return [];
   return [
     ...(envFile ? [{
@@ -1662,6 +1717,15 @@ function stackSecretMetadataChecks(envVars: string[], envFile: string | undefine
         ? remotePlanCommand(sshIdentity, `grep -qE '^${escapeShellRegex(name)}=' ${shellPathArg(envFile)}`)
         : "pending env file selection; check presence without printing values",
     })),
+    ...(envFile && expectedTelegramBot ? [{
+      source: "codex-chat.telegram_bot_identity",
+      kind: "telegram-getMe",
+      envFile,
+      expected: expectedTelegramBot,
+      metadataOnly: true,
+      value: "redacted",
+      plannedCheck: remotePlanCommand(sshIdentity, renderTelegramBotIdentityGuardShell({ envFile, expected: expectedTelegramBot })),
+    }] : []),
   ];
 }
 
@@ -1795,7 +1859,7 @@ function renderSystemdServicePreview(status: StackStatusDetails): string {
     `User=${runtimeUser}`,
     `WorkingDirectory=${workingDirectory}`,
     ...(envFile ? [`EnvironmentFile=${envFile}`] : []),
-    `ExecStart=/usr/bin/env node dist/main.js --config ${configPath} start`,
+    `ExecStart=/usr/bin/env bun dist/main.js --config ${configPath} start`,
     "Restart=on-failure",
     "RestartSec=5s",
     "",
@@ -1930,8 +1994,10 @@ function renderStackExecutorActions(status: StackStatusDetails, approvals: Recor
       executor: deployIdentity ? "ssh" : "local",
       requiredGate: "service",
       hostIdentity: deployIdentity,
-      command: renderSystemdInstallShell({ serviceName, unit: systemdPreview }),
-      sideEffectsIfExecuted: "would install service unit, reload systemd, enable and start codex-chat",
+      command: renderSystemdInstallShell({ serviceName, unit: systemdPreview, envFile, expectedTelegramBot: deploy.expectedTelegramBot }),
+      sideEffectsIfExecuted: deploy.expectedTelegramBot
+        ? "would verify Telegram bot identity from remote env file, stop/disable legacy brain-personal.service, then install service unit, reload systemd, enable and start codex-chat"
+        : "would stop/disable legacy brain-personal.service, then install service unit, reload systemd, enable and start codex-chat",
     }),
     ...((deploy.healthChecks.length > 0 ? deploy.healthChecks : [{ kind: "systemd", command: `systemctl status ${shellArg(serviceName)} --no-pager` }]).map((check, index) => action({
       id: `health-check-${index + 1}`,
@@ -2007,8 +2073,48 @@ function renderConfigEnvWriteShell(input: { configPath: string; configPreview: s
   return commands.join("\n");
 }
 
-function renderSystemdInstallShell(input: { serviceName: string; unit: string }): string {
+function renderTelegramBotIdentityGuardShell(input: { envFile: string; expected: TelegramBotIdentity }): string {
   return [
+    "set -euo pipefail",
+    `BRAIN_CODEX_CHAT_ENV=${shellArg(input.envFile)} BRAIN_EXPECTED_BOT_ID=${shellArg(input.expected.id ?? "")} BRAIN_EXPECTED_BOT_USERNAME=${shellArg(input.expected.username ?? "")} node <<'BRAIN_TELEGRAM_BOT_GUARD'`,
+    "const fs = require('fs');",
+    "const envFile = process.env.BRAIN_CODEX_CHAT_ENV;",
+    "const expectedId = process.env.BRAIN_EXPECTED_BOT_ID || undefined;",
+    "const expectedUsername = (process.env.BRAIN_EXPECTED_BOT_USERNAME || '').replace(/^@/, '') || undefined;",
+    "const fail = (message) => { console.error(message); process.exit(1); };",
+    "const text = fs.readFileSync(envFile, 'utf8');",
+    "let token;",
+    "for (const rawLine of text.split(/\\r?\\n/)) {",
+    "  const line = rawLine.trim();",
+    "  if (!line || line.startsWith('#')) continue;",
+    "  const match = /^TELEGRAM_BOT_TOKEN\\s*=\\s*(.*)$/.exec(line);",
+    "  if (!match) continue;",
+    "  let value = match[1].trim();",
+    "  if ((value.startsWith(\"'\") && value.endsWith(\"'\")) || (value.startsWith('\"') && value.endsWith('\"'))) value = value.slice(1, -1);",
+    "  token = value;",
+    "}",
+    "if (!token || token.includes('<redacted')) fail('codex-chat env file is missing a real TELEGRAM_BOT_TOKEN');",
+    "if (typeof fetch !== 'function') fail('node fetch API is unavailable; cannot verify Telegram bot identity');",
+    "(async () => {",
+    "  const response = await fetch(`https://api.telegram.org/bot${token}/getMe`);",
+    "  const body = await response.json().catch(() => ({}));",
+    "  if (!response.ok || body.ok !== true) fail('Telegram getMe failed for codex-chat env token');",
+    "  const bot = body.result || {};",
+    "  const actualId = String(bot.id || '');",
+    "  const actualUsername = String(bot.username || '');",
+    "  if (expectedId && actualId !== expectedId) fail(`Telegram bot id mismatch: expected ${expectedId}, got ${actualId || 'unknown'}`);",
+    "  if (expectedUsername && actualUsername !== expectedUsername) fail(`Telegram bot username mismatch: expected ${expectedUsername}, got ${actualUsername || 'unknown'}`);",
+    "  console.error(`Verified Telegram bot identity: @${actualUsername} (${actualId})`);",
+    "})().catch((error) => fail(error && error.message ? error.message : String(error)));",
+    "BRAIN_TELEGRAM_BOT_GUARD",
+  ].join("\n");
+}
+
+function renderSystemdInstallShell(input: { serviceName: string; unit: string; envFile?: string; expectedTelegramBot?: TelegramBotIdentity }): string {
+  return [
+    ...(input.envFile && input.expectedTelegramBot ? [renderTelegramBotIdentityGuardShell({ envFile: input.envFile, expected: input.expectedTelegramBot })] : []),
+    "sudo systemctl disable --now brain-personal.service >/dev/null 2>&1 || true",
+    "sudo systemctl reset-failed brain-personal.service >/dev/null 2>&1 || true",
     `cat <<'BRAIN_CODEX_CHAT_SERVICE' | sudo tee ${shellPathArg(`/etc/systemd/system/${input.serviceName}`)} >/dev/null`,
     input.unit.trimEnd(),
     "BRAIN_CODEX_CHAT_SERVICE",
@@ -2088,6 +2194,7 @@ function renderStackNoNetworkPlan(status: StackStatusDetails) {
         title: "Render codex-chat service config/env from registry and setup context.",
         target: { envFile: deploy.envFile, configPath: deploy.configPath ?? status.servicePaths.setupContextConfigPath },
         envVars: deploy.envVars.map((name) => ({ name, value: "redacted", metadataOnly: true })),
+        expectedTelegramBot: deploy.expectedTelegramBot,
         secretMetadataChecks: status.secretMetadataChecks,
         renderedConfigPreview: renderCodexChatConfigPreview(status),
         renderedEnvPreview: renderCodexChatEnvPreview(status),
@@ -2103,10 +2210,11 @@ function renderStackNoNetworkPlan(status: StackStatusDetails) {
         target: { host: deploy.host, sshIdentity: deployIdentity, path: deploy.path, serviceName, runtimeUser: deploy.runtimeUser },
         commands: [
           remotePlanCommand(deployIdentity, `cd ${shellPathArg(deploy.path ?? servant.path)} && pnpm install --frozen-lockfile && pnpm run build`),
+          remotePlanCommand(deployIdentity, `sudo systemctl disable --now brain-personal.service >/dev/null 2>&1 || true`),
           remotePlanCommand(deployIdentity, `sudo systemctl daemon-reload && sudo systemctl enable --now ${shellArg(serviceName)}`),
           remotePlanCommand(deployIdentity, `systemctl is-active ${shellArg(serviceName)} --quiet`),
         ],
-        sideEffectsIfExecuted: "would install dependencies/build and start systemd service; not executed by this command",
+        sideEffectsIfExecuted: "would install dependencies/build, stop legacy Brain polling if present, and start systemd service; not executed by this command",
       },
       {
         id: "record-deployment-metadata",
@@ -2885,14 +2993,14 @@ async function workspaceScaffoldCommand(options: { workspace: string; path?: str
   return {
     ok: options.dryRun ? true : status.ready,
     summary: options.dryRun
-      ? "assistant workspace scaffold plan ready (dry run)"
-      : "assistant workspace scaffold reconciled without overwriting stores or secrets",
+      ? "legacy/lab assistant workspace scaffold plan ready (dry run)"
+      : "legacy/lab assistant workspace scaffold reconciled without overwriting stores or secrets",
     details: {
       workspace: options.workspace,
       workspaceRoot,
       scaffold,
       status,
-      sideEffects: options.dryRun ? "none" : "created missing assistant JSON workspace directories/files only; existing stores were not overwritten",
+      sideEffects: options.dryRun ? "none" : "created missing legacy/lab assistant JSON workspace directories/files only; existing stores were not overwritten",
     },
   };
 }
@@ -2903,9 +3011,9 @@ async function workspaceStatusCommand(options: { workspace: string; path?: strin
   return {
     ok: status.ready,
     summary: status.ready
-      ? "assistant-logic workspace parity paths and vendored commands are ready"
-      : "assistant-logic workspace parity paths or vendored commands are missing or invalid",
-    details: { workspace: options.workspace, workspaceRoot, status, sideEffects: "none" },
+      ? "legacy/lab assistant-logic workspace parity paths and vendored commands are ready"
+      : "legacy/lab assistant-logic workspace parity paths or vendored commands are missing or invalid",
+    details: { workspace: options.workspace, workspaceRoot, status, productionAuthority: "assistant-agent-logic checkout plus assistant-agent-data/workspace, not Brain lab stores", sideEffects: "none" },
   };
 }
 
@@ -2916,12 +3024,13 @@ async function workspaceCommandsCommand(options: { workspace: string; path?: str
   const scriptMetadata = await assistantCommandScriptMetadata(assistantLogicRoot, commands.flatMap((group) => group.scripts));
   return {
     ok: scriptMetadata.every((item) => item.present),
-    summary: "assistant-logic workspace command catalog rendered",
+    summary: "legacy/lab assistant-logic workspace command catalog rendered",
     details: {
       workspace: options.workspace,
       workspaceRoot,
       assistantLogicRoot,
-      assistantLogicSource: "in-repo:@brain/assistant-logic",
+      assistantLogicSource: "legacy-lab-in-repo:@brain/assistant-logic",
+      productionAuthority: "separate assistant-agent-logic checkout resolved by stack/repo-registry",
       deprecatedAssistantRepoIgnored: Boolean(options.assistantRepo),
       env: assistantWorkspaceEnv(workspaceRoot),
       commands,
@@ -2961,13 +3070,14 @@ async function workspaceRunCommand(script: string, scriptArgs: string[], options
   return {
     ok: (result.status ?? 1) === 0,
     summary: (result.status ?? 1) === 0
-      ? `${resolved.kind} assistant-logic command completed: ${resolved.script}`
-      : `${resolved.kind} assistant-logic command failed: ${resolved.script}`,
+      ? `legacy/lab ${resolved.kind} assistant-logic command completed: ${resolved.script}`
+      : `legacy/lab ${resolved.kind} assistant-logic command failed: ${resolved.script}`,
     details: {
       workspace: options.workspace,
       workspaceRoot,
       assistantLogicRoot,
-      assistantLogicSource: "in-repo:@brain/assistant-logic",
+      assistantLogicSource: "legacy-lab-in-repo:@brain/assistant-logic",
+      productionAuthority: "separate assistant-agent-logic checkout resolved by stack/repo-registry",
       commandKind: resolved.kind,
       deprecatedAssistantRepoIgnored: Boolean(options.assistantRepo),
       script: resolved.script,
@@ -3496,7 +3606,7 @@ function renderInstructionsReadme(): string {
     "# Workspace Instruction Overlays",
     "",
     "These files are the workspace-owned layer for user-specific preferences.",
-    "They are additive overlays on top of Brain's in-repo `packages/assistant-logic/config/skills/*.md` and `packages/assistant-logic/config/prompts/*.md` resources.",
+    "These are legacy/lab overlays only. Production assistant guidance belongs in the external assistant-agent-logic checkout and private assistant workspace.",
     "",
     "Do not use overlays to redefine commands, storage paths, JSON formats, approval requirements, or safety rules.",
     "",
@@ -3512,8 +3622,8 @@ function renderSkillOverlayPlaceholder(skill: string): string {
   return [
     `# Workspace Overlay: ${titleCase(skill)}`,
     "",
-    "Add only user-specific preferences here.",
-    `This file is layered on top of Brain's in-repo \`packages/assistant-logic/config/skills/${skill === "repo-registry" ? "repo-registry/SKILL" : skill}.md\` resource.`,
+    "Add only user-specific lab preferences here.",
+    "Production assistant skills belong in the external assistant-agent-logic checkout, not Brain.",
     "",
     "Do not restate or override shared commands, storage paths, JSON formats, approval requirements, or safety rules.",
     "",
@@ -3524,8 +3634,8 @@ function renderPromptOverlayPlaceholder(prompt: string): string {
   return [
     `# Workspace Overlay: ${titleCase(prompt)}`,
     "",
-    "Add only user-specific prompt preferences here.",
-    `This file is layered on top of Brain's in-repo \`packages/assistant-logic/config/prompts/${prompt}.md\` resource.`,
+    "Add only user-specific lab prompt preferences here.",
+    "Production assistant prompts belong in the external assistant-agent-logic checkout, not Brain.",
     "",
   ].join("\n");
 }
@@ -3551,7 +3661,7 @@ function renderRepoRegistryReadme(): string {
   return [
     "# Repo Registry State",
     "",
-    "This directory may hold user-specific repo-registry controller state compatible with Brain's assistant-logic resources.",
+    "This directory may hold user-specific repo-registry controller state for the Brain control plane and external assistant-agent-logic checkout.",
     "Back up selected state files only; do not commit private hosts, paths, credentials, or runtime caches to a public source checkout.",
     "",
   ].join("\n");
@@ -3861,8 +3971,8 @@ function liveValidationWizard(
       title: "Verify Codex auth before service start.",
       actions: [
         "Confirm the selected Codex transport and auth path for this machine or server.",
-        `Generate a guarded helper with: pnpm run brainctl setup codex-auth-script --config ${shellArg(options.config)} --workspace ${shellArg(options.workspace)} --repo <repo-root> --service-user <brain-service-user>`,
-        "Run the returned command as the same OS user that will run Brain; for systemd this is usually the non-root service user.",
+        `Generate a guarded helper with: pnpm run brainctl setup codex-auth-script --config ${shellArg(options.config)} --workspace ${shellArg(options.workspace)} --repo <repo-root> --service-user <codex-chat-service-user>`,
+        "Run the returned command as the same OS user that will run codex-chat; for systemd this is usually the non-root service user.",
         "If a credential is needed, store it only in a private server env file or secret store, then verify by metadata/health check without printing the value.",
         `Run a guarded provider check for the chosen transport before accepting live user traffic.`,
       ],
@@ -3889,10 +3999,18 @@ function liveValidationWizard(
       ],
     },
     {
+      step: "openai-transcription",
+      title: "Optional: confirm OpenAI voice/audio transcription.",
+      actions: [
+        "Ask whether Telegram voice/audio transcription should be enabled for this workspace.",
+        "If yes, store OPENAI_API_KEY only in the private codex-chat service env/secret store, set transcription.enabled=true with apiKeyEnv=OPENAI_API_KEY, and verify only redacted metadata.",
+        "If no, keep transcription disabled and make the disabled voice-message behavior explicit.",
+      ],
+    },
+    {
       step: "optional-follow-ups",
       title: "Optional follow-ups.",
       actions: [
-        "Enable OpenAI voice/audio transcription only after the base Telegram path is working.",
         "Enable web publishing only when a publish root/base URL is chosen.",
         "Tune backup strategy, include/exclude policy, and remotes after the initial private repo is initialized or pulled.",
       ],
@@ -3940,7 +4058,7 @@ function botFatherSteps(): string[] {
     "Send /newbot.",
     "Choose a bot display name.",
     "Choose a unique username ending in bot, such as my_brain_bot.",
-    "Store the returned token only through a one-use private temp script that prompts for hidden input and writes to Brain's private server secret file or configured env/secret store.",
+    "Store the returned token only through a one-use private temp script that prompts for hidden input and writes to the private codex-chat service env file or configured env/secret store.",
   ];
 }
 
@@ -3952,7 +4070,7 @@ function telegramTokenStorageGuidance(options: { telegramTokenEnv?: string; tele
       : "a private env var such as TELEGRAM_BOT_TOKEN or a private file referenced by --telegram-token-file";
   return [
     `Use ${target}; never paste the token into the repo, setup chat, shell history, command output, or logs.`,
-    "Prefer generating the secret-entry helper with: pnpm run brainctl setup telegram-token-script --path <workspace>; then run the returned bash /.../store-brain-telegram-token.sh command.",
+    "Prefer generating the secret-entry helper with: pnpm run brainctl setup telegram-token-script --path <workspace> --codex-chat-env <codex-chat-env-file>; then run the returned bash /.../store-brain-telegram-token.sh command on the target host.",
     "If you provide a copy-paste command for secret entry, make it run that generated private temporary script, which is syntax-checked and reads the secret with hidden input.",
     "The temporary script directory must be outside version control, the script must not contain the secret value, and the script should delete itself after a successful write.",
     "Keep the secret file owner-readable only where practical and outside the source checkout.",
@@ -4488,6 +4606,7 @@ interface SetupSecretScriptOptions {
   tokenFile?: string;
   adapterConfig?: string;
   serviceEnv?: string;
+  codexChatEnv?: string;
   secretsEnv?: string;
   composioEnv?: string;
   binary?: string;
@@ -4818,6 +4937,10 @@ function conciseSetupFlow() {
         prompt: "Pull or initialize the private assistant-agent-data/backup repo before relying on project memory.",
       },
       {
+        step: "openai-transcription",
+        prompt: "Optionally confirm whether Telegram voice/audio transcription should use OpenAI; if yes, store only a private OPENAI_API_KEY ref before enabling it.",
+      },
+      {
         step: "composio-accounts",
         prompt: "After the base workspace/service are healthy, connect Gmail and Google Calendar through Composio with a one-use API-key helper and OAuth links.",
       },
@@ -4827,7 +4950,8 @@ function conciseSetupFlow() {
       "Verify Codex auth before starting the service or accepting live Telegram traffic.",
       "Validate assistant-agent-data workspace paths before the first live provider turn; domain state remains owned by assistant-agent-logic/data, not Brain.",
       "Keep markdown notes and JSON stores in assistant-agent-data as private state; do not migrate them into Brain.",
-      "Keep OpenAI transcription, web publishing, backup tuning, and first-user pairing as follow-up steps unless explicitly requested now.",
+      "Prompt the user to optionally confirm OpenAI voice/audio transcription during setup; enable it only after a private OpenAI key ref is present.",
+      "Keep web publishing, backup tuning, and first-user pairing as follow-up steps unless explicitly requested now.",
     ],
   };
 }
@@ -4950,9 +5074,6 @@ async function setupCommand(options: SetupInspectOptions & { dryRun?: boolean; f
   }
   const workspaceRoot = preflight.workspaceRoot;
   const dirs = WORKSPACE_DIRS.map((dir) => path.join(workspaceRoot, dir));
-  const scaffold = options.dryRun
-    ? assistantWorkspaceScaffoldPlan(workspaceRoot)
-    : await ensureAssistantWorkspaceScaffold(workspaceRoot);
   if (!options.dryRun) {
     await mkdir(workspaceRoot, { recursive: true, mode: 0o700 });
     for (const dir of dirs) await mkdir(dir, { recursive: true, mode: workspaceDirectoryMode(path.relative(workspaceRoot, dir)) });
@@ -4976,11 +5097,15 @@ async function setupCommand(options: SetupInspectOptions & { dryRun?: boolean; f
         replaceRequested: Boolean(options.replace),
       },
       plan: after.plan,
-      assistantWorkspaceScaffold: scaffold,
+      assistantWorkspaceScaffold: {
+        deprecatedLabOnly: true,
+        skipped: "production setup does not scaffold Brain's legacy assistant-domain JSON stores; deploy codex-chat with the separate assistant-agent-logic checkout and assistant-agent-data/private workspace",
+        command: `pnpm run brainctl workspace scaffold --path ${shellArg(workspaceRoot)} # lab compatibility only`,
+      },
       setupWizard,
       setupState,
       inspection: after,
-      sideEffects: options.dryRun ? "none" : "created missing directories, reconciled JSON-backed assistant workspace files, and updated private setup progress state",
+      sideEffects: options.dryRun ? "none" : "created missing generic private workspace directories and updated private setup progress state; did not create Brain legacy assistant-domain stores",
     },
   };
 }
@@ -5040,8 +5165,9 @@ async function setupTelegramTokenScriptCommand(options: SetupSecretScriptOptions
   const tokenFile = path.resolve(options.tokenFile ?? path.join(workspaceRoot, "secrets", "telegram-bot-token"));
   const adapterConfig = path.resolve(options.adapterConfig ?? path.join(workspaceRoot, "secrets", "telegram-main.json"));
   const serviceEnv = path.resolve(options.serviceEnv ?? path.join(workspaceRoot, "config", `brain-${options.workspace}.env`));
+  const codexChatEnv = path.resolve(options.codexChatEnv ?? path.join(workspaceRoot, "config", "codex-chat.env"));
   const secretsEnv = path.resolve(options.secretsEnv ?? path.join(workspaceRoot, "secrets", "secrets.env"));
-  const script = renderTelegramTokenStorageScript({ workspaceRoot, tokenFile, adapterConfig, serviceEnv, secretsEnv });
+  const script = renderTelegramTokenStorageScript({ workspaceRoot, tokenFile, adapterConfig, serviceEnv, codexChatEnv, secretsEnv });
 
   await mkdir(scriptDir, { recursive: true, mode: 0o700 });
   await chmod(scriptDir, 0o700).catch(() => undefined);
@@ -5072,6 +5198,7 @@ async function setupTelegramTokenScriptCommand(options: SetupSecretScriptOptions
         tokenFile,
         adapterConfig,
         serviceEnv,
+        codexChatEnv,
         secretsEnv,
       },
       validation: "bash -n passed",
@@ -5253,7 +5380,7 @@ function remoteOneUseScriptSshCommand(input: { scriptPath: string; sshHost?: str
   return `ssh -t ${shellArg(destination)} ${shellArg(remoteCommand)}`;
 }
 
-function renderTelegramTokenStorageScript(input: { workspaceRoot: string; tokenFile: string; adapterConfig: string; serviceEnv: string; secretsEnv: string }): string {
+function renderTelegramTokenStorageScript(input: { workspaceRoot: string; tokenFile: string; adapterConfig: string; serviceEnv: string; codexChatEnv?: string; secretsEnv: string }): string {
   return `#!/usr/bin/env bash
 set -euo pipefail
 umask 077
@@ -5263,6 +5390,7 @@ workspace=${shellLiteral(input.workspaceRoot)}
 token_file=${shellLiteral(input.tokenFile)}
 adapter_config=${shellLiteral(input.adapterConfig)}
 service_env=${shellLiteral(input.serviceEnv)}
+codex_chat_env=${shellLiteral(input.codexChatEnv ?? "")}
 secrets_env=${shellLiteral(input.secretsEnv)}
 
 restore_tty() {
@@ -5333,9 +5461,12 @@ update_env_file "$service_env" TELEGRAM_MAIN_CONFIG "$adapter_config"
 update_env_file "$service_env" TELEGRAM_BOT_TOKEN_FILE "$token_file"
 update_env_file "$secrets_env" TELEGRAM_MAIN_CONFIG "$adapter_config"
 update_env_file "$secrets_env" TELEGRAM_BOT_TOKEN_FILE "$token_file"
+if [ -n "$codex_chat_env" ]; then
+  update_env_file "$codex_chat_env" TELEGRAM_BOT_TOKEN "$token"
+fi
 
 unset token
-printf "Stored Telegram token in private Brain secret files. Token value was not printed.\\n" >&2
+printf "Stored Telegram token in private service secret/env files. Token value was not printed.\\n" >&2
 `;
 }
 
@@ -5407,8 +5538,8 @@ update_env_file "$workspace_env" COMPOSIO_API_KEY "$quoted_key"
 chmod 600 "$workspace_env"
 
 unset api_key quoted_key
-printf "Stored Composio API key in private Brain workspace .env. Key value was not printed.\\n" >&2
-printf "Next: run Brain Composio status, then generate Google Calendar and Gmail OAuth links with composio-connect.js.\\n" >&2
+printf "Stored Composio API key in the private assistant workspace .env. Key value was not printed.\\n" >&2
+printf "Next: run metadata-only Composio status, then use assistant-agent-logic OAuth helpers if needed.\\n" >&2
 `;
 }
 
@@ -5444,7 +5575,7 @@ HELP
     cat >&2 <<'HELP'
 
 Run this exact command from your local terminal to start Codex device auth on
-the server as the same user that will run Brain:
+the server as the same user that will run codex-chat:
 HELP
     printf "  %s\\n" "$ssh_device_login_command" >&2
     if [ -n "$ssh_interactive_login_command" ]; then
@@ -5457,7 +5588,7 @@ HELP
   else
     cat >&2 <<HELP
 
-Run one of these on the target host as the same user that will run Brain:
+Run one of these on the target host as the same user that will run codex-chat:
   $local_device_login_command
   $local_interactive_login_command
 HELP
@@ -5813,25 +5944,11 @@ function buildSetupPlan(input: {
     else missing_required.push(`workspace ${dir}/ missing`);
   }
 
-  if (input.assistantWorkspace.assistantRepoMetadata.present && input.assistantWorkspace.scripts.every((script) => script.present)) {
-    configured.push("assistant-logic native and vendored commands available for full workspace parity");
+  if (input.assistantWorkspace.ready) {
+    configured.push("legacy/lab Brain assistant workspace scaffold present (not production authority)");
   } else {
-    missing_required.push("assistant-logic package/native/vendored commands missing for workspace parity");
+    missing_optional.push("legacy/lab Brain assistant workspace scaffold absent; production uses assistant-agent-logic plus assistant-agent-data/workspace");
   }
-
-  for (const store of input.assistantWorkspace.stateStores) {
-    if (store.present && store.valid) configured.push(`assistant JSON store ready: ${store.key}`);
-    else missing_required.push(`assistant JSON store missing or invalid: ${store.relativePath}`);
-  }
-
-  if (input.assistantWorkspace.instructions.ready) configured.push("workspace instruction/skill overlays scaffolded");
-  else missing_required.push("workspace instruction/skill overlay scaffold missing");
-
-  if (input.assistantWorkspace.tasks.ready) configured.push("workspace tasks scaffolded");
-  else missing_required.push("workspace tasks scaffold missing");
-
-  if (input.assistantWorkspace.fileSave.ready) configured.push("file-save private document metadata scaffolded");
-  else missing_required.push("file-save private document metadata scaffold missing");
 
   if (input.assistantWorkspace.repoRegistry.ready) configured.push("selected repo-registry state path scaffolded");
   else missing_optional.push("selected repo-registry state path not scaffolded");
@@ -5881,7 +5998,8 @@ function setupResumeWizard(details: {
   setupState?: Awaited<ReturnType<typeof readSetupProgress>>;
 }) {
   const workspaceReady = details.workspaceDirectory.present && WORKSPACE_DIRS.every((dir) => details.directories[dir]?.present);
-  const personalWorkspaceReady = Boolean(details.assistantWorkspace?.ready)
+  const privateWorkspaceReady = workspaceReady;
+  const legacyLabWorkspaceReady = Boolean(details.assistantWorkspace?.ready)
     && ["projects", "notes", "documents", path.join("documents", "metadata")].every((dir) => details.directories[dir]?.present);
   const runtimeConfigReady = details.config.present && details.config.valid && details.provider !== "missing" && details.primaryEntrypointId !== "missing";
   const telegramEntrypoint = details.entrypoints.find((entrypoint) => entrypoint.kind === "telegram" && entrypoint.enabled);
@@ -5894,7 +6012,7 @@ function setupResumeWizard(details: {
   const serviceActiveForWorkspace = details.service?.active === true && details.service.workspaceMatched !== false;
   const serviceStarted = serviceActiveForWorkspace || state?.statuses.service.started === true;
   const serviceInstalled = details.service?.installed === true || state?.statuses.service.installed === true || serviceStarted;
-  const baseRuntimeReadyForDataSources = personalWorkspaceReady && backupConfigured && telegramSecretRefPresent && runtimeConfigReady && codexAuthVerifiedByState && serviceStarted;
+  const baseRuntimeReadyForDataSources = privateWorkspaceReady && backupConfigured && telegramSecretRefPresent && runtimeConfigReady && codexAuthVerifiedByState && serviceStarted;
   const steps = [
     {
       step: "telegram-connection",
@@ -5908,12 +6026,13 @@ function setupResumeWizard(details: {
     },
     {
       step: "personal-workspace",
-      title: "Create personal workspace memory.",
-      complete: personalWorkspaceReady,
-      evidence: personalWorkspaceReady
-        ? [`Assistant JSON stores, instruction overlays, task metadata, file-save metadata, and markdown resource directories exist under ${details.workspaceRoot}.`]
-        : ["Assistant JSON stores, instruction overlays, task metadata, file-save metadata, repo-registry state path, or markdown resource directories are missing; create them before the first live provider turn."],
-      resumePrompt: "Create the private JSON-backed assistant workspace scaffold, then ask whether the user wants to initialize a private Git backup for workspace state.",
+      title: "Validate private assistant-data/workspace root.",
+      complete: privateWorkspaceReady,
+      evidence: privateWorkspaceReady
+        ? [`Generic private workspace directories exist under ${details.workspaceRoot}; assistant-agent-data/domain state remains separate from Brain source.`]
+        : ["Generic private workspace directories are missing; create them before configuring codex-chat state/artifacts."],
+      legacyLabWorkspace: { present: legacyLabWorkspaceReady, authority: "lab-only; not production domain source" },
+      resumePrompt: "Validate the assistant-agent-data/private workspace path and initialize or pull private data only through the stack data gate or explicit user approval.",
     },
     {
       step: "private-data-repo",
@@ -5975,8 +6094,8 @@ function setupResumeWizard(details: {
               : "Codex is selected; credential/session verification needs an explicit private check as the service user and is not inferred from repo files."]
           : [`Selected provider is ${String(details.provider)}; verify provider auth before service start.`],
       actions: [
-        "Generate a guarded helper on the target host with: pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root> --service-user <brain-service-user>",
-        "Run the returned command as the same OS user that will run Brain; for systemd this is usually the non-root service user.",
+        "Generate a guarded helper on the target host with: pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root> --service-user <codex-chat-service-user>",
+        "Run the returned command as the same OS user that will run codex-chat; for systemd this is usually the non-root service user.",
         "If login is missing, the helper prints `codex login --device-auth` / `codex login` instructions and exits without marking auth verified.",
       ],
       resumePrompt: "If you already verified Codex auth in the previous session, confirm or recheck it and continue to service install/start.",
@@ -5993,15 +6112,28 @@ function setupResumeWizard(details: {
       resumePrompt: "If the service is already installed and running, confirm with health/status output before accepting Telegram traffic.",
     },
     {
+      step: "openai-transcription",
+      title: "Optional: confirm OpenAI voice/audio transcription.",
+      complete: Boolean(details.transcription?.enabled && details.transcription?.apiKeyRefPresent),
+      evidence: [
+        details.transcription?.enabled ? "OpenAI transcription is configured." : "OpenAI transcription is disabled until the user opts in.",
+        details.transcription?.apiKeyRefPresent ? "OpenAI transcription API key ref is present; value remains private." : "OpenAI transcription API key ref is missing or not selected.",
+      ],
+      actions: [
+        "Ask whether voice/audio transcription should be enabled for Telegram.",
+        "If enabled, store OPENAI_API_KEY only in the private codex-chat service env/secret store and verify redacted metadata before restarting codex-chat.",
+      ],
+      resumePrompt: "Ask the user to opt in or out of OpenAI transcription; do not silently enable it without a private key ref.",
+    },
+    {
       step: "optional-follow-ups",
       title: "Optional follow-ups.",
       complete: false,
       evidence: [
-        details.transcription?.enabled ? "OpenAI transcription is configured." : "OpenAI transcription can be enabled after the base Telegram flow works.",
         details.webPublishing?.enabled ? "Web publishing is configured." : "Web publishing can be configured after the service path is stable.",
         "First-user pairing happens after the service starts with the Telegram token; up to two raw user/chat pairs stay private and pairing closes after the cap.",
       ],
-      resumePrompt: "Handle first-user pairing, OpenAI transcription, web publishing, or backup tuning only when requested or when the base setup is ready.",
+      resumePrompt: "Handle first-user pairing, web publishing, or backup tuning only when requested or when the base setup is ready.",
     },
   ];
   const completedSteps = steps.filter((step) => step.complete).map((step) => ({ step: step.step, title: step.title, evidence: step.evidence }));
