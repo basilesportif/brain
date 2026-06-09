@@ -85,14 +85,17 @@ non-deploying by default:
   identity, service/env/config paths, deployment metadata path/status, and
   health checks from repo registry and setup context without contacting hosts.
 - `brainctl stack plan` renders the no-network servant stack flow: clone/update
-  separate repos, prompt/validate assistant data, render `codex-chat`
-  config/env, plan Telegram pairing/admin state preservation, plan service
-  install/start, record deployment metadata, and plan health checks. It does
-  not execute SSH, git, systemd, or secret reads.
+  separate repos, install `codex-chat` dependencies/build, install
+  `assistant-agent-logic` dependencies with the correct lockfile/package
+  manager, verify its Composio workflow modules load, prompt/validate assistant
+  data, render `codex-chat` config/env, plan Telegram pairing/admin state
+  preservation, plan service install/start, record deployment metadata, and plan
+  health checks. It does not execute SSH, git, systemd, or secret reads.
 - `brainctl stack apply` is the explicit approval boundary. Without `--approve`
   it is a dry-run. With `--approve` and an executor, it fetches/clones the
   configured latest refs for `codex-chat` and `assistant-agent-logic`, verifies
-  resolved SHAs, then can run approved build and metadata steps.
+  resolved SHAs, then can run approved dependency install/build, Composio module
+  verification, and metadata steps.
   `--approve-data`, `--approve-config`,
   `--approve-service`, and `--approve-health` separately gate assistant data
   actions, config/env template writes, Telegram pairing/admin state migration

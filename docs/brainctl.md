@@ -192,7 +192,11 @@ false`. Repo-registry and local notes are secondary pointers, not deployment
 status authority.
 
 The plan command renders, but does not run, the first servant-stack flow:
-clone/update `codex-chat`, clone/update `assistant-agent-logic`, prompt/validate
+clone/update `codex-chat`, clone/update `assistant-agent-logic`, install
+dependencies for both checkouts using the matching lockfile/package manager
+(`pnpm install --frozen-lockfile` for `codex-chat`; `npm ci` when
+`assistant-agent-logic` has `package-lock.json`), verify
+`assistant-agent-logic` Composio workflow modules load, prompt/validate
 `assistant-agent-data`/workspace, render `codex-chat` config/env, install/start
 the `codex-chat` service, record deployment metadata, and run health checks. It
 blocks boundary violations such as nesting `assistant-agent-logic` under
@@ -201,9 +205,12 @@ blocks boundary violations such as nesting `assistant-agent-logic` under
 `stack apply` must not reuse stale checkouts. With `--approve` and a real
 executor it fetches or clones the configured branch/ref for `codex-chat` and
 `assistant-agent-logic`, verifies the resulting `git rev-parse HEAD`, and
-records both requested refs and resolved SHAs in the deployment ledger. Exact
-pinning can be represented by a configured ref, but the default behavior is to
-refresh the configured branch before service config/build/restart.
+records both requested refs and resolved SHAs in the deployment ledger. It then
+installs `assistant-agent-logic` dependencies before Composio/Gmail/Calendar
+scripts are considered ready, so a checkout with `package-lock.json` gets
+`npm ci` rather than assuming `pnpm`. Exact pinning can be represented by a
+configured ref, but the default behavior is to refresh the configured branch
+before service config/build/restart.
 
 For deployments where the service host needs its own live
 `assistant-agent-logic` checkout, the `codex-chat` environment may include an

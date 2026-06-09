@@ -80,8 +80,12 @@ source of truth for servant runtime deployment.
 Deployment/update also refreshes the actual deployed repos. `brainctl stack
 apply` fetches or clones the configured branch/ref for `codex-chat` and
 `assistant-agent-logic`, verifies the resulting commit SHA, and stores the
-requested ref plus resolved SHA in deployment metadata. A deploy must not
-silently reuse stale embedded checkouts.
+requested ref plus resolved SHA in deployment metadata. It also installs
+`assistant-agent-logic` Node dependencies from that checkout's lockfile (for
+example `npm ci` with `package-lock.json`) and verifies Composio Gmail/Calendar
+workflow modules load before treating those scripts as deployment-ready. A
+deploy must not silently reuse stale embedded checkouts or a dependency-less
+logic checkout.
 
 Brain must not become the home for Tim-assistant domain behavior. Assistant
 workflows, prompts, skills, and intent rules belong in `assistant-agent-logic`;

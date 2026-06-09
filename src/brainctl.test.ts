@@ -1543,6 +1543,8 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
     const steps = new Map(planJson.details.plan.steps.map((step) => [step.id, step]));
     assert.ok(steps.get("clone-update-codex-chat")?.commands?.some((command) => /git clone .*codex-chat/.test(command) && /BRAIN_REPO_SHA/.test(command)));
     assert.ok(steps.get("clone-update-assistant-agent-logic")?.commands?.some((command) => /assistant-agent-logic/.test(command)));
+    assert.ok(steps.get("install-assistant-agent-logic-deps")?.commands?.some((command) => /package-lock\.json/.test(command) && /npm ci/.test(command)));
+    assert.ok(steps.get("install-assistant-agent-logic-deps")?.commands?.some((command) => /BRAIN_COMPOSIO_WORKFLOW_DEPS/.test(command) && /gmail-recent\.js/.test(command)));
     assert.ok(steps.get("assistant-data-workspace")?.prompts?.some((prompt) => /pull existing private repo/.test(prompt)));
     assert.match(steps.get("assistant-data-workspace")?.migrationPlaceholder ?? "", /do not auto-migrate/);
     assert.ok(steps.get("render-codex-chat-config-env")?.target?.envFile);
@@ -1553,6 +1555,7 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
     assert.ok(steps.get("record-deployment-metadata")?.target?.path.includes("state/control-plane/deployments.json"));
     assert.ok(steps.get("health-check-codex-chat")?.commands?.some((command) => /codex-chat health --json/.test(command)));
     assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "clone-update-codex-chat-deploy" && action.executor === "ssh" && /ssh codex@app\.example\.test/.test(action.displayCommand ?? "")));
+    assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "install-assistant-agent-logic-deps" && action.executor === "ssh" && /ssh dev\.example\.test/.test(action.displayCommand ?? "") && /BRAIN_COMPOSIO_WORKFLOW_DEPS/.test(action.displayCommand ?? "")));
     assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "migrate-telegram-pairing-state" && /BRAIN_PAIRING_MIGRATION/.test(action.displayCommand ?? "") && /rawIdentifiersPrinted=false/.test(action.displayCommand ?? "")));
     assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "install-codex-chat-systemd" && /BRAIN_EXPECTED_BOT_USERNAME=AnnaBrainBot/.test(action.displayCommand ?? "") && /systemctl restart codex-chat\.service/.test(action.displayCommand ?? "")));
     assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "assistant-agent-data-clone-or-init-placeholder" && action.executor === "ssh" && /ssh brain@brain\.example\.test/.test(action.displayCommand ?? "")));
@@ -1577,6 +1580,7 @@ test("brainctl stack plan renders local executor actions for local control-plane
     await writeFile(registry, stackRegistryFixture({
       assistantData,
       assistantLogicPath: assistantLogic,
+      assistantLogicHost: "local",
       codexHost: "local",
       codexPath: codexChat,
       deployHost: "local",
@@ -1601,6 +1605,7 @@ test("brainctl stack plan renders local executor actions for local control-plane
     assert.equal(parsed.details.status.deploymentMetadata.canonical.sourceOfTruth, "local-brain-workspace");
     assert.equal(parsed.details.status.deploymentMetadata.canonical.path, `${workspaceRoot}/state/control-plane/deployments.json`);
     assert.ok(parsed.details.plan.execution.actions.some((action) => action.id === "clone-update-codex-chat-source" && action.executor === "local" && !/ssh /.test(action.displayCommand ?? "")));
+    assert.ok(parsed.details.plan.execution.actions.some((action) => action.id === "install-assistant-agent-logic-deps" && action.executor === "local" && !/ssh /.test(action.displayCommand ?? "") && /npm ci/.test(action.displayCommand ?? "")));
     assert.ok(parsed.details.plan.execution.actions.some((action) => action.id === "migrate-telegram-pairing-state" && action.executor === "local" && !/ssh /.test(action.displayCommand ?? "")));
     assert.ok(parsed.details.plan.execution.actions.some((action) => action.id === "install-codex-chat-systemd" && action.executor === "local" && !/ssh /.test(action.displayCommand ?? "")));
   } finally {
@@ -1649,6 +1654,7 @@ test("brainctl stack status can bind assistant-agent-logic to the service-host c
     const steps = new Map(parsed.details.plan.steps.map((step) => [step.id, step]));
     const renderedConfig = steps.get("render-codex-chat-config-env")?.renderedConfigPreview ?? "";
     assert.ok(steps.get("clone-update-assistant-agent-logic")?.commands?.some((command) => /ssh codex@app\.example\.test/.test(command) && /BRAIN_REPO_SHA role=assistant-logic/.test(command)));
+    assert.ok(steps.get("install-assistant-agent-logic-deps")?.commands?.some((command) => /ssh codex@app\.example\.test/.test(command) && /BRAIN_COMPOSIO_WORKFLOW_DEPS/.test(command)));
     assert.match(renderedConfig, /\/srv\/brain\/workspace/);
     assert.match(renderedConfig, /\/srv\/brain\/control-plane/);
     assert.match(renderedConfig, /\/srv\/codex-chat\/assistant-agent-logic/);

@@ -1951,6 +1951,16 @@ function renderStackExecutorActions(status: StackStatusDetails, approvals: Recor
       sideEffectsIfExecuted: "would clone/fetch/update assistant-agent-logic to the configured ref and print resolved SHA; never vendored into Brain or codex-chat",
     }),
     action({
+      id: "install-assistant-agent-logic-deps",
+      title: "Install assistant-agent-logic Node dependencies and verify Composio workflow modules.",
+      phase: "git",
+      executor: logicIdentity ? "ssh" : "local",
+      requiredGate: "apply",
+      hostIdentity: logicIdentity,
+      command: renderNodeDependencyInstallShell({ path: logic.path, role: "assistant-logic", verifyComposioWorkflows: true }),
+      sideEffectsIfExecuted: "would install assistant-agent-logic dependencies using the checkout lockfile/package manager and verify Composio workflow modules load",
+    }),
+    action({
       id: "validate-assistant-agent-logic",
       title: "Validate assistant-agent-logic checkout metadata.",
       phase: "git",
@@ -2071,6 +2081,51 @@ function renderGitCloneOrUpdateShell(input: { path: string; remoteUrl?: string; 
     `sha=$(git -C ${repoPath} rev-parse HEAD)`,
     `printf '%s%s\\n' ${shellArg(marker)} "$sha"`,
   ].join("\n");
+}
+
+function renderNodeDependencyInstallShell(input: { path: string; role: string; verifyComposioWorkflows?: boolean }): string {
+  const repoPath = shellPathArg(input.path);
+  const role = shellArg(input.role);
+  const marker = `BRAIN_NODE_DEPS role=${input.role} path=${input.path}`;
+  const commands = [
+    "set -euo pipefail",
+    `cd ${repoPath}`,
+    "installed=false",
+    "package_manager=none",
+    "if [ ! -f package.json ]; then",
+    `  printf '%s\\n' ${shellArg(`${marker} packageJson=missing installed=false skipped=true`)}`,
+    "else",
+    "  if [ -f pnpm-lock.yaml ]; then",
+    "    pnpm install --frozen-lockfile",
+    "    package_manager=pnpm",
+    "  elif [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then",
+    "    npm ci",
+    "    package_manager=npm",
+    "  elif [ -f yarn.lock ]; then",
+    "    yarn install --frozen-lockfile",
+    "    package_manager=yarn",
+    "  else",
+    "    npm install",
+    "    package_manager=npm-install",
+    "  fi",
+    "  installed=true",
+    "fi",
+  ];
+  if (input.verifyComposioWorkflows) {
+    commands.push(
+      "if [ \"$installed\" = true ] && { [ -f scripts/lib/config.js ] || [ -f scripts/lib/google-auth.js ] || [ -f scripts/gmail-recent.js ] || [ -f scripts/calendar-events.js ] || [ -f scripts/composio-connect.js ]; }; then",
+      "  test -f scripts/lib/config.js",
+      "  test -f scripts/lib/google-auth.js",
+      "  test -f scripts/gmail-recent.js",
+      "  test -f scripts/calendar-events.js",
+      "  test -f scripts/composio-connect.js",
+      "  node -e \"require('yaml'); require('./scripts/lib/config'); require('./scripts/lib/google-auth');\"",
+      `  printf '%s\\n' ${shellArg(`BRAIN_COMPOSIO_WORKFLOW_DEPS role=${input.role} ok=true secretsRead=false providerCalls=false`)}`,
+      "fi",
+    );
+  }
+  commands.push(`printf 'BRAIN_NODE_DEPS role=%s path=%s packageManager=%s installed=%s\\n' ${role} ${shellArg(input.path)} "$package_manager" "$installed"`);
+  return commands.join("\n");
 }
 
 function renderConfigEnvWriteShell(input: { configPath: string; configPreview: string; envFile?: string; envPreview: string }): string {
@@ -2280,6 +2335,17 @@ function renderStackNoNetworkPlan(status: StackStatusDetails) {
         ],
         boundary: "Do not vendor, copy, subtree, or merge assistant-agent-logic into Brain or codex-chat.",
         sideEffectsIfExecuted: "would clone/fetch/update assistant-agent-logic to the configured latest ref and print resolved SHA; not executed by this command",
+      },
+      {
+        id: "install-assistant-agent-logic-deps",
+        title: "Install assistant-agent-logic dependencies and verify Composio workflow modules.",
+        target: { host: logic.host, path: logic.path },
+        commands: [
+          renderNodeDependencyInstallCommand({ hostIdentity: sshIdentityFromHost(logic.host, undefined), path: logic.path, role: "assistant-logic", verifyComposioWorkflows: true }),
+        ],
+        packageManagerPolicy: "Use pnpm install --frozen-lockfile for pnpm-lock.yaml, npm ci for package-lock.json/npm-shrinkwrap.json, yarn install --frozen-lockfile for yarn.lock, and npm install only when no lockfile exists.",
+        composioVerification: "Verifies yaml plus assistant-agent-logic Composio entrypoints (gmail-recent.js, calendar-events.js, composio-connect.js) load after install; it does not read Composio secrets or call provider APIs.",
+        sideEffectsIfExecuted: "would create/update node_modules in the separate assistant-agent-logic checkout only; not executed by this command",
       },
       {
         id: "assistant-data-workspace",
@@ -2775,6 +2841,10 @@ function normalizeRegistryHost(value: string): string {
 
 function renderGitCloneOrUpdateCommand(input: { hostIdentity?: string; path: string; remoteUrl?: string; branch?: string; role?: StackRepoResolution["role"] }): string {
   return remotePlanCommand(input.hostIdentity, renderGitCloneOrUpdateShell(input));
+}
+
+function renderNodeDependencyInstallCommand(input: { hostIdentity?: string; path: string; role: string; verifyComposioWorkflows?: boolean }): string {
+  return remotePlanCommand(input.hostIdentity, renderNodeDependencyInstallShell(input));
 }
 
 function remotePlanCommand(identity: string | undefined, command: string): string {

@@ -83,7 +83,11 @@ The generated plan is intentionally explicit and non-mutating:
 2. Assert repo boundaries before any setup/deploy action.
 3. Clone/update `codex-chat` source/deploy checkouts.
 4. Build `codex-chat` and render a systemd service plan.
-5. Clone/update and validate `assistant-agent-logic` as a separate checkout.
+5. Clone/update `assistant-agent-logic` as a separate checkout, install its
+   Node dependencies using its lockfile/package manager (`npm ci` for
+   `package-lock.json`, `pnpm install --frozen-lockfile` for `pnpm-lock.yaml`),
+   and verify Composio workflow modules load without reading secrets or calling
+   provider APIs.
 6. Prompt/validate `assistant-agent-data` / workspace and leave migration as an
    operator-approved future step.
 7. Render `codex-chat` config/env files with placeholders/metadata only.

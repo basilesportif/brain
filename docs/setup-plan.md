@@ -653,8 +653,10 @@ The CLI should print paths and actions, but not secret values.
   the production servant config is the generated `codex-chat` config.
 - Provider adapter can authenticate or report a clear unauthenticated state.
 - `brainctl stack apply` fetches/updates `codex-chat` and
-  `assistant-agent-logic`, records requested refs and resolved SHAs, then can
-  run approved build and metadata steps.
+  `assistant-agent-logic`, records requested refs and resolved SHAs, installs
+  `assistant-agent-logic` Node dependencies with its own lockfile/package
+  manager, verifies Composio workflow modules load, then can run approved build
+  and metadata steps.
 - Telegram adapter can validate token/admin-pairing metadata without exposing
   token, chat ID, user ID, or pairing code values.
 - Telegram is ready enough that future integration setup can continue through
