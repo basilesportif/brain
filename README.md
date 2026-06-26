@@ -10,12 +10,16 @@ operate the servant runtime stack made of separate repositories:
 - `assistant-agent-data` / workspace — private durable workspace data and
   repo-registry state.
 
-Status: **control-plane first**. `brainctl stack status` and
-`brainctl stack plan` resolve the servant runtime stack from repo-registry
-metadata and local setup context without contacting remote hosts, mutating
-servers, or printing secrets. Brain's own in-repo runtime packages remain
-experimental/lab compatibility surfaces; they are not the production servant
-runtime source of truth. The long-term web/admin control-plane direction is
+Status: **control-plane first, web/admin promotion next**. `brainctl stack
+status` and `brainctl stack plan` resolve the servant runtime stack from
+repo-registry metadata and local setup context without contacting remote hosts,
+mutating servers, or printing secrets. The next strategic implementation phase
+is to promote Brain into the long-running server process/web app and
+orchestrator/control-plane for admin UI, install metadata, env/deploy/restart
+orchestration, health/status, Clerk/admin policy, capabilities/audit planning,
+and `assistant-agent-logic` checkout/version orchestration. Brain's own in-repo
+runtime packages remain experimental/lab compatibility surfaces; they are not
+the production servant runtime source of truth. The web/admin promotion plan is
 captured in `plans/brain-control-plane.md`.
 
 Production service target: `codex-chat.service`. Brain must not be installed as
@@ -120,8 +124,13 @@ pnpm run brainctl workspace run --path ~/.brain/workspace todo-list.js
 
 ## Design goals
 
-- Brain is the control plane first; servant runtime execution belongs to
-  `codex-chat` unless and until a future Brain runtime graduates from the lab.
+- Brain is the control plane first; the next phase is its long-running
+  web/admin process and orchestration layer. Servant runtime execution belongs
+  to `codex-chat` unless and until a future Brain runtime graduates from the
+  lab.
+- Treat Brain's web/admin UI as a frequently used settings-management surface,
+  not just an occasional setup page; guided web setup/install flows can coexist
+  with Codex-session setup when the latter is easier.
 - Production setup/deploy starts `codex-chat.service`, not Brain's lab
   supervisor. `brainctl run/start` are for tests and local lab smoke only.
 - Keep Brain free of Tim-assistant domain logic; it is a deployment/control-plane

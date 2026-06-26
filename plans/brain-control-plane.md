@@ -14,9 +14,14 @@ Slack send/reply behavior, and subagent/runtime orchestration. Slack is another
 
 Brain should grow from CLI/setup orchestration into a persistent admin service
 that can inspect, configure, deploy, restart, and audit the servant stack while
-preserving repository boundaries. The control plane may render or use contracts
-owned by `codex-chat` (for example the Slack manifest), but it must not silently
-fork those contracts or become the source of truth for adapter semantics.
+preserving repository boundaries. This is not an occasional setup screen: the
+Brain web/admin UI should become a heavily used settings-management surface for
+day-to-day control-plane operations. It may also host a guided, sequential
+Brain setup/install workflow from the web UI, while still allowing setup from
+Codex sessions when that is faster or easier for the operator. The control plane
+may render or use contracts owned by `codex-chat` (for example the Slack
+manifest), but it must not silently fork those contracts or become the source
+of truth for adapter semantics.
 
 ## Ownership boundaries
 
@@ -25,6 +30,9 @@ fork those contracts or become the source of truth for adapter semantics.
 Brain should eventually own:
 
 - the always-on web/admin service and project/control-plane home;
+- heavily used settings-management workflows for everyday admin operations;
+- guided/sequential Brain setup and install flows in the web UI, with
+  Codex-session setup remaining available as an operator-friendly alternative;
 - Slack installation metadata records, workspace mappings, and non-secret
   install state;
 - environment/configuration management, including secret-reference metadata and
@@ -199,34 +207,57 @@ introduced.
 - [ ] Add explicit Brain/codex-chat links so contributors find this plan before
       extending admin surfaces.
 
-### Phase 1 — read-only Brain web overview
+### Phase 1 — promote Brain to the long-running web/admin control plane
+
+This is the next strategic implementation phase. Build Brain as the persistent
+server process/web app and orchestrator/control-plane on the server, not as a
+late cleanup after more `codex-chat` admin surface grows. The first version can
+be incremental, but it should establish Brain as the operator home for heavily
+used settings management and daily control-plane actions.
 
 - [ ] Add a Brain web service skeleton that can run persistently behind Clerk.
+- [ ] Make the web UI a settings-management surface for recurring admin work,
+      not merely an occasional setup wizard.
+- [ ] Design the tradeoff between guided/sequential Brain setup/install flows in
+      the web UI and setup driven from Codex sessions; support both paths when
+      each is the easier operator experience.
 - [ ] Resolve repo-registry and deployment-ledger metadata read-only.
 - [ ] Show deployed `codex-chat` and `assistant-agent-logic` refs/SHAs, service
       names, health metadata, and safe env-key presence.
+- [ ] Own Clerk/admin policy, server-side allowlists, and fail-closed defaults.
+- [ ] Start the Brain-owned private records for install metadata, env/deploy
+      metadata, operations history, capability/audit planning, and selected
+      `assistant-agent-logic` checkout/ref/version.
 - [ ] Fail closed when Clerk keys or allowed admin emails are absent.
 
-### Phase 2 — codex-chat contract rendering from Brain
+### Phase 2 — move Slack/admin install metadata and contract rendering into Brain
 
 - [ ] Add a stable no-secrets way for Brain to render/validate the
       `codex-chat` Slack manifest from a selected `codex-chat` checkout.
 - [ ] Display Slack manifest and Events API/redirect URL validation in Brain.
 - [ ] Store non-secret Slack install metadata in Brain's private workspace.
 - [ ] Keep manifest ownership and adapter semantics in `codex-chat`.
+- [ ] Treat the current `codex-chat` `/admin/codex-chat/` page as
+      bootstrap/temporary; migrate near-term admin/control-plane functions into
+      Brain instead of expanding that page.
 
-### Phase 3 — env/config and deploy planning
+### Phase 3 — env/config and deploy/restart orchestration
 
 - [ ] Add redacted env/config metadata views and validation.
 - [ ] Render deploy/restart/update plans for `codex-chat` and
       `assistant-agent-logic` without mutating by default.
 - [ ] Gate config writes and service operations with explicit approvals.
-- [ ] Record selected refs and resolved SHAs in the private deployment ledger.
-
-### Phase 4 — health, restart, rollback, and canaries
-
 - [ ] Add approved restart/rollback orchestration for `codex-chat.service`.
-- [ ] Add Slack, Telegram, provider, queue, and subagent health/canary views.
+- [ ] Clone/fetch/update selected checkouts using repo-registry authority,
+      install dependencies from lockfiles, and record requested refs plus
+      resolved SHAs in the private deployment ledger.
+
+### Phase 4 — health, status, canaries, and operations
+
+- [ ] Add Slack, Telegram, provider, queue, loop/monitor, and subagent
+      health/status views.
+- [ ] Run safe Slack canary plans and display outcomes without exposing token
+      values.
 - [ ] Record operation outcomes and make failures visible in the admin UI.
 - [ ] Keep runtime execution and adapter behavior in `codex-chat`.
 
