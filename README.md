@@ -15,7 +15,8 @@ Status: **control-plane first**. `brainctl stack status` and
 metadata and local setup context without contacting remote hosts, mutating
 servers, or printing secrets. Brain's own in-repo runtime packages remain
 experimental/lab compatibility surfaces; they are not the production servant
-runtime source of truth.
+runtime source of truth. The long-term web/admin control-plane direction is
+captured in `plans/brain-control-plane.md`.
 
 Production service target: `codex-chat.service`. Brain must not be installed as
 the live assistant (`brain-personal.service` / `brainctl run`) and must not
@@ -30,7 +31,7 @@ apps/                     Lab app/static publisher placeholders.
 packages/                 Lab provider/runtime compatibility packages and schemas.
 assistant-packs/          Setup/operator guidance inspectable by Codex/Claude.
 docs/                     Control-plane, setup, deployment, testing, and public-readiness docs.
-plans/                    Migration and consolidation plans.
+plans/                    Migration, consolidation, and control-plane plans.
 workspace/, private/, data/  User-owned/private boundaries; ignored except README placeholders.
 ```
 
