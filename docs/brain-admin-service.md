@@ -65,6 +65,18 @@ Env values are write-only in API responses and audit records; responses expose
 only key names and presence. Update the writable key allowlist with
 `BRAIN_CODEX_CHAT_ENV_KEYS`.
 
+Auth UX rules:
+
+- Every admin auth state must show the current Clerk account email when the
+  server or Clerk.js can identify it.
+- Every admin auth page or state must offer a sign-out/switch-account action,
+  including sign-in, loading, access-denied, and allowed-admin states.
+- A signed-in Clerk user who is not allowlisted must see a fail-closed access
+  denied page that names the current account and offers a switch-account path,
+  never an ambiguous generic sign-in screen.
+- API auth failures may include the verified Clerk email for UX context, but
+  must not expose Clerk secrets or env values.
+
 ## Operation approvals
 
 Mutating API calls require exact approval strings:
@@ -155,4 +167,3 @@ or env compatibility. Brain may write codex-chat runtime env keys such as
 The deployed Slack manifest request URL is `https://brain.decisive-outcomes.com/api/slack/events`; the legacy `me.galebach.com` Slack route should not be preserved unless an operator explicitly needs a short rollback window.
 Brain's Clerk keys remain in the Brain admin env file and are not codex-chat
 runtime settings.
-

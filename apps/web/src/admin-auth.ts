@@ -14,7 +14,7 @@ export interface BrainAuthorizedAdmin {
 
 export type BrainAdminAuthResult =
   | { ok: true; admin: BrainAuthorizedAdmin }
-  | { ok: false; statusCode: 401 | 403 | 503; error: "unauthorized" | "forbidden" | "admin_auth_not_configured" | "admin_allowlist_empty" };
+  | { ok: false; statusCode: 401 | 403 | 503; error: "unauthorized" | "forbidden" | "admin_auth_not_configured" | "admin_allowlist_empty"; admin?: BrainAuthorizedAdmin };
 
 export type VerifyClerkToken = typeof verifyToken;
 export type ClerkUserLookup = (userId: string) => Promise<unknown>;
@@ -81,7 +81,6 @@ export async function authorizeBrainAdminRequest(
 ): Promise<BrainAdminAuthResult> {
   const allowedEmails = parseAdminAllowedEmails(config.clerkAllowedEmails);
   if (!hasBrainAdminAuthKeys(config)) return { ok: false, statusCode: 503, error: "admin_auth_not_configured" };
-  if (allowedEmails.size === 0) return { ok: false, statusCode: 403, error: "admin_allowlist_empty" };
 
   const token = bearerTokenFromRequest(request);
   if (!token) return { ok: false, statusCode: 401, error: "unauthorized" };
@@ -105,6 +104,8 @@ export async function authorizeBrainAdminRequest(
 
   const email = readClerkPrimaryEmail(user);
   if (!email) return { ok: false, statusCode: 401, error: "unauthorized" };
-  if (!allowedEmails.has(email)) return { ok: false, statusCode: 403, error: "forbidden" };
-  return { ok: true, admin: { userId, email } };
+  const admin = { userId, email };
+  if (allowedEmails.size === 0) return { ok: false, statusCode: 403, error: "admin_allowlist_empty", admin };
+  if (!allowedEmails.has(email)) return { ok: false, statusCode: 403, error: "forbidden", admin };
+  return { ok: true, admin };
 }

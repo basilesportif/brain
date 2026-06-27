@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type http from "node:http";
 import { authorizeBrainAdminRequest, parseAdminAllowedEmails } from "./admin-auth.js";
+import { renderBrainAdminSignInPage } from "./admin-page.js";
 import { createBrainAdminServer, type BrainAdminServiceConfig, type BrainAdminServiceDeps } from "./admin-service.js";
 import { mergeEnvFileText } from "./env-file.js";
 
@@ -80,7 +81,7 @@ test("brain admin auth parses allowlist and fails closed", async () => {
 
   assert.deepEqual(
     await authorizeBrainAdminRequest({ headers: { authorization: "Bearer token" } } as never, { clerkPublishableKey: "pk", clerkSecretKey: "sk", clerkAllowedEmails: "" }, authDeps()),
-    { ok: false, statusCode: 403, error: "admin_allowlist_empty" },
+    { ok: false, statusCode: 403, error: "admin_allowlist_empty", admin: { userId: "user_123", email: "tim.galebach@gmail.com" } },
   );
   assert.deepEqual(
     await authorizeBrainAdminRequest({ headers: { authorization: "Bearer token" } } as never, { clerkPublishableKey: "", clerkSecretKey: "sk", clerkAllowedEmails: "tim.galebach@gmail.com" }, authDeps()),
@@ -102,10 +103,43 @@ test("brain admin page and API require Clerk allowlist auth", async () => {
       const ok = await fetch(`${baseUrl}/api/admin/brain/me`, { headers: authHeaders() });
       assert.equal(ok.status, 200);
       assert.deepEqual(await ok.json(), { email: "tim.galebach@gmail.com" });
+
+      const page = await fetch(`${baseUrl}/admin`, { headers: authHeaders() });
+      assert.equal(page.status, 200);
+      const pageHtml = await page.text();
+      assert.match(pageHtml, /tim\.galebach@gmail\.com/);
+      assert.match(pageHtml, /Sign out \/ switch account/);
     });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("brain admin auth failures show signed-in account and switch-account action", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-denied-"));
+  try {
+    await withServer(config(root), authDeps("other@example.test"), async (baseUrl) => {
+      const deniedPage = await fetch(`${baseUrl}/admin`, { headers: authHeaders() });
+      assert.equal(deniedPage.status, 403);
+      const deniedHtml = await deniedPage.text();
+      assert.match(deniedHtml, /other@example\.test/);
+      assert.match(deniedHtml, /Sign out/);
+      assert.match(deniedHtml, /switch Clerk account/);
+
+      const deniedApi = await fetch(`${baseUrl}/api/admin/brain/me`, { headers: authHeaders() });
+      assert.equal(deniedApi.status, 403);
+      assert.deepEqual(await deniedApi.json(), { error: "forbidden", email: "other@example.test" });
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain admin sign-in page does not hide an existing Clerk account", () => {
+  const html = renderBrainAdminSignInPage(config("/tmp/brain-admin-sign-in"), "https://brain.example.test/admin");
+  assert.match(html, /Current Clerk account/);
+  assert.match(html, /Sign out \/ switch account/);
+  assert.match(html, /Continue to admin/);
 });
 
 test("brain admin settings identify the concrete local instance separately from repo registry", async () => {

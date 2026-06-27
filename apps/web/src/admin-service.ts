@@ -128,7 +128,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     if (url.pathname !== config.routePath) return redirect(response, 308, config.routePath);
     const auth = await authorizeBrainAdminRequest(request, config, deps);
     if (!auth.ok) return handlePageAuthFailure(request, response, config, auth);
-    return sendHtml(response, 200, renderBrainAdminPage(config));
+    return sendHtml(response, 200, renderBrainAdminPage(config, auth.admin.email));
   }
 
   if (request.method === "GET" && url.pathname === adminSignInPath(config.routePath)) {
@@ -138,7 +138,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
 
   if (url.pathname.startsWith("/api/admin/brain/")) {
     const auth = await authorizeBrainAdminRequest(request, config, deps);
-    if (!auth.ok) return sendJson(response, auth.statusCode, { error: auth.error });
+    if (!auth.ok) return sendJson(response, auth.statusCode, { error: auth.error, email: auth.admin?.email });
     return handleAdminApi(request, response, url, config, deps, auth.admin.email);
   }
 
@@ -454,13 +454,13 @@ function authSummary(config: BrainAdminServiceConfig) {
   return { configured: isBrainAdminAuthConfigured(config), publishableKeyPresent: Boolean(config.clerkPublishableKey), secretKeyPresent: Boolean(config.clerkSecretKey), allowedEmailCount: parseAdminAllowedEmails(config.clerkAllowedEmails).size, failClosed: true };
 }
 
-function handlePageAuthFailure(request: IncomingMessage, response: ServerResponse, config: BrainAdminServiceConfig, auth: { statusCode: number; error: string }): void {
+function handlePageAuthFailure(request: IncomingMessage, response: ServerResponse, config: BrainAdminServiceConfig, auth: { statusCode: number; error: string; admin?: { email: string } }): void {
   const signInUrl = adminSignInUrlFromRequest(request, config);
   if (auth.statusCode === 401) {
     signInUrl.searchParams.set("redirect_url", adminPublicUrlFromRequest(request, config));
     return redirect(response, 302, signInUrl.toString());
   }
-  return sendHtml(response, auth.statusCode, renderBrainAdminDeniedPage(auth.error, signInUrl.toString()));
+  return sendHtml(response, auth.statusCode, renderBrainAdminDeniedPage(config, auth.error, signInUrl.toString(), auth.admin?.email ?? ""));
 }
 
 function adminPublicUrlFromRequest(request: IncomingMessage, config: BrainAdminServiceConfig): string {
