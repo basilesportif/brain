@@ -79,8 +79,9 @@ async function runAdminDashboardScenario(page, baseUrl, viewport) {
   await page.locator(`${navScope} a[href="#mission"]`).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator(`${navScope} a[href="#slack"]`).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator(`${navScope} a[href="#manifest"]`).waitFor({ state: 'visible', timeout: 5_000 });
-  await page.locator('#mode-title', { hasText: 'Slack setup required' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#mode-title', { hasText: 'Slack setup wizard: Slack setup required' }).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#slack-setup').waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#slack-setup.setup-primary').waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#mission').waitFor({ state: 'hidden', timeout: 5_000 });
   await page.locator('button:has-text("Skip Slack for now")').first().click();
   await page.locator('#mission-title', { hasText: 'Mission Control' }).waitFor({ state: 'visible', timeout: 5_000 });

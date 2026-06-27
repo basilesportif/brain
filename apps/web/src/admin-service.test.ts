@@ -179,7 +179,7 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /Sign out \/ switch account/);
   assert.match(html, /Overview/);
   assert.match(html, /State-aware operator console/);
-  assert.match(html, /Slack Setup \/ Health/);
+  assert.match(html, /Slack setup wizard/);
   assert.match(html, /Skip Slack for now/);
   assert.match(html, /Mission Control/);
   assert.match(html, /Slack Details/);
@@ -191,7 +191,8 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /Audit \/ Feedback/);
   assert.match(html, /Advanced/);
   assert.match(html, /Slack setup wizard/);
-  assert.match(html, /Current Slack state/);
+  assert.match(html, /Slack setup wizard state/);
+  assert.match(html, /Finish \/ record install metadata/);
   assert.match(html, /Required settings/);
   assert.match(html, /Public routing/);
   assert.match(html, /Slack credentials/);
