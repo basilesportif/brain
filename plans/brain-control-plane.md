@@ -278,6 +278,8 @@ used settings management and daily control-plane actions.
 
 ## Phase 3 implementation note — 2026-06-27
 
+See also `plans/2026-06-27-brain-admin-ui-redesign.md` for the plan-only redesign of the current admin UI information architecture, responsive layout, Slack/settings organization, manifest affordances, deploy/restart safety controls, and audit/status feedback.
+
 The first real Brain-owned HTTP/admin skeleton has started in `apps/web`. It is
 not a codex-chat admin expansion. Current capabilities are intentionally narrow:
 
