@@ -1,7 +1,7 @@
 # Brain web/admin control-plane plan
 
 Date: 2026-06-26
-Status: architecture decision and phased implementation plan
+Status: architecture decision and phased implementation plan; Phase 3 skeleton started
 
 ## Decision
 
@@ -215,7 +215,10 @@ late cleanup after more `codex-chat` admin surface grows. The first version can
 be incremental, but it should establish Brain as the operator home for heavily
 used settings management and daily control-plane actions.
 
-- [ ] Add a Brain web service skeleton that can run persistently behind Clerk.
+- [x] Add a Brain web service skeleton that can run persistently behind Clerk.
+      Initial implementation: `@brain/web` exposes `brain-web-admin` /
+      `pnpm run brain-admin` with server-side Clerk auth and fail-closed email
+      allowlist.
 - [ ] Make the web UI a settings-management surface for recurring admin work,
       not merely an occasional setup wizard.
 - [ ] Design the tradeoff between guided/sequential Brain setup/install flows in
@@ -224,7 +227,8 @@ used settings management and daily control-plane actions.
 - [ ] Resolve repo-registry and deployment-ledger metadata read-only.
 - [ ] Show deployed `codex-chat` and `assistant-agent-logic` refs/SHAs, service
       names, health metadata, and safe env-key presence.
-- [ ] Own Clerk/admin policy, server-side allowlists, and fail-closed defaults.
+- [x] Own Clerk/admin policy, server-side allowlists, and fail-closed defaults
+      for the initial Brain admin service.
 - [ ] Start the Brain-owned private records for install metadata, env/deploy
       metadata, operations history, capability/audit planning, and selected
       `assistant-agent-logic` checkout/ref/version.
@@ -243,14 +247,40 @@ used settings management and daily control-plane actions.
 
 ### Phase 3 — env/config and deploy/restart orchestration
 
-- [ ] Add redacted env/config metadata views and validation.
-- [ ] Render deploy/restart/update plans for `codex-chat` and
+- [x] Add redacted env/config metadata views and validation.
+      Initial implementation shows codex-chat env key presence only and keeps
+      values write-only.
+- [x] Render deploy/restart/update plans for `codex-chat` and
       `assistant-agent-logic` without mutating by default.
-- [ ] Gate config writes and service operations with explicit approvals.
-- [ ] Add approved restart/rollback orchestration for `codex-chat.service`.
+      Initial operation API exposes a dry-run plan endpoint and configurable
+      deploy/restart command display.
+- [x] Gate config writes and service operations with explicit approvals.
+- [x] Add approved restart orchestration for `codex-chat.service`.
+      Rollback remains future work; restart is guarded against targeting the
+      Brain service itself.
 - [ ] Clone/fetch/update selected checkouts using repo-registry authority,
       install dependencies from lockfiles, and record requested refs plus
       resolved SHAs in the private deployment ledger.
+
+
+## Phase 3 implementation note — 2026-06-27
+
+The first real Brain-owned HTTP/admin skeleton has started in `apps/web`. It is
+not a codex-chat admin expansion. Current capabilities are intentionally narrow:
+
+- Clerk-protected `/admin` and `/api/admin/brain/*` routes with fail-closed
+  server-side email allowlist.
+- health/settings views for Brain auth, repo-registry pointers, codex-chat
+  env/config metadata, and operation configuration.
+- write-only codex-chat env/config entry writes with an allowlist and explicit
+  approval phrase.
+- approved plan/deploy/restart operation APIs for `codex-chat.service`, with
+  deployment command supplied by server env and audit records that do not include
+  secret values.
+
+Remaining Phase 3 work: richer rollback, checkout/ref selection, lockfile
+install/build orchestration, assistant-agent-logic validation from selected refs,
+and canonical deployment-ledger writes beyond the initial JSONL audit trail.
 
 ### Phase 4 — health, status, canaries, and operations
 

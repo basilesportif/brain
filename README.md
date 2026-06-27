@@ -10,14 +10,15 @@ operate the servant runtime stack made of separate repositories:
 - `assistant-agent-data` / workspace — private durable workspace data and
   repo-registry state.
 
-Status: **control-plane first, web/admin promotion next**. `brainctl stack
+Status: **control-plane first, web/admin promotion started**. `brainctl stack
 status` and `brainctl stack plan` resolve the servant runtime stack from
 repo-registry metadata and local setup context without contacting remote hosts,
-mutating servers, or printing secrets. The next strategic implementation phase
-is to promote Brain into the long-running server process/web app and
-orchestrator/control-plane for admin UI, install metadata, env/deploy/restart
-orchestration, health/status, Clerk/admin policy, capabilities/audit planning,
-and `assistant-agent-logic` checkout/version orchestration. Brain's own in-repo
+mutating servers, or printing secrets. The strategic implementation phase now in progress promotes Brain into the
+long-running server process/web app and orchestrator/control-plane for admin UI,
+install metadata, env/deploy/restart orchestration, health/status, Clerk/admin
+policy, capabilities/audit planning, and `assistant-agent-logic`
+checkout/version orchestration. The first Brain-owned admin service skeleton
+lives in `@brain/web`; see `docs/brain-admin-service.md`. Brain's own in-repo
 runtime packages remain experimental/lab compatibility surfaces; they are not
 the production servant runtime source of truth. The web/admin promotion plan is
 captured in `plans/brain-control-plane.md`.
@@ -102,6 +103,16 @@ transport/entrypoint code only when the behavior is domain-neutral.
 ```bash
 pnpm run check
 ```
+
+Brain admin service (after `pnpm run build`):
+
+```bash
+pnpm run brain-admin
+```
+
+The admin service is fail-closed behind Clerk, writes codex-chat env/config
+entries as write-only values, and can run approved codex-chat deploy/restart
+operations when the server env supplies the relevant commands.
 
 The check validates that the repo structure exists, runtime config examples are present, private boundary directories contain only their README placeholders, and provider/entrypoint/automation seams pass unit tests.
 
