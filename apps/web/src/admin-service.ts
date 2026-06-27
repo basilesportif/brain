@@ -8,14 +8,19 @@ import { authorizeBrainAdminRequest, isBrainAdminAuthConfigured, parseAdminAllow
 import { envFileMetadata, readEnvKeyPresence, resolveEnvFilePath, writeMergedEnvFile } from "./env-file.js";
 import { renderBrainAdminDeniedPage, renderBrainAdminPage, renderBrainAdminSignInPage } from "./admin-page.js";
 
-const DEFAULT_ENV_KEYS = [
-  "CODEX_CHAT_API_ENABLED",
-  "CODEX_CHAT_BASE_URL",
+const SLACK_EVENTS_BASE_URL = "https://brain.decisive-outcomes.com";
+const SLACK_EVENTS_PATH = "/api/slack/events";
+const SLACK_ENV_KEYS = [
   "CODEX_CHAT_SLACK_ENABLED",
+  "CODEX_CHAT_BASE_URL",
   "CODEX_CHAT_SLACK_EVENTS_PATH",
   "SLACK_SIGNING_SECRET",
   "SLACK_BOT_TOKEN",
   "SLACK_APP_TOKEN",
+] as const;
+const DEFAULT_ENV_KEYS = [
+  "CODEX_CHAT_API_ENABLED",
+  ...SLACK_ENV_KEYS,
   "TELEGRAM_BOT_TOKEN",
   "OPENAI_API_KEY",
 ] as const;
@@ -50,6 +55,8 @@ export interface BrainAdminServiceConfig {
   auditLogPath: string;
   allowedEnvKeys: string[];
   operationTimeoutMs: number;
+  slackEventsBaseUrl: string;
+  slackEventsPath: string;
 }
 
 export interface BrainAdminServiceDeps {
@@ -98,6 +105,8 @@ export function loadBrainAdminServiceConfig(env: NodeJS.ProcessEnv = process.env
     auditLogPath: env.BRAIN_ADMIN_AUDIT_LOG || "/home/tim/.brain/control-plane/audit.jsonl",
     allowedEnvKeys,
     operationTimeoutMs: Number.parseInt(env.BRAIN_ADMIN_OPERATION_TIMEOUT_MS || "120000", 10),
+    slackEventsBaseUrl: (env.BRAIN_SLACK_EVENTS_BASE_URL || SLACK_EVENTS_BASE_URL).trim(),
+    slackEventsPath: normalizeRoutePath(env.BRAIN_SLACK_EVENTS_PATH || SLACK_EVENTS_PATH),
   };
 }
 
@@ -157,6 +166,20 @@ async function handleAdminApi(request: IncomingMessage, response: ServerResponse
     const payload = await readJsonBody(request);
     return handleEnvWrite(response, config, adminEmail, payload);
   }
+  if (request.method === "GET" && url.pathname === "/api/admin/brain/slack/settings") {
+    return sendJson(response, 200, await slackSettingsSummary(config));
+  }
+  if (request.method === "POST" && url.pathname === "/api/admin/brain/slack/settings") {
+    const payload = await readJsonBody(request);
+    return handleSlackSettingsWrite(response, config, adminEmail, payload);
+  }
+  if (request.method === "GET" && url.pathname === "/api/admin/brain/slack/manifest") {
+    return sendJson(response, 200, await renderSlackManifestForBrain(config));
+  }
+  if (request.method === "GET" && url.pathname === "/api/admin/brain/slack/manifest/download") {
+    const manifest = await renderSlackManifestForBrain(config);
+    return sendDownload(response, "codex-chat.slack.manifest.json", manifest.text);
+  }
   if (request.method === "POST" && url.pathname === "/api/admin/brain/codex-chat/operation") {
     const payload = await readJsonBody(request);
     return handleOperation(response, config, deps, adminEmail, payload);
@@ -207,14 +230,32 @@ async function serviceSettings(config: BrainAdminServiceConfig) {
       deployCommandConfigured: Boolean(config.codexChatDeployCommand),
       restartCommand: operationCommand(config, "restart") ? redactedCommand(operationCommand(config, "restart") ?? "") : null,
     },
+    slack: await slackSettingsSummary(config),
   };
 }
 
 async function codexChatEnvSummary(config: BrainAdminServiceConfig) {
+  return envPresenceSummary(config, config.allowedEnvKeys);
+}
+
+async function slackSettingsSummary(config: BrainAdminServiceConfig) {
+  const env = await envPresenceSummary(config, SLACK_ENV_KEYS);
+  return {
+    publicEventsUrl: buildSlackEventsUrl(config.slackEventsBaseUrl, config.slackEventsPath),
+    eventsBaseUrl: config.slackEventsBaseUrl,
+    eventsPath: config.slackEventsPath,
+    upstream: "codex-chat internal API on 127.0.0.1:49346",
+    runtimeOwner: "codex-chat verifies Slack signatures and normalizes runtime events",
+    values: "write-only; presence only",
+    env,
+  };
+}
+
+async function envPresenceSummary(config: BrainAdminServiceConfig, keysToRead: readonly string[]) {
   const envFile = resolveEnvFilePath(config.codexChatEnvFile);
-  const present = await readEnvKeyPresence(envFile, config.allowedEnvKeys);
-  const keys = config.allowedEnvKeys.map((key) => ({ key, present: Boolean(present[key]), secret: SECRETISH_RE.test(key), value: present[key] ? "redacted" : null }));
-  return { envFile, allowedKeys: config.allowedEnvKeys, keys };
+  const present = await readEnvKeyPresence(envFile, [...keysToRead]);
+  const keys = keysToRead.map((key) => ({ key, present: Boolean(present[key]), secret: SECRETISH_RE.test(key), value: present[key] ? "redacted" : null }));
+  return { envFile, allowedKeys: [...keysToRead], keys };
 }
 
 async function handleEnvWrite(response: ServerResponse, config: BrainAdminServiceConfig, adminEmail: string, payload: Record<string, unknown>): Promise<void> {
@@ -235,6 +276,74 @@ async function handleEnvWrite(response: ServerResponse, config: BrainAdminServic
   await writeMergedEnvFile(config.codexChatEnvFile, updates, "Brain control plane");
   await appendAudit(config, { action: "codex-chat.env.write", adminEmail, keys: Object.keys(updates), envFile: resolveEnvFilePath(config.codexChatEnvFile) });
   return sendJson(response, 200, { ok: true, envFile: resolveEnvFilePath(config.codexChatEnvFile), writtenKeys: Object.keys(updates), values: "write-only", presence: await readEnvKeyPresence(config.codexChatEnvFile, Object.keys(updates)), restartRequired: true });
+}
+
+async function handleSlackSettingsWrite(response: ServerResponse, config: BrainAdminServiceConfig, adminEmail: string, payload: Record<string, unknown>): Promise<void> {
+  const approval = typeof payload.approval === "string" ? payload.approval.trim() : "";
+  if (approval !== "write Slack settings") {
+    return sendJson(response, 400, { error: "approval_required", expected: "write Slack settings" });
+  }
+  const entries = parseEntries(payload.entries);
+  const allowed = new Set<string>(SLACK_ENV_KEYS);
+  const updates: Record<string, string> = {};
+  for (const [key, value] of Object.entries(entries)) {
+    if (!isEnvKey(key)) return sendJson(response, 400, { error: "invalid_env_key", key });
+    if (!allowed.has(key)) return sendJson(response, 403, { error: "slack_env_key_not_allowed", key, allowedKeys: [...SLACK_ENV_KEYS] });
+    if (typeof value !== "string" || value.length === 0) return sendJson(response, 400, { error: "env_value_required", key });
+    updates[key] = value;
+  }
+  if (Object.keys(updates).length === 0) return sendJson(response, 400, { error: "no_entries" });
+  await writeMergedEnvFile(config.codexChatEnvFile, updates, "Brain Slack settings");
+  await appendAudit(config, { action: "slack.settings.write", adminEmail, keys: Object.keys(updates), envFile: resolveEnvFilePath(config.codexChatEnvFile), values: "write-only" });
+  return sendJson(response, 200, { ok: true, envFile: resolveEnvFilePath(config.codexChatEnvFile), writtenKeys: Object.keys(updates), values: "write-only", presence: await readEnvKeyPresence(config.codexChatEnvFile, Object.keys(updates)), restartRequired: true });
+}
+
+async function renderSlackManifestForBrain(config: BrainAdminServiceConfig): Promise<{ requestUrl: string; eventsPath: string; renderer: string; validation?: unknown; manifest: unknown; text: string }> {
+  const script = path.join(config.codexChatPath, "slack-app", "scripts", "render-manifest.mjs");
+  const result = await runNodeScript(process.execPath, [script, "--base-url", config.slackEventsBaseUrl, "--events-path", config.slackEventsPath], config.operationTimeoutMs);
+  if (result.status !== 0) {
+    throw new Error(`Slack manifest render failed: ${redactOutput(result.stderr || result.stdout || `exit ${result.status}`)}`);
+  }
+  const text = result.stdout;
+  const manifest = JSON.parse(text) as Record<string, unknown>;
+  const requestUrl = String(((manifest.settings as Record<string, unknown> | undefined)?.event_subscriptions as Record<string, unknown> | undefined)?.request_url ?? "");
+  return {
+    requestUrl,
+    eventsPath: config.slackEventsPath,
+    renderer: script,
+    manifest,
+    text,
+  };
+}
+
+async function runNodeScript(command: string, args: string[], timeoutMs: number): Promise<CommandResult> {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 5000).unref();
+    }, timeoutMs);
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout = truncate(stdout + chunk, 2_000_000); });
+    child.stderr.on("data", (chunk) => { stderr = truncate(stderr + chunk); });
+    child.on("close", (status, signal) => {
+      clearTimeout(timer);
+      resolve({ status, signal, stdout, stderr, timedOut });
+    });
+  });
+}
+
+function buildSlackEventsUrl(baseUrl: string, eventsPath: string): string {
+  const parsed = new URL(baseUrl);
+  parsed.pathname = `${parsed.pathname.replace(/\/$/, "")}${eventsPath}`;
+  parsed.search = "";
+  parsed.hash = "";
+  return parsed.toString();
 }
 
 async function handleOperation(response: ServerResponse, config: BrainAdminServiceConfig, deps: BrainAdminServiceDeps, adminEmail: string, payload: Record<string, unknown>): Promise<void> {
@@ -447,6 +556,13 @@ function sendHtml(response: ServerResponse, statusCode: number, html: string): v
   response.statusCode = statusCode;
   response.setHeader("content-type", "text/html; charset=utf-8");
   response.end(html);
+}
+
+function sendDownload(response: ServerResponse, filename: string, body: string): void {
+  response.statusCode = 200;
+  response.setHeader("content-type", "application/json; charset=utf-8");
+  response.setHeader("content-disposition", `attachment; filename="${filename}"`);
+  response.end(body);
 }
 
 function redirect(response: ServerResponse, statusCode: number, location: string): void {

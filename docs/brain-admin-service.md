@@ -14,8 +14,8 @@ server (`codex-chat-assistant-1`, `178.104.208.141`) rather than historical
 repo-registry remote deploy targets.
 
 Brain now includes a minimal HTTP admin service in `@brain/web`. It is intended
-to run as Brain's own Clerk-protected control plane while `codex-chat` remains
-the runtime adapter/executor.
+to run as Brain's own Clerk-protected control plane and external app surface while `codex-chat` remains
+the internal runtime adapter/executor. Slack users configure and visit Brain; raw signed Slack Events API requests are reverse-proxied unchanged to codex-chat for verification and runtime handling.
 
 ## Local run
 
@@ -55,6 +55,10 @@ Routes:
 - `GET /api/admin/brain/codex-chat/env` — codex-chat env key presence only.
 - `POST /api/admin/brain/codex-chat/env` — write allowlisted env/config keys.
 - `POST /api/admin/brain/codex-chat/operation` — plan/deploy/restart operations.
+- `GET /api/admin/brain/slack/settings` — explicit Slack env key presence and public Events URL.
+- `POST /api/admin/brain/slack/settings` — write Slack signing secret, bot token, optional app token, enabled flag, and URL/path env keys as write-only values.
+- `GET /api/admin/brain/slack/manifest` — render the codex-chat-owned Slack manifest contract with Brain's public Events URL.
+- `GET /api/admin/brain/slack/manifest/download` — download the rendered manifest JSON.
 
 The service fails closed when Clerk keys or `CLERK_ALLOWED_EMAILS` are missing.
 Env values are write-only in API responses and audit records; responses expose
@@ -66,6 +70,7 @@ only key names and presence. Update the writable key allowlist with
 Mutating API calls require exact approval strings:
 
 - env writes: `write env` or `write codex-chat.service env`
+- Slack settings writes: `write Slack settings`
 - plan: `plan codex-chat.service`
 - restart: `restart codex-chat.service`
 - deploy: `deploy codex-chat.service`
@@ -122,6 +127,12 @@ Example Caddy route:
 
 ```caddyfile
 brain.decisive-outcomes.com {
+  handle /api/slack/events {
+    # Raw Slack body and headers must reach codex-chat unchanged so its
+    # Slack verifier owns signatures, challenges, idempotency, and runtime behavior.
+    reverse_proxy 127.0.0.1:49346
+  }
+
   reverse_proxy /admin* 127.0.0.1:49347
   reverse_proxy /api/admin/brain* 127.0.0.1:49347
   reverse_proxy /healthz 127.0.0.1:49347
@@ -141,6 +152,7 @@ part of the local-instance model and should not be preserved through redirects
 or env compatibility. Brain may write codex-chat runtime env keys such as
 `CODEX_CHAT_API_ENABLED`, `CODEX_CHAT_SLACK_ENABLED`, `CODEX_CHAT_SLACK_EVENTS_PATH`,
 `CODEX_CHAT_BASE_URL`, Slack tokens, Telegram token, OpenAI key, and ingest keys.
+The deployed Slack manifest request URL is `https://brain.decisive-outcomes.com/api/slack/events`; the legacy `me.galebach.com` Slack route should not be preserved unless an operator explicitly needs a short rollback window.
 Brain's Clerk keys remain in the Brain admin env file and are not codex-chat
 runtime settings.
 

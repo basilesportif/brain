@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type http from "node:http";
@@ -36,8 +36,10 @@ function config(root: string, overrides: Partial<BrainAdminServiceConfig> = {}):
     auditLogPath: path.join(root, "audit.jsonl"),
     allowedEnvKeys: ["CODEX_CHAT_BASE_URL", "SLACK_BOT_TOKEN"],
     operationTimeoutMs: 5_000,
+    slackEventsBaseUrl: "https://brain.decisive-outcomes.com",
+    slackEventsPath: "/api/slack/events",
     ...overrides,
-  };
+  } as BrainAdminServiceConfig;
 }
 
 function authDeps(email = "Tim.Galebach@Gmail.com"): BrainAdminServiceDeps {
@@ -66,6 +68,11 @@ async function withServer<T>(cfg: BrainAdminServiceConfig, deps: Parameters<type
 
 function authHeaders() {
   return { authorization: "Bearer test-token" };
+}
+
+async function writeFileRecursive(filePath: string, content: string): Promise<void> {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, content, { mode: 0o755 });
 }
 
 test("brain admin auth parses allowlist and fails closed", async () => {
@@ -219,4 +226,59 @@ test("env merge preserves unrelated lines and quotes safely", () => {
   assert.match(merged, /# keep\nFOO=bar/);
   assert.match(merged, /SLACK_BOT_TOKEN='xoxb-new value'/);
   assert.match(merged, /CODEX_CHAT_BASE_URL='it'"'"'s fine'/);
+});
+
+test("brain admin exposes explicit Slack settings as write-only presence metadata", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-slack-settings-"));
+  try {
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const settings = await fetch(`${baseUrl}/api/admin/brain/slack/settings`, { headers: authHeaders() });
+      assert.equal(settings.status, 200);
+      const settingsPayload = await settings.json() as { publicEventsUrl: string; env: { allowedKeys: string[]; keys: Array<{ key: string; present: boolean; value: string | null }> } };
+      assert.equal(settingsPayload.publicEventsUrl, "https://brain.decisive-outcomes.com/api/slack/events");
+      assert.ok(settingsPayload.env.allowedKeys.includes("SLACK_SIGNING_SECRET"));
+      assert.ok(settingsPayload.env.allowedKeys.includes("SLACK_APP_TOKEN"));
+
+      const write = await fetch(`${baseUrl}/api/admin/brain/slack/settings`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ approval: "write Slack settings", entries: { SLACK_SIGNING_SECRET: "signing-secret", SLACK_BOT_TOKEN: "xoxb-super-secret", CODEX_CHAT_BASE_URL: "https://brain.decisive-outcomes.com" } }),
+      });
+      assert.equal(write.status, 200);
+      const payload = await write.json() as { writtenKeys: string[]; values: string; presence: Record<string, boolean> };
+      assert.deepEqual(payload.writtenKeys.sort(), ["CODEX_CHAT_BASE_URL", "SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET"]);
+      assert.equal(payload.values, "write-only");
+      assert.equal(JSON.stringify(payload).includes("xoxb-super-secret"), false);
+      assert.equal(payload.presence.SLACK_BOT_TOKEN, true);
+
+      const fileText = await readFile(path.join(root, "codex-chat.env"), "utf8");
+      assert.match(fileText, /SLACK_SIGNING_SECRET='signing-secret'/);
+      assert.match(fileText, /CODEX_CHAT_BASE_URL='https:\/\/brain\.decisive-outcomes\.com'/);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain admin renders Slack manifest through the codex-chat script with Brain Events URL", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-slack-manifest-"));
+  try {
+    const script = path.join(root, "codex-chat", "slack-app", "scripts", "render-manifest.mjs");
+    await writeFileRecursive(script, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const baseUrl = args[args.indexOf('--base-url') + 1];
+const eventsPath = args[args.indexOf('--events-path') + 1];
+process.stdout.write(JSON.stringify({ settings: { event_subscriptions: { request_url: baseUrl + eventsPath } } }, null, 2) + '\\n');
+`);
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const manifest = await fetch(`${baseUrl}/api/admin/brain/slack/manifest`, { headers: authHeaders() });
+      assert.equal(manifest.status, 200);
+      const payload = await manifest.json() as { requestUrl: string; text: string; renderer: string };
+      assert.equal(payload.requestUrl, "https://brain.decisive-outcomes.com/api/slack/events");
+      assert.equal(payload.renderer, script);
+      assert.match(payload.text, /brain\.decisive-outcomes\.com\/api\/slack\/events/);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

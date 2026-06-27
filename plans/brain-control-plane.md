@@ -79,7 +79,7 @@ control-plane code.
 The Slack manifest contract stays in `codex-chat` because it is coupled to the
 Slack adapter and Events API handler. Brain's web UI should be able to access,
 render, validate, and copy/download that manifest by calling a stable contract
-surface exposed by the checked-out `codex-chat` version, such as:
+surface exposed by the checked-out `codex-chat` version. The public Slack Events URL is `https://brain.decisive-outcomes.com/api/slack/events`; Brain reverse-proxies that raw request to codex-chat's internal API on `127.0.0.1:49346` without taking over signature verification or runtime behavior. Acceptable manifest contract sources include:
 
 1. a checked-in manifest/template path under `codex-chat/slack-app/`;
 2. a no-secrets validation/render command in `codex-chat`; or
@@ -98,7 +98,7 @@ Brain repo the owner of Slack adapter details.
 
 The Clerk-protected `/admin/codex-chat/`, codex-chat-hosted `/admin`, and
 `/api/admin/codex-chat/*` bootstrap surfaces are retired for this transition.
-Brain owns `/admin` and `/api/admin/brain/*`; codex-chat keeps runtime APIs such
+Brain owns `/admin`, `/api/admin/brain/*`, and the external Slack app surface on `brain.decisive-outcomes.com`; codex-chat keeps internal runtime APIs such
 as Slack Events and audio ingest. This is intentionally breaking rather than a
 compatibility redirect period.
 
@@ -117,6 +117,8 @@ API with these modules:
   instance env/settings are authoritative for that running service;
 - show local or remote `codex-chat` host/IP/path/service/env/config selected by
   the instance, not by stale repo-registry deployment records;
+- expose an explicit Slack settings panel for `SLACK_SIGNING_SECRET`, `SLACK_BOT_TOKEN`, optional `SLACK_APP_TOKEN`, `CODEX_CHAT_SLACK_ENABLED`, `CODEX_CHAT_SLACK_EVENTS_PATH`, and `CODEX_CHAT_BASE_URL`, with values write-only and presence-only;
+- render, copy, and download the codex-chat-owned Slack manifest using Brain's public Events URL;
 - show resolved repo-registry entries for `brain`, `codex-chat`,
   `assistant-agent-logic`, and `assistant-agent-data` as read-only context;
 - show deployed refs, resolved commit SHAs, service names, env file paths, and
