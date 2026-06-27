@@ -132,3 +132,15 @@ brain.decisive-outcomes.com {
 Do not restart `codex-chat.service` from inside this subagent process. The Brain
 admin service can trigger codex-chat operations after it is separately installed
 on the server and its env/Clerk policy has been reviewed.
+
+## codex-chat admin cleanup boundary
+
+Brain owns `/admin` and `/api/admin/brain/*`. The codex-chat-hosted
+`/admin/codex-chat`, `/admin`, and `/api/admin/codex-chat/*` surfaces are not
+part of the local-instance model and should not be preserved through redirects
+or env compatibility. Brain may write codex-chat runtime env keys such as
+`CODEX_CHAT_API_ENABLED`, `CODEX_CHAT_SLACK_ENABLED`, `CODEX_CHAT_SLACK_EVENTS_PATH`,
+`CODEX_CHAT_BASE_URL`, Slack tokens, Telegram token, OpenAI key, and ingest keys.
+Brain's Clerk keys remain in the Brain admin env file and are not codex-chat
+runtime settings.
+

@@ -110,7 +110,7 @@ test("brain admin settings identify the concrete local instance separately from 
       const payload = await settings.json() as {
         instance: { project: string; host: string; ip: string; repoRegistrySourceOfTruth: boolean };
         repoRegistry: { sourceOfTruth: boolean; role: string };
-        codexChat: { host: string; ip: string; path: string; serviceName: string };
+        codexChat: { host: string; ip: string; path: string; serviceName: string; env: { allowedKeys: string[] } };
       };
       assert.equal(payload.instance.project, "Brain");
       assert.equal(payload.instance.host, "brain.example.test");
@@ -122,6 +122,8 @@ test("brain admin settings identify the concrete local instance separately from 
       assert.equal(payload.codexChat.ip, "203.0.113.10");
       assert.equal(payload.codexChat.serviceName, "codex-chat.service");
       assert.equal(payload.codexChat.path, path.join(root, "codex-chat"));
+      assert.ok(!payload.codexChat.env.allowedKeys.includes("CODEX_CHAT_ADMIN_ENABLED"));
+      assert.ok(!payload.codexChat.env.allowedKeys.includes("CLERK_SECRET_KEY"));
     });
   } finally {
     await rm(root, { recursive: true, force: true });

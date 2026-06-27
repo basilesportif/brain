@@ -10,8 +10,6 @@ import { renderBrainAdminDeniedPage, renderBrainAdminPage, renderBrainAdminSignI
 
 const DEFAULT_ENV_KEYS = [
   "CODEX_CHAT_API_ENABLED",
-  "CODEX_CHAT_ADMIN_ENABLED",
-  "CODEX_CHAT_ADMIN_PUBLIC_BASE_URL",
   "CODEX_CHAT_BASE_URL",
   "CODEX_CHAT_SLACK_ENABLED",
   "CODEX_CHAT_SLACK_EVENTS_PATH",
@@ -20,9 +18,6 @@ const DEFAULT_ENV_KEYS = [
   "SLACK_APP_TOKEN",
   "TELEGRAM_BOT_TOKEN",
   "OPENAI_API_KEY",
-  "CLERK_PUBLISHABLE_KEY",
-  "CLERK_SECRET_KEY",
-  "CLERK_ALLOWED_EMAILS",
 ] as const;
 
 const SECRETISH_RE = /(SECRET|TOKEN|KEY|PASSWORD|COOKIE|SESSION|CREDENTIAL)/i;
@@ -72,7 +67,7 @@ export interface CommandResult {
 }
 
 export function loadBrainAdminServiceConfig(env: NodeJS.ProcessEnv = process.env): BrainAdminServiceConfig {
-  const allowedEnvKeys = splitCsv(env.BRAIN_CODEX_CHAT_ENV_KEYS || env.CODEX_CHAT_ADMIN_ALLOWED_ENV_KEYS || DEFAULT_ENV_KEYS.join(","));
+  const allowedEnvKeys = splitCsv(env.BRAIN_CODEX_CHAT_ENV_KEYS || DEFAULT_ENV_KEYS.join(","));
   const localHostname = os.hostname();
   const localIp = defaultLocalIp();
   const codexChatPath = env.BRAIN_CODEX_CHAT_PATH || "/home/tim/pkg/tim/codex-chat";

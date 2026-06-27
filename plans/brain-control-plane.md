@@ -94,17 +94,17 @@ private secret store/env layer and must never be committed or displayed.
 This separation lets Brain show an install/admin experience without making the
 Brain repo the owner of Slack adapter details.
 
-## Current bootstrap admin page
+## Removed codex-chat admin surface
 
-The current Clerk-protected `/admin/codex-chat/` page inside the `codex-chat`
-service is a bootstrap/temporary surface. It is useful for early Slack env setup
-and manifest rendering while the runtime adapter is being brought up, but it is
-not the long-term control plane. It should stay narrow, fail closed, and avoid
-expanding into full user/capability/audit/deploy administration.
+The Clerk-protected `/admin/codex-chat/`, codex-chat-hosted `/admin`, and
+`/api/admin/codex-chat/*` bootstrap surfaces are retired for this transition.
+Brain owns `/admin` and `/api/admin/brain/*`; codex-chat keeps runtime APIs such
+as Slack Events and audio ingest. This is intentionally breaking rather than a
+compatibility redirect period.
 
-As Brain's web service reaches parity, admin capabilities should move behind
-Brain-controlled routes. `codex-chat` can keep small runtime-local diagnostics or
-bootstrap affordances, but durable operations and policy belong in Brain.
+Brain can still render/validate the codex-chat-owned Slack manifest by using the
+selected codex-chat checkout's no-secret `slack-app/` scripts or a future stable
+package/export. Durable operations and policy belong in Brain.
 
 ## Target Brain web/admin service
 
@@ -210,8 +210,8 @@ introduced.
 
 - [x] Keep `codex-chat` as the production servant runtime.
 - [x] Keep Brain as the setup/control-plane repository.
-- [x] Document that the `codex-chat` admin page is bootstrap-only, not the
-      future control plane.
+- [x] Retire the `codex-chat` admin page instead of preserving bootstrap
+      compatibility.
 - [ ] Add explicit Brain/codex-chat links so contributors find this plan before
       extending admin surfaces.
 
@@ -249,9 +249,9 @@ used settings management and daily control-plane actions.
 - [ ] Display Slack manifest and Events API/redirect URL validation in Brain.
 - [ ] Store non-secret Slack install metadata in Brain's private workspace.
 - [ ] Keep manifest ownership and adapter semantics in `codex-chat`.
-- [ ] Treat the current `codex-chat` `/admin/codex-chat/` page as
-      bootstrap/temporary; migrate near-term admin/control-plane functions into
-      Brain instead of expanding that page.
+- [x] Remove reliance on the `codex-chat` `/admin/codex-chat/` page; migrate
+      near-term admin/control-plane functions into Brain instead of expanding
+      that page.
 
 ### Phase 3 — env/config and deploy/restart orchestration
 
@@ -316,13 +316,12 @@ and canonical deployment-ledger writes beyond the initial JSONL audit trail.
       capability.
 - [ ] Require explicit admin capabilities for all sensitive Brain actions.
 
-### Phase 6 — retire broad codex-chat admin responsibility
+### Phase 6 — keep codex-chat runtime-only
 
-- [ ] Move durable Slack install metadata, env management, deploy/restart,
+- [x] Move durable Slack install metadata, env management, deploy/restart,
       health dashboards, Clerk/admin policy, capability, and audit operations to
-      Brain.
-- [ ] Leave `codex-chat` with runtime-local bootstrap/diagnostics only where
-      necessary.
+      Brain's side of the boundary for this transition.
+- [x] Leave `codex-chat` with runtime APIs/contracts only where necessary.
 - [ ] Treat Brain as the operator entrypoint for company-brain control-plane
       work and `codex-chat` as the runtime adapter/service implementation.
 
@@ -335,7 +334,6 @@ and canonical deployment-ledger writes beyond the initial JSONL audit trail.
 - Do not store raw Slack, Clerk, Telegram, provider, or SSH secrets in Brain git,
   browser responses, logs, or audit text.
 - Do not move assistant/company-brain prompts or skills into Brain.
-- Do not expand the current `codex-chat` bootstrap admin page into the durable
-  control plane.
+- Do not restore the removed `codex-chat` bootstrap admin page or compatibility redirects; Brain owns admin.
 - Do not run live deploy/restart/health mutations without explicit approval and
   redacted audit records.
