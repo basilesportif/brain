@@ -13,13 +13,13 @@ async function listen(server) {
   return `http://127.0.0.1:${address.port}`;
 }
 
-function clerkStub({ signedIn }) {
+function clerkStub({ signedIn, email = 'tim.galebach@gmail.com', token = 'smoke-token' }) {
   const userLiteral = signedIn
-    ? `{ id: 'user_stub', primaryEmailAddressId: 'email_1', primaryEmailAddress: { emailAddress: 'other@example.test' }, emailAddresses: [{ id: 'email_1', emailAddress: 'other@example.test' }] }`
+    ? `{ id: 'user_stub', primaryEmailAddressId: 'email_1', primaryEmailAddress: { emailAddress: '${email}' }, emailAddresses: [{ id: 'email_1', emailAddress: '${email}' }] }`
     : 'null';
   return `window.Clerk = {
     user: ${userLiteral},
-    session: ${signedIn ? `{ getToken: async () => 'smoke-token' }` : 'null'},
+    session: ${signedIn ? `{ getToken: async () => '${token}' }` : 'null'},
     load: async () => {},
     mountSignIn: (element, options) => {
       window.__brainAdminMountedSignIn = options;
@@ -31,30 +31,46 @@ function clerkStub({ signedIn }) {
   };`;
 }
 
-async function stubClerk(page, signedIn) {
+async function stubClerk(page, options) {
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.route('**/npm/@clerk/ui@1/dist/ui.browser.js', (route) => route.fulfill({ contentType: 'application/javascript', body: 'window.__internal_ClerkUICtor = function ClerkUI() {};' }));
-  await page.route('**/npm/@clerk/clerk-js@6/dist/clerk.browser.js', (route) => route.fulfill({ contentType: 'application/javascript', body: clerkStub({ signedIn }) }));
+  await page.route('**/npm/@clerk/clerk-js@6/dist/clerk.browser.js', (route) => route.fulfill({ contentType: 'application/javascript', body: clerkStub(options) }));
   return pageErrors;
 }
 
 async function runSignInScenario(page, baseUrl, signedIn) {
-  const pageErrors = await stubClerk(page, signedIn);
+  const pageErrors = await stubClerk(page, { signedIn });
   await page.goto(`${baseUrl}/admin`, { waitUntil: 'domcontentloaded' });
-  if (signedIn) {
-    await page.locator('text=other@example.test').waitFor({ state: 'visible', timeout: 5_000 });
-    await page.locator('text=Sign out / switch account').waitFor({ state: 'visible', timeout: 5_000 });
-  } else {
-    await page.locator('text=Stub Clerk Sign In').waitFor({ state: 'visible', timeout: 5_000 });
-  }
+  await page.locator('text=Stub Clerk Sign In').waitFor({ state: 'visible', timeout: 5_000 });
+  assert.deepEqual(pageErrors, []);
+}
+
+async function runAllowedAutoContinueScenario(page, baseUrl) {
+  const pageErrors = await stubClerk(page, { signedIn: true, email: 'tim.galebach@gmail.com', token: 'smoke-token' });
+  await page.context().addCookies([{ name: '__session', value: 'smoke-token', url: baseUrl }]);
+  await page.goto(`${baseUrl}/admin/auth/sign-in?redirect_url=${encodeURIComponent(`${baseUrl}/admin`)}`, { waitUntil: 'domcontentloaded' });
+  await page.waitForURL(`${baseUrl}/admin`, { timeout: 5_000 });
+  await page.locator('text=Brain').first().waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('button[aria-label="Open account menu"]').click();
+  await page.locator('text=tim.galebach@gmail.com').first().waitFor({ state: 'visible', timeout: 5_000 });
+  assert.deepEqual(pageErrors, []);
+}
+
+async function runForbiddenSignedInScenario(page, baseUrl) {
+  const pageErrors = await stubClerk(page, { signedIn: true, email: 'other@example.test', token: 'forbidden-token' });
+  await page.goto(`${baseUrl}/admin/auth/sign-in?redirect_url=${encodeURIComponent(`${baseUrl}/admin`)}`, { waitUntil: 'domcontentloaded' });
+  await page.locator('text=other@example.test').waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('text=Sign out / switch account').waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('text=forbidden').waitFor({ state: 'visible', timeout: 5_000 });
+  assert.equal(page.url(), `${baseUrl}/admin/auth/sign-in?redirect_url=${encodeURIComponent(`${baseUrl}/admin`)}`);
   assert.deepEqual(pageErrors, []);
 }
 
 async function runAdminDashboardScenario(page, baseUrl, viewport) {
   if (viewport) await page.setViewportSize(viewport);
   await page.setExtraHTTPHeaders({ authorization: 'Bearer smoke-token' });
-  const pageErrors = await stubClerk(page, true);
+  const pageErrors = await stubClerk(page, { signedIn: true });
   await page.goto(`${baseUrl}/admin`, { waitUntil: 'domcontentloaded' });
   await page.locator('text=Brain').first().waitFor({ state: 'visible', timeout: 5_000 });
   const navScope = viewport ? '.mobile-tabs' : '.side';
@@ -97,14 +113,15 @@ const config = loadBrainAdminServiceConfig({
   BRAIN_ADMIN_AUDIT_LOG: path.join(root, 'audit.jsonl'),
 });
 const server = createBrainAdminServer(config, {
-  verifyTokenImpl: async () => ({ sub: 'user_stub' }),
-  getUser: async () => ({ primaryEmailAddressId: 'email_1', emailAddresses: [{ id: 'email_1', emailAddress: 'tim.galebach@gmail.com' }] }),
+  verifyTokenImpl: async (token) => ({ sub: token === 'forbidden-token' ? 'user_forbidden' : 'user_stub' }),
+  getUser: async (userId) => ({ primaryEmailAddressId: 'email_1', emailAddresses: [{ id: 'email_1', emailAddress: userId === 'user_forbidden' ? 'other@example.test' : 'tim.galebach@gmail.com' }] }),
 });
 const baseUrl = await listen(server);
 const browser = await chromium.launch({ headless: true });
 try {
   await runSignInScenario(await browser.newPage(), baseUrl, false);
-  await runSignInScenario(await browser.newPage(), baseUrl, true);
+  await runAllowedAutoContinueScenario(await browser.newPage(), baseUrl);
+  await runForbiddenSignedInScenario(await browser.newPage(), baseUrl);
   await runAdminDashboardScenario(await browser.newPage(), baseUrl);
   await runAdminDashboardScenario(await browser.newPage(), baseUrl, { width: 390, height: 844 });
   console.log(`Brain admin sign-in/dashboard smoke passed at ${baseUrl}/admin`);

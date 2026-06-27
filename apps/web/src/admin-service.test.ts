@@ -150,6 +150,10 @@ test("brain admin auth pages embed parseable JSON config and keep account contro
   assert.match(signInHtml, /Current Clerk account/);
   assert.match(signInHtml, /Sign out \/ switch account/);
   assert.match(signInHtml, /Continue to admin/);
+  assert.match(signInHtml, /\/api\/admin\/brain\/me/);
+  assert.match(signInHtml, /brain-admin-auto-continue/);
+  assert.match(signInHtml, /Automatic continue already ran once/);
+  assert.match(signInHtml, /Checking whether this account is allowlisted/);
 
   const deniedHtml = renderBrainAdminDeniedPage(cfg, "forbidden", "https://brain.example.test/admin/auth/sign-in", "other@example.test");
   assert.deepEqual(extractJsonScript(deniedHtml, "config"), { publishableKey: `pk_test_<unsafe>&value`, signInUrl: "https://brain.example.test/admin/auth/sign-in" });
