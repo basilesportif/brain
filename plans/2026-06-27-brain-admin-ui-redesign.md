@@ -382,7 +382,7 @@ operator checklist until the redesign instructions are finalized.
 
 ## 2026-06-27 integrated state-aware operator console implementation plan
 
-Status: implementation-ready for this change.
+Status: implemented. The current admin page includes the state-aware mode panel, Slack Setup Mode, Mission Control, grouped Slack settings, collapsed manifest affordances, plan-first deploy/restart controls, mobile tabs, and updated render/smoke coverage. Future live callback/test-event telemetry is intentionally not implemented yet; see the future-work plan in `plans/brain-control-plane.md`.
 
 This update integrates the attached **State-Aware Operator Console Redesign Plan**
 with the existing Brain admin/control-plane plans (`plans/brain-control-plane.md`,
@@ -433,21 +433,21 @@ switches to Mission Control. It is intentionally not written to localStorage,
 sessionStorage, server state, env files, or audit logs; a reload restores the
 Slack wizard when setup is still incomplete.
 
-### Page structure to implement now
+### Page structure implemented
 
-1. **Persistent header**
+1. [x] **Persistent header**
    - Keep compact Brain identity, target service/host, status chips, refresh, and
      account menu/switch-account affordance.
    - Keep dangerous actions out of the global header.
 
-2. **Primary state / next-action panel**
+2. [x] **Primary state / next-action panel**
    - Add a dominant `#mode-panel` immediately below the header/status strip.
    - Show Slack setup required/partial/connected copy, current mode, primary and
      secondary actions, details link, and session skip status.
    - Use green/yellow/red/blue/gray status semantics; only required missing
      values should feel urgent.
 
-3. **Slack Setup Mode**
+3. [x] **Slack Setup Mode**
    - Add a checklist-style wizard section using existing safe controls:
      public base URL/events URL confirmation, secret presence handoff,
      manifest render/copy/download, Slack app install checklist, verification
@@ -455,26 +455,26 @@ Slack wizard when setup is still incomplete.
    - Wizard fields remain write-only and empty; the canonical runbook remains
      `docs/slack-setup-runbook.md`.
 
-4. **Mission Control Mode**
+4. [x] **Mission Control Mode**
    - Add a `Mission Control` section that summarizes system health, Slack health,
      runtime config, deploy/restart state, recent activity, and debugging links.
    - Existing Overview/Slack/Manifest/Env/Deploy/Audit/Advanced sections remain
      available as progressively disclosed drill-downs.
 
-5. **Slack settings table**
+5. [x] **Slack settings table**
    - Reorganize rows by Public routing, Slack credentials, and Feature flags.
    - Translate presence into operator states: `required_missing`,
      `required_present`, `optional_missing`, `secret_present`, and
      `verified/presence_only` where applicable.
    - Include recommended action text instead of raw “not set” only.
 
-6. **Deploy/restart safety**
+6. [x] **Deploy/restart safety**
    - Preserve existing plan-first client state, live-operation confirmation modal,
      exact server-side approval semantics, redacted command/log display, and
      Brain self-service refusal.
    - Do not add any global restart shortcut.
 
-7. **Tests/smoke**
+7. [x] **Tests/smoke**
    - Extend render assertions for state-aware mode panel, Slack skip button,
      wizard checklist, Mission Control nav/section, grouped Slack settings, and
      no-secret rendering.
@@ -482,14 +482,14 @@ Slack wizard when setup is still incomplete.
      transition, Mission Control section, mobile tabs, and account menu.
    - Run `pnpm run check` and `pnpm run smoke:admin-signin`.
 
-### Acceptance criteria for this implementation slice
+### Acceptance criteria for this implementation slice — completed
 
-- Reloading the page with incomplete Slack setup defaults to Slack Setup Mode.
-- Clicking `Skip Slack for now` switches to Mission Control without persistence.
-- When required Slack settings are all present, Mission Control is the default.
-- Operators can still reach raw `/health`, `/settings`, `/slack/settings`, and
+- [x] Reloading the page with incomplete Slack setup defaults to Slack Setup Mode.
+- [x] Clicking `Skip Slack for now` switches to Mission Control without persistence.
+- [x] When required Slack settings are all present, Mission Control is the default.
+- [x] Operators can still reach raw `/health`, `/settings`, `/slack/settings`, and
   last response under Advanced.
-- Slack and env writes remain presence-only/write-only, clear input values after
+- [x] Slack and env writes remain presence-only/write-only, clear input values after
   attempts, and display restart-required guidance.
-- Plan/restart/deploy use the existing `/api/admin/brain/codex-chat/operation`
+- [x] Plan/restart/deploy use the existing `/api/admin/brain/codex-chat/operation`
   contract with no weakened approval or redaction semantics.

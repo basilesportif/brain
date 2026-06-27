@@ -164,6 +164,163 @@ until those instructions arrive.
 - verify token/signing-secret presence by metadata only;
 - run safe Slack canary plans and display results without exposing token values.
 
+### Future Slack callback/test-event telemetry plan
+
+Status: future work only; do not implement as part of the admin page redesign
+completion. The current Brain UI may label live callback/test-event health as
+manual or telemetry-pending, but it must not claim to verify Slack runtime health
+until this plan is implemented.
+
+#### Boundary and ownership
+
+Brain may observe and report external/control-plane status for Slack callbacks:
+public URL reachability, reverse-proxy handoff, event metadata recorded by
+`codex-chat`, test-event outcomes, canary status, and recent failure summaries.
+Brain may proxy raw Slack requests to `codex-chat` and may record redacted
+metadata about that proxy path. Brain must not become the Slack runtime engine,
+must not parse business event bodies for runtime behavior, and must not verify
+Slack signatures unless a later explicit architecture decision moves that
+responsibility. `codex-chat` remains the Slack Events API signature verifier,
+idempotency owner, ack/queue/runtime executor, adapter normalizer, and message
+send/reply engine.
+
+The preferred integration is a small `codex-chat` runtime-health export or
+internal admin endpoint that emits already-verified, redacted metadata. If Brain
+observes at the reverse proxy layer, it records only transport metadata and the
+upstream result; it does not treat an unverified Slack payload as trusted.
+
+#### Proposed data model
+
+Add Brain private-workspace records, with migrations before durable use:
+
+- `slack_callback_observations`: `id`, `deploymentId`, `teamIdHash`,
+  `enterpriseIdHash`, `appIdHash`, `requestKind` (`url_verification`,
+  `event_callback`, `slash_command`, `interactive`, `canary`, `unknown`),
+  `receivedAt`, `brainProxyTraceId`, `codexChatTraceId`, `httpMethod`,
+  `path`, `statusCode`, `upstreamStatusCode`, `ackLatencyMs`,
+  `runtimeAccepted` (`yes`, `no`, `unknown`), `signatureVerifiedBy`
+  (`codex-chat`, `not_applicable`, `unknown`), `outcome`, `errorClass`,
+  `redactionVersion`, `metadataOnly: true`.
+- `slack_test_events`: `id`, `deploymentId`, `requestedByAdminId`,
+  `createdAt`, `completedAt`, `targetKind` (`slack_url_verification`,
+  `public_channel`, `dm`, `private_channel`, `mpim`), `targetRefHash`,
+  `testMessageNonceHash`, `expectedCallbackKind`, `result`, `latencyMs`,
+  `codexChatRunId`, `observationIds`, `notesRedacted`.
+- `slack_callback_health_rollups`: `deploymentId`, `windowStart`,
+  `windowEnd`, `totalCallbacks`, `verifiedCallbacks`, `failedCallbacks`,
+  `timeoutCallbacks`, `p50AckLatencyMs`, `p95AckLatencyMs`,
+  `lastSuccessAt`, `lastFailureAt`, `state`, `reasons`.
+
+Raw Slack headers, signatures, tokens, signing secrets, message text, user text,
+file names, channel names, and payload bodies are not stored in Brain. Team,
+channel, user, enterprise, app, callback IDs, event IDs, and nonces should be
+hashed or reduced to stable opaque references unless an operator explicitly
+configures non-sensitive display aliases.
+
+#### Events to capture
+
+Capture only metadata needed to answer “is Slack reaching the running runtime and
+is the runtime accepting it?”:
+
+- Slack URL verification challenge request observed and `codex-chat` response
+  status/latency, without storing the challenge value.
+- Event callback observed, upstream ack status, ack latency, `codex-chat`
+  verification result, enqueue/accepted/rejected outcome, duplicate/idempotency
+  classification, and coarse event type.
+- Runtime canary send attempt, Slack API result class, expected callback
+  observation, and timeout/no-callback result.
+- Reverse-proxy/network failures: unavailable upstream, non-2xx responses,
+  timeout, body-too-large, method/path mismatch, and Caddy/Brain route mismatch.
+- Configuration drift observations: public Events URL mismatch, expected path
+  mismatch, required env presence changed, selected `codex-chat` ref changed.
+
+#### API and UI surfaces
+
+Potential Brain APIs:
+
+- `GET /api/admin/brain/slack/callback-health` returns current rollup, recent
+  redacted observations, state, reasons, and `codex-chat` runtime-health source.
+- `GET /api/admin/brain/slack/callback-observations?window=...` returns a
+  paginated metadata-only event list for admins.
+- `POST /api/admin/brain/slack/test-event` creates a canary plan or starts an
+  approved test flow. It requires an exact approval phrase and delegates runtime
+  send/receive work to `codex-chat`.
+- `GET /api/admin/brain/slack/test-events/:id` returns redacted progress and
+  final outcome.
+
+UI additions:
+
+- Mission Control Slack Health card: health state, last verified callback, last
+  failure, p95 ack latency, and whether telemetry comes from `codex-chat` or
+  Brain proxy metadata.
+- Slack Setup verification step: URL verification/test-event status with clear
+  “runtime verification is codex-chat-owned” copy.
+- Slack diagnostics page: recent observations, filters by event kind/outcome,
+  rollup windows, and copyable redacted incident summary.
+- Canary runner: choose public channel/DM/private channel/MPIM where Brain has
+  non-secret metadata for the target; display planned action before calling
+  `codex-chat`; never expose tokens.
+
+#### Privacy and redaction rules
+
+- Never store or display raw `SLACK_SIGNING_SECRET`, bot/app tokens,
+  `X-Slack-Signature`, request bodies, challenge strings, authorization headers,
+  message text, file content, user-provided text, channel names, or user names.
+- Hash Slack IDs with a Brain-private salt when a stable join key is needed;
+  rotate/redact according to the private workspace retention policy.
+- Store coarse event types and result classes, not payload bodies.
+- Keep raw runtime logs in `codex-chat` if they exist; Brain stores links or
+  trace IDs plus redacted summaries.
+- Default retention: short operational window for observations (for example
+  7-30 days) and longer aggregate rollups with no re-identifiable payload data.
+- All admin reads and test-event starts are audited with actor, deployment,
+  approval phrase result, and redacted target references.
+
+#### Health states
+
+- `not_configured`: required Slack env/settings or public URL are missing.
+- `configured_presence_only`: required values are present, but no live callback
+  telemetry has been observed in the current window.
+- `url_verified`: Slack URL verification reached `codex-chat` successfully.
+- `healthy`: recent callback/test-event succeeded and ack latency is within SLO.
+- `degraded`: callbacks arrive but failures, duplicate rejections, or latency are
+  above threshold.
+- `failing`: recent callbacks/test-events fail, time out, or cannot reach
+  `codex-chat`.
+- `stale`: no callback has been observed beyond the configured freshness window.
+- `unknown`: telemetry source is unavailable or schema version is unsupported.
+
+#### Canary and test flow
+
+1. Brain renders a canary plan: target deployment, public Events URL, selected
+   canary kind, redacted target reference, expected callback type, timeout, and
+   exact approval phrase.
+2. After approval, Brain asks `codex-chat` to execute the runtime action or
+   records a Slack URL verification attempt initiated by the operator in Slack.
+3. `codex-chat` verifies Slack signatures and emits redacted observation/runtime
+   metadata with trace IDs.
+4. Brain correlates the test event with observations by nonce hash/trace ID,
+   updates the result, and shows success, degraded, timeout, or failed with
+   redacted reasons.
+5. The UI offers next actions: inspect recent observations, rerun canary, review
+   manifest URL, check env presence, or run plan-first restart.
+
+#### Rollout steps
+
+1. Document and agree on the `codex-chat` health/telemetry contract first,
+   including schema versioning and redaction tests.
+2. Add `codex-chat` metadata emission or an internal admin endpoint; verify it
+   is post-signature-verification and contains no payload bodies or secrets.
+3. Add Brain data migrations/store, ingestion, redaction tests, and retention
+   pruning.
+4. Add read-only Brain health APIs and UI rollups behind a feature flag; keep the
+   existing presence-only UI labels until live data exists.
+5. Add approved canary/test-event creation that delegates runtime execution to
+   `codex-chat`; ship first with dry-run/plan mode, then live canaries.
+6. Backfill no raw data; start observations only after deployment.
+7. Promote health state from `configured_presence_only` to live states in the UI
+   after successful production canaries and operator review.
+
 ### Environment and secrets metadata
 
 - manage env var names, secret-reference names, file paths, required/optional
@@ -256,8 +413,10 @@ used settings management and daily control-plane actions.
       Initial implementation: `@brain/web` exposes `brain-web-admin` /
       `pnpm run brain-admin` with server-side Clerk auth and fail-closed email
       allowlist.
-- [ ] Make the web UI a settings-management surface for recurring admin work,
+- [x] Make the web UI a settings-management surface for recurring admin work,
       not merely an occasional setup wizard.
+      Initial state-aware operator console includes Slack Setup Mode, Mission
+      Control, grouped settings, manifest affordances, and plan-first operations.
 - [ ] Design the tradeoff between guided/sequential Brain setup/install flows in
       the web UI and setup driven from Codex sessions; support both paths when
       each is the easier operator experience.
@@ -269,15 +428,17 @@ used settings management and daily control-plane actions.
 - [ ] Start the Brain-owned private records for install metadata, env/deploy
       metadata, operations history, capability/audit planning, and selected
       `assistant-agent-logic` checkout/ref/version.
-- [ ] Fail closed when Clerk keys or allowed admin emails are absent.
+- [x] Fail closed when Clerk keys or allowed admin emails are absent.
 
 ### Phase 2 — move Slack/admin install metadata and contract rendering into Brain
 
-- [ ] Add a stable no-secrets way for Brain to render/validate the
+- [x] Add a stable no-secrets way for Brain to render/validate the
       `codex-chat` Slack manifest from a selected `codex-chat` checkout.
-- [ ] Display Slack manifest and Events API/redirect URL validation in Brain.
+- [x] Display Slack manifest and Events API/redirect URL validation in Brain.
+      Current validation is config/presence-oriented; live callback health is
+      future work below.
 - [ ] Store non-secret Slack install metadata in Brain's private workspace.
-- [ ] Keep manifest ownership and adapter semantics in `codex-chat`.
+- [x] Keep manifest ownership and adapter semantics in `codex-chat`.
 - [x] Remove reliance on the `codex-chat` `/admin/codex-chat/` page; migrate
       near-term admin/control-plane functions into Brain instead of expanding
       that page.

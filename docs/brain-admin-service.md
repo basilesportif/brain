@@ -114,6 +114,21 @@ Do not infer those values from remote repo-registry deployment records when the
 Brain admin service is already running. Update the Brain admin env/settings for
 the concrete instance instead.
 
+
+## Slack callback telemetry boundary
+
+The current admin UI is presence/config oriented for Slack health. It can show
+that required Slack settings are present, render the codex-chat-owned manifest,
+and guide manual Slack URL verification/canaries, but it does not yet provide
+durable live callback or test-event telemetry.
+
+Future callback/test-event telemetry is planned in
+`plans/brain-control-plane.md`. That plan keeps Brain on the control-plane side:
+Brain may proxy raw Slack requests, record redacted metadata, aggregate health,
+and display canary/test outcomes, while `codex-chat` remains the Slack runtime
+engine and signature verifier unless a later explicit architecture decision
+changes that boundary.
+
 ## Systemd and Caddy sketch
 
 Example user service:
