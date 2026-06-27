@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type http from "node:http";
 import { authorizeBrainAdminRequest, parseAdminAllowedEmails } from "./admin-auth.js";
-import { renderBrainAdminDeniedPage, renderBrainAdminSignInPage } from "./admin-page.js";
+import { renderBrainAdminDeniedPage, renderBrainAdminPage, renderBrainAdminSignInPage } from "./admin-page.js";
 import { createBrainAdminServer, type BrainAdminServiceConfig, type BrainAdminServiceDeps } from "./admin-service.js";
 import { mergeEnvFileText } from "./env-file.js";
 
@@ -155,6 +155,40 @@ test("brain admin auth pages embed parseable JSON config and keep account contro
   assert.deepEqual(extractJsonScript(deniedHtml, "config"), { publishableKey: `pk_test_<unsafe>&value`, signInUrl: "https://brain.example.test/admin/auth/sign-in" });
   assert.match(deniedHtml, /other@example\.test/);
   assert.match(deniedHtml, /Sign out/);
+});
+
+test("brain admin page renders redesigned dashboard IA without secrets", () => {
+  const cfg = config("/tmp/brain-admin-render", { codexChatDeployCommand: undefined });
+  const html = renderBrainAdminPage(cfg, "tim.galebach@gmail.com");
+
+  assert.deepEqual(extractJsonScript(html, "brain-admin-config"), {
+    apiBase: "/api/admin/brain",
+    routePath: "/admin",
+    publishableKey: "pk_test_example",
+    signInUrl: "/admin/auth/sign-in",
+    adminEmail: "tim.galebach@gmail.com",
+  });
+  assert.match(html, /Brain/);
+  assert.match(html, /local-brain|test-brain/);
+  assert.match(html, /account-menu/);
+  assert.match(html, /tim\.galebach@gmail\.com/);
+  assert.match(html, /Sign out \/ switch account/);
+  assert.match(html, /Overview/);
+  assert.match(html, /Slack/);
+  assert.match(html, /Manifest/);
+  assert.match(html, /Env &amp; Config/);
+  assert.match(html, /Deploy \/ Restart/);
+  assert.match(html, /Audit \/ Feedback/);
+  assert.match(html, /Advanced/);
+  assert.match(html, /Required settings/);
+  assert.match(html, /leave blank to keep existing value/);
+  assert.match(html, /View manifest JSON/);
+  assert.match(html, /Draft only — codex-chat remains source of truth/);
+  assert.match(html, /plan codex-chat\.service/);
+  assert.match(html, /restart codex-chat\.service/);
+  assert.match(html, /write Slack settings/);
+  assert.equal(html.includes("xoxb-super-secret"), false);
+  assert.equal(html.includes("signing-secret"), false);
 });
 
 test("brain admin settings identify the concrete local instance separately from repo registry", async () => {
