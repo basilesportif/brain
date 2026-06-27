@@ -285,6 +285,39 @@ Header requirements:
 - Avoid placeholder-only guidance. Every input gets a visible label and helper
   text, with placeholders used only as examples.
 
+
+## Initial Slack setup wizard plan
+
+This plan now includes only the initial wizard shape. Further instructions are
+coming for both the broader admin UI redesign and the Slack setup wizard
+redesign, so implementation should not overfit final layouts or copy yet.
+
+The first Slack setup wizard should organize the existing Brain-safe operations
+into a sequential checklist:
+
+1. **Confirm target** — show Brain instance, codex-chat checkout/service, env
+   file, and the public Brain Events URL.
+2. **Render manifest** — call the existing Brain endpoint that renders the
+   codex-chat-owned no-secret manifest, then offer copy and download actions.
+3. **Slack app UI guide** — display concise instructions for creating/updating
+   the Slack app from the manifest, reviewing OAuth scopes/events, and installing
+   or reinstalling to the workspace.
+4. **Secret handoff** — explain where to find **Basic Information → Signing
+   Secret** and **OAuth & Permissions → Bot User OAuth Token**, then write them
+   as empty, write-only fields using the existing `write Slack settings`
+   approval phrase.
+5. **Restart semantics** — after env writes, show restart-required state and
+   route to the plan-first `codex-chat.service` operation flow. The wizard must
+   not restart `brain-admin.service` and must keep codex-chat restart deliberate.
+6. **Live canaries** — checklist public mention, DM, private channel, and MPIM
+   canaries, with success/failure notes stored only as non-secret status.
+7. **Finish/metadata** — summarize non-secret install metadata: workspace/team
+   ID, app ID, bot user ID, scopes/events, Events URL, install/reinstall date,
+   and canary outcomes.
+
+The wizard should link to `docs/slack-setup-runbook.md` as the canonical
+operator checklist until the redesign instructions are finalized.
+
 ## Implementation rollout plan
 
 ### Phase A — IA and shell without API changes

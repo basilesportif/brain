@@ -75,9 +75,10 @@ Based on the current repo/system state:
       system, including Brain monorepo/runtime parity plans that already frame
       Telegram as an adapter over a channel-neutral runtime.
 - [x] Slack adapter exists (`src/slack.ts` and related runtime/API tests).
-- [x] Installable Slack app surface exists under `slack-app/` with manifest,
-      install metadata template, adapter config/env examples, validation, and
-      a canonical operator runbook in `slack-app/SLACK.md`.
+- [x] Installable Slack app runtime contract exists under codex-chat's
+      `slack-app/` with manifest, install metadata template, adapter config/env
+      examples, and validation scripts. Brain owns the user-facing setup/runbook
+      in `docs/slack-setup-runbook.md`.
 - [x] Capability-aware runtime abstractions are implemented in `codex-chat`.
 - [x] Brain owns the Clerk-protected admin/control-plane surface at
       `https://brain.decisive-outcomes.com/admin`.

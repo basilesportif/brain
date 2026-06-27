@@ -122,7 +122,9 @@ pnpm run brain-admin
 
 The admin service is fail-closed behind Clerk, writes codex-chat env/config
 entries as write-only values, and can run approved codex-chat deploy/restart
-operations when the server env supplies the relevant commands.
+operations when the server env supplies the relevant commands. Brain owns the
+Slack setup/install checklist and live canary flow; see
+`docs/slack-setup-runbook.md`.
 
 The check validates that the repo structure exists, runtime config examples are present, private boundary directories contain only their README placeholders, and provider/entrypoint/automation seams pass unit tests.
 

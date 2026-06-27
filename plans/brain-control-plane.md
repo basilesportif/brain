@@ -62,8 +62,8 @@ Brain should eventually own:
 - Slack adapter implementation and Slack Events API request verification,
   idempotency, fast ack, queuing, and event normalization;
 - Slack send/reply/progress rendering behavior;
-- the exact Slack manifest contract, scopes, events, and adapter runbook in
-  `slack-app/`;
+- the exact Slack manifest contract, scopes, events, and adapter behavior under
+  codex-chat's `slack-app/`; Brain owns the human setup/install runbook;
 - `ActorContext`, `OutputTarget`, `RunContext`, conversation/session behavior,
   runtime-owned Slack tools, and output routing semantics;
 - subagent, loop, monitor, and runtime orchestration behavior;
@@ -77,10 +77,13 @@ remain in `assistant-agent-logic`. Brain may select and validate the checkout
 used by a deployment, but should not vendor or rewrite those workflows as
 control-plane code.
 
-## Slack manifest and install metadata boundary
+## Slack manifest, setup runbook, and install metadata boundary
 
-The Slack manifest contract stays in `codex-chat` because it is coupled to the
-Slack adapter and Events API handler. Brain's web UI should be able to access,
+Brain owns the human Slack setup/install runbook at
+`docs/slack-setup-runbook.md`, including Slack UI steps, install-to-workspace,
+secret handoff, env writes/restart semantics, and live canaries. The Slack
+manifest contract stays in `codex-chat` because it is coupled to the Slack
+adapter and Events API handler. Brain's web UI should be able to access,
 render, validate, and copy/download that manifest by calling a stable contract
 surface exposed by the checked-out `codex-chat` version. The public Slack Events URL is `https://brain.decisive-outcomes.com/api/slack/events`; Brain reverse-proxies that raw request to codex-chat's internal API on `127.0.0.1:49346` without taking over signature verification or runtime behavior. Acceptable manifest contract sources include:
 
@@ -129,6 +132,27 @@ API with these modules:
 - show whether local registry pointers match canonical private deployment
   ledger entries;
 - clearly separate source checkout, deploy checkout, and private data paths.
+
+### Initial Slack setup wizard plan
+
+The first Brain-admin Slack setup wizard should be a guided wrapper over the
+current safe primitives, not a new runtime owner:
+
+1. Confirm the concrete Brain instance, codex-chat checkout/service, and public
+   Brain Events URL.
+2. Render the codex-chat-owned no-secret manifest and offer copy/download.
+3. Guide the operator through Slack app creation/update, manifest paste/upload,
+   scope review, and install/reinstall to workspace.
+4. Collect `SLACK_SIGNING_SECRET` and `SLACK_BOT_TOKEN` as write-only values,
+   showing only presence metadata afterward.
+5. Require plan-first restart semantics for `codex-chat.service` after env
+   writes.
+6. Walk through public-channel, DM, private-channel, and MPIM live canaries and
+   record non-secret outcomes.
+
+Further instructions are coming for both the admin UI redesign and the Slack
+setup wizard redesign; keep this initial wizard plan intentionally conservative
+until those instructions arrive.
 
 ### Slack installation administration
 

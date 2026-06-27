@@ -101,6 +101,15 @@ checkout `/home/tim/pkg/tim/codex-chat`, local env
 `/home/tim/pkg/tim/codex-chat/config/codex-chat.toml`, and local
 `codex-chat.service`.
 
+## Slack setup ownership
+
+Brain owns the user-facing Slack setup/install checklist. The canonical runbook
+is `docs/slack-setup-runbook.md`; it covers Slack UI install steps, OAuth
+scopes/events, where to find the signing secret and bot token, install-to-
+workspace flow, Brain Events URL, manifest render/copy/download, write-only env
+updates, restart semantics, and live canaries. codex-chat owns only the runtime
+adapter and no-secret manifest contract/scripts that Brain renders for users.
+
 Do not infer those values from remote repo-registry deployment records when the
 Brain admin service is already running. Update the Brain admin env/settings for
 the concrete instance instead.
