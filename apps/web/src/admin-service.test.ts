@@ -184,8 +184,9 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /leave blank to keep existing value/);
   assert.match(html, /View manifest JSON/);
   assert.match(html, /Draft only — codex-chat remains source of truth/);
-  assert.match(html, /plan codex-chat\.service/);
-  assert.match(html, /restart codex-chat\.service/);
+  assert.match(html, /Confirm live operation/);
+  assert.match(html, /Review & confirm/);
+  assert.equal(html.includes('id="op-approval"'), false);
   assert.match(html, /write Slack settings/);
   assert.equal(html.includes("xoxb-super-secret"), false);
   assert.equal(html.includes("signing-secret"), false);
@@ -200,7 +201,7 @@ test("brain admin settings identify the concrete local instance separately from 
       const payload = await settings.json() as {
         instance: { project: string; host: string; ip: string; repoRegistrySourceOfTruth: boolean };
         repoRegistry: { sourceOfTruth: boolean; role: string };
-        codexChat: { host: string; ip: string; path: string; serviceName: string; env: { allowedKeys: string[] } };
+        codexChat: { host: string; ip: string; path: string; serviceName: string; env: { allowedKeys: string[] }; operationCommands: Record<string, { configured: boolean; command: string | null }> };
       };
       assert.equal(payload.instance.project, "Brain");
       assert.equal(payload.instance.host, "brain.example.test");
@@ -214,6 +215,9 @@ test("brain admin settings identify the concrete local instance separately from 
       assert.equal(payload.codexChat.path, path.join(root, "codex-chat"));
       assert.ok(!payload.codexChat.env.allowedKeys.includes("CODEX_CHAT_ADMIN_ENABLED"));
       assert.ok(!payload.codexChat.env.allowedKeys.includes("CLERK_SECRET_KEY"));
+      assert.equal(payload.codexChat.operationCommands.restart.configured, true);
+      assert.match(payload.codexChat.operationCommands.restart.command ?? "", /echo restart-ok/);
+      assert.equal(payload.codexChat.operationCommands.deploy.configured, true);
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -258,7 +262,7 @@ test("brain admin env API writes allowlisted keys as write-only presence metadat
   }
 });
 
-test("brain admin operation API requires explicit approval and audits execution", async () => {
+test("brain admin operation API keeps plan low-friction and requires explicit live confirmation", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-op-"));
   const calls: string[] = [];
   try {
@@ -269,17 +273,21 @@ test("brain admin operation API requires explicit approval and audits execution"
         return { status: 0, signal: null, stdout: "restart-ok\n", stderr: "", timedOut: false };
       },
     }, async (baseUrl) => {
-      const missingApproval = await fetch(`${baseUrl}/api/admin/brain/codex-chat/operation`, {
+      const missingConfirmation = await fetch(`${baseUrl}/api/admin/brain/codex-chat/operation`, {
         method: "POST",
         headers: { ...authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ operation: "restart", approval: "restart" }),
+        body: JSON.stringify({ operation: "restart" }),
       });
-      assert.equal(missingApproval.status, 400);
+      assert.equal(missingConfirmation.status, 400);
+      assert.deepEqual(await missingConfirmation.json(), {
+        error: "confirmation_required",
+        required: { token: "brain-admin-live-operation-confirmed-v1", operation: "restart", serviceName: "codex-chat.service" },
+      });
 
       const plan = await fetch(`${baseUrl}/api/admin/brain/codex-chat/operation`, {
         method: "POST",
         headers: { ...authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ operation: "plan", approval: "plan codex-chat.service" }),
+        body: JSON.stringify({ operation: "plan" }),
       });
       assert.equal(plan.status, 200);
       const planPayload = await plan.json() as { dryRun: boolean; command: string };
@@ -291,7 +299,7 @@ test("brain admin operation API requires explicit approval and audits execution"
       const restart = await fetch(`${baseUrl}/api/admin/brain/codex-chat/operation`, {
         method: "POST",
         headers: { ...authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ operation: "restart", approval: "restart codex-chat.service" }),
+        body: JSON.stringify({ operation: "restart", confirmation: { token: "brain-admin-live-operation-confirmed-v1", operation: "restart", serviceName: "codex-chat.service", freshPlan: true } }),
       });
       assert.equal(restart.status, 200);
       assert.deepEqual(calls, ["echo restart-ok"]);

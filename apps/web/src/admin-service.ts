@@ -27,6 +27,7 @@ const DEFAULT_ENV_KEYS = [
 
 const SECRETISH_RE = /(SECRET|TOKEN|KEY|PASSWORD|COOKIE|SESSION|CREDENTIAL)/i;
 const MAX_BODY_BYTES = 128 * 1024;
+const LIVE_OPERATION_CONFIRMATION_TOKEN = "brain-admin-live-operation-confirmed-v1";
 
 export interface BrainAdminServiceConfig {
   enabled: boolean;
@@ -228,6 +229,7 @@ async function serviceSettings(config: BrainAdminServiceConfig) {
       env,
       configFile: config.codexChatConfigFile ? { path: config.codexChatConfigFile, configured: true } : { configured: false },
       deployCommandConfigured: Boolean(config.codexChatDeployCommand),
+      operationCommands: operationCommandSummary(config),
       restartCommand: operationCommand(config, "restart") ? redactedCommand(operationCommand(config, "restart") ?? "") : null,
     },
     slack: await slackSettingsSummary(config),
@@ -349,9 +351,6 @@ function buildSlackEventsUrl(baseUrl: string, eventsPath: string): string {
 async function handleOperation(response: ServerResponse, config: BrainAdminServiceConfig, deps: BrainAdminServiceDeps, adminEmail: string, payload: Record<string, unknown>): Promise<void> {
   const operation = typeof payload.operation === "string" ? payload.operation.trim() : "";
   if (!["plan", "restart", "deploy"].includes(operation)) return sendJson(response, 400, { error: "unsupported_operation", supported: ["plan", "restart", "deploy"] });
-  const expectedApproval = `${operation} ${config.codexChatServiceName}`;
-  const approval = typeof payload.approval === "string" ? payload.approval.trim() : "";
-  if (approval !== expectedApproval) return sendJson(response, 400, { error: "approval_required", expected: expectedApproval });
   if (isSelfServiceTarget(config)) return sendJson(response, 409, { error: "refusing_to_operate_on_brain_service", serviceName: config.codexChatServiceName });
 
   const command = operationCommand(config, operation as "plan" | "restart" | "deploy");
@@ -361,9 +360,41 @@ async function handleOperation(response: ServerResponse, config: BrainAdminServi
     return sendJson(response, 200, { ok: true, dryRun: true, operation, command: redactedCommand(command), sideEffects: "none" });
   }
 
+  const confirmation = parseLiveOperationConfirmation(payload.confirmation);
+  if (!confirmation
+    || confirmation.token !== LIVE_OPERATION_CONFIRMATION_TOKEN
+    || confirmation.operation !== operation
+    || confirmation.serviceName !== config.codexChatServiceName) {
+    return sendJson(response, 400, {
+      error: "confirmation_required",
+      required: { token: LIVE_OPERATION_CONFIRMATION_TOKEN, operation, serviceName: config.codexChatServiceName },
+    });
+  }
+
   const result = await (deps.runCommand ?? runShellCommand)(command, config.operationTimeoutMs);
-  await appendAudit(config, { action: "codex-chat.operation.execute", adminEmail, operation, command: redactedCommand(command), status: result.status, signal: result.signal, timedOut: result.timedOut });
+  await appendAudit(config, { action: "codex-chat.operation.execute", adminEmail, operation, command: redactedCommand(command), status: result.status, signal: result.signal, timedOut: result.timedOut, freshPlan: Boolean(confirmation.freshPlan), bypassedFreshPlan: Boolean(confirmation.bypassedFreshPlan) });
   return sendJson(response, result.status === 0 ? 200 : 500, { ok: result.status === 0, operation, status: result.status, signal: result.signal, timedOut: result.timedOut, stdout: redactOutput(result.stdout), stderr: redactOutput(result.stderr) });
+}
+
+
+function operationCommandSummary(config: BrainAdminServiceConfig): Record<"plan" | "restart" | "deploy", { configured: boolean; command: string | null }> {
+  return {
+    plan: { configured: true, command: redactedCommand(operationCommand(config, "plan") ?? "") },
+    restart: { configured: Boolean(operationCommand(config, "restart")), command: operationCommand(config, "restart") ? redactedCommand(operationCommand(config, "restart") ?? "") : null },
+    deploy: { configured: Boolean(operationCommand(config, "deploy")), command: operationCommand(config, "deploy") ? redactedCommand(operationCommand(config, "deploy") ?? "") : null },
+  };
+}
+
+function parseLiveOperationConfirmation(value: unknown): { token?: string; operation?: string; serviceName?: string; freshPlan?: boolean; bypassedFreshPlan?: boolean } | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  return {
+    token: typeof record.token === "string" ? record.token : undefined,
+    operation: typeof record.operation === "string" ? record.operation : undefined,
+    serviceName: typeof record.serviceName === "string" ? record.serviceName : undefined,
+    freshPlan: record.freshPlan === true,
+    bypassedFreshPlan: record.bypassedFreshPlan === true,
+  };
 }
 
 function operationCommand(config: BrainAdminServiceConfig, operation: "plan" | "restart" | "deploy"): string | undefined {
@@ -580,7 +611,9 @@ function shellArg(value: string): string {
 }
 
 function redactedCommand(command: string): string {
-  return command.replace(/(TOKEN|SECRET|KEY|PASSWORD)=([^\s]+)/gi, "$1=<redacted>");
+  return command
+    .replace(/((?:TOKEN|SECRET|KEY|PASSWORD|COOKIE|SESSION|CREDENTIAL)[A-Z0-9_]*=)(?:"[^"]*"|\'[^\']*\'|[^\s]+)/gi, "$1<redacted>")
+    .replace(/\b(sk-(?:proj-)?[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{20,})\b/g, "<redacted-token>");
 }
 
 function redactOutput(value: string): string {

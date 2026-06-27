@@ -62,6 +62,10 @@ async function runAdminDashboardScenario(page, baseUrl, viewport) {
   await page.locator(`${navScope} a[href="#slack"]`).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator(`${navScope} a[href="#manifest"]`).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('text=Deploy / Restart').first().waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#op-approval').waitFor({ state: 'detached', timeout: 5_000 });
+  await page.locator('#op-run').waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#op').selectOption('restart');
+  await page.locator('text=Review & confirm restart').waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('button[aria-label="Open account menu"]').click();
   await page.locator('text=Sign out / switch account').waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('text=/^(other@example.test|tim.galebach@gmail.com)$/').first().waitFor({ state: 'visible', timeout: 5_000 });
