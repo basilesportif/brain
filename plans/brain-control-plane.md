@@ -11,6 +11,9 @@ project/repo from each concrete Brain instance: an instance runs as a web
 service and owns env/settings for the local or remote `codex-chat`,
 `assistant-agent-logic`, workspace, env files, and services it controls. The
 repo registry is useful context, not the source of truth for a running instance.
+The current concrete instance for this conversation is `tim-main-brain` on
+`codex-chat-assistant-1` (`178.104.208.141`), serving
+`https://brain.decisive-outcomes.com/admin` via `brain-admin.service`.
 `codex-chat` remains the servant runtime: it owns channel/runtime adapters, the exact Slack manifest contract,
 Slack Events API handling, `ActorContext`/`OutputTarget` runtime behavior,
 Slack send/reply behavior, and subagent/runtime orchestration. Slack is another
@@ -289,7 +292,7 @@ not a codex-chat admin expansion. Current capabilities are intentionally narrow:
   deployment command supplied by server env and audit records that do not include
   secret values.
 
-2026-06-27 clarification: this deployed instance runs beside the active local
+2026-06-27 clarification: the `tim-main-brain` deployed instance runs beside the active local
 `codex-chat.service` on `codex-chat-assistant-1` (`178.104.208.141`) and should
 show/control `/home/tim/pkg/tim/codex-chat`,
 `/home/tim/pkg/tim/assistant-agent-logic`, and

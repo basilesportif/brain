@@ -75,8 +75,9 @@ can be configured later after Telegram admin pairing is working.
 
 ## Current Brain instance target
 
-Brain is an abstract project, but this running Brain instance is local to the
-active codex-chat server. Its source-of-truth settings live in the
+Brain is an abstract project/source repo, but this running Brain instance is the
+named deployment `tim-main-brain` local to the active codex-chat server. Its
+source-of-truth settings live in the
 `brain-admin.service` environment (`~/.config/brain-admin/env`) and defaults,
 not in the repo registry. The admin service should show/control local
 `codex-chat.service` on this server and should not redirect operators toward

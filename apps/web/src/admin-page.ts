@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import type { BrainAdminServiceConfig } from "./admin-service.js";
 
 function escapeHtml(value: string): string {
@@ -8,9 +9,55 @@ function adminSignInPath(routePath: string): string {
   return `${routePath.replace(/\/+$/, "")}/auth/sign-in`;
 }
 
+
+function clerkFrontendApiFromPublishableKey(publishableKey: string): string {
+  const encoded = publishableKey.split("_")[2] ?? "";
+  if (!encoded) return "";
+  try {
+    const decoded = Buffer.from(encoded, "base64").toString("utf8").replace(/\$$/, "").trim();
+    return /^[A-Za-z0-9.-]+$/.test(decoded) ? decoded : "";
+  } catch {
+    return "";
+  }
+}
+
+function clerkAssetBase(config: BrainAdminServiceConfig): string {
+  const frontendApi = clerkFrontendApiFromPublishableKey(config.clerkPublishableKey);
+  return frontendApi ? `https://${frontendApi}/npm/@clerk` : "https://cdn.jsdelivr.net/npm/@clerk";
+}
+
+function clerkUiScriptUrl(config: BrainAdminServiceConfig): string {
+  return `${clerkAssetBase(config)}/ui@1/dist/ui.browser.js`;
+}
+
+function clerkJsScriptUrl(config: BrainAdminServiceConfig): string {
+  return `${clerkAssetBase(config)}/clerk-js@6/dist/clerk.browser.js`;
+}
+
+function jsonScriptPayload(value: unknown): string {
+  return JSON.stringify(value).replace(/[<>&\u2028\u2029]/g, (char) => {
+    switch (char) {
+      case "<":
+        return "\\u003c";
+      case ">":
+        return "\\u003e";
+      case "&":
+        return "\\u0026";
+      case "\u2028":
+        return "\\u2028";
+      case "\u2029":
+        return "\\u2029";
+      default:
+        return char;
+    }
+  });
+}
+
 export function renderBrainAdminPage(config: BrainAdminServiceConfig, adminEmail: string): string {
   const signInUrl = adminSignInPath(config.routePath);
-  const payload = JSON.stringify({ apiBase: "/api/admin/brain", routePath: config.routePath, publishableKey: config.clerkPublishableKey, signInUrl, adminEmail });
+  const payload = jsonScriptPayload({ apiBase: "/api/admin/brain", routePath: config.routePath, publishableKey: config.clerkPublishableKey, signInUrl, adminEmail });
+  const clerkUiScript = clerkUiScriptUrl(config);
+  const clerkJsScript = clerkJsScriptUrl(config);
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Brain Control Plane</title><style>
   body{margin:0;font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;background:#0f172a;color:#e5e7eb}main{max-width:1200px;margin:0 auto;padding:32px}.topbar{display:flex;gap:16px;align-items:flex-start;justify-content:space-between;margin-bottom:20px}.account{min-width:260px;text-align:right}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}.card{background:#111827;border:1px solid #334155;border-radius:16px;padding:20px;box-shadow:0 12px 30px #0004}h1,h2,h3{margin:0 0 12px}.muted{color:#94a3b8}.bad{color:#f87171}.ok{color:#86efac}input,select,button,textarea,.button{box-sizing:border-box;font:inherit;border-radius:10px;border:1px solid #475569;background:#020617;color:#e5e7eb;padding:10px;text-decoration:none}input,textarea,select{width:100%}button,.button{cursor:pointer;background:#2563eb;border-color:#3b82f6;width:auto;display:inline-block}button.secondary,.button.secondary{background:#1f2937}label{display:block;margin:10px 0 4px}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;white-space:pre-wrap}.manifest{min-height:360px}.hidden{display:none}</style></head><body><main>
   <div class="topbar"><div><h1>Brain Control Plane</h1><p class="muted">Clerk-protected admin service for Brain as the user-facing app surface. codex-chat remains the internal engine for Slack signature verification, runtime normalization, and message handling.</p></div><section class="card account" aria-label="Clerk account"><h2>Clerk account</h2><p class="muted">Signed in as</p><p id="account-email" class="mono">${escapeHtml(adminEmail || "unknown account")}</p><div class="row" style="justify-content:flex-end"><button class="secondary" onclick="signOut()">Sign out / switch account</button><a class="button secondary" href="${escapeHtml(signInUrl)}">Account page</a></div><p id="account-error" class="bad"></p></section></div>
@@ -23,12 +70,12 @@ export function renderBrainAdminPage(config: BrainAdminServiceConfig, adminEmail
     <section class="card"><h2>Write codex-chat env/config</h2><p class="muted">Generic escape hatch. Prefer Slack settings above for Slack keys. Values are write-only; responses show presence only.</p><label>Key</label><input id="env-key" placeholder="CODEX_CHAT_BASE_URL"><label>Value</label><input id="env-value" type="password" placeholder="write-only"><label>Approval</label><input id="env-approval" placeholder="write env"><button onclick="writeEnv()">Write entry</button><pre id="env-result" class="mono"></pre></section>
     <section class="card"><h2>Deploy / restart</h2><p class="muted">Operations require exact approval text and are audited.</p><label>Operation</label><select id="op"><option>plan</option><option>restart</option><option>deploy</option></select><label>Approval</label><input id="op-approval" placeholder="plan codex-chat.service"><button onclick="runOperation()">Run</button><pre id="op-result" class="mono"></pre></section>
   </div>
-</main><script type="application/json" id="brain-admin-config">${escapeHtml(payload)}</script><script async crossorigin="anonymous" data-clerk-publishable-key="${escapeHtml(config.clerkPublishableKey)}" src="https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js"></script><script>
+</main><script type="application/json" id="brain-admin-config">${payload}</script><script async crossorigin="anonymous" src="${escapeHtml(clerkUiScript)}"></script><script async crossorigin="anonymous" data-clerk-publishable-key="${escapeHtml(config.clerkPublishableKey)}" src="${escapeHtml(clerkJsScript)}"></script><script>
 const SLACK_KEYS=['CODEX_CHAT_SLACK_ENABLED','CODEX_CHAT_BASE_URL','CODEX_CHAT_SLACK_EVENTS_PATH','SLACK_SIGNING_SECRET','SLACK_BOT_TOKEN','SLACK_APP_TOKEN'];
 const CONFIG=JSON.parse(document.getElementById('brain-admin-config').textContent);
 let lastManifestText='';
 function clerkEmail(user){const emails=user?.emailAddresses||[];const primary=emails.find(e=>e?.id===user?.primaryEmailAddressId)||emails[0]||user?.primaryEmailAddress;return primary?.emailAddress||user?.primaryEmailAddress?.emailAddress||''}
-async function loadClerk(){if(!CONFIG.publishableKey)return null;for(let i=0;i<80&&!window.Clerk;i++)await new Promise(r=>setTimeout(r,100));if(!window.Clerk)return null;await Clerk.load();const email=clerkEmail(Clerk.user)||CONFIG.adminEmail;if(email)document.getElementById('account-email').textContent=email;return Clerk}
+async function loadClerk(){if(!CONFIG.publishableKey)return null;for(let i=0;i<80&&!window.Clerk;i++)await new Promise(r=>setTimeout(r,100));if(!window.Clerk)return null;await Clerk.load(window.__internal_ClerkUICtor?{ui:{ClerkUI:window.__internal_ClerkUICtor}}:undefined);const email=clerkEmail(Clerk.user)||CONFIG.adminEmail;if(email)document.getElementById('account-email').textContent=email;return Clerk}
 async function signOut(){try{const clerk=await loadClerk();if(clerk&&clerk.signOut){await clerk.signOut({redirectUrl:CONFIG.signInUrl});return}}catch(e){document.getElementById('account-error').textContent=e?.message||String(e)}location.assign(CONFIG.signInUrl)}
 async function tokenHeaders(){if(window.Clerk&&Clerk.session&&Clerk.session.getToken){try{return {authorization:'Bearer '+await Clerk.session.getToken()}}catch{}}return {}}
 async function api(path,options={}){const headers={...(await tokenHeaders()),...(options.headers||{})};if(options.body)headers['content-type']='application/json';const res=await fetch(CONFIG.apiBase+path,{...options,headers});const text=await res.text();let body;try{body=JSON.parse(text)}catch{body={raw:text}}if(!res.ok)throw Object.assign(new Error(body.error||res.statusText),{status:res.status,payload:body});return body}
@@ -44,12 +91,16 @@ async function runOperation(){try{show('op-result',await api('/codex-chat/operat
 }
 
 export function renderBrainAdminSignInPage(config: BrainAdminServiceConfig, redirectUrl: string): string {
-  const payload = JSON.stringify({ publishableKey: config.clerkPublishableKey, redirectUrl });
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in to Brain Control Plane</title><style>body{font:16px system-ui;margin:3rem;max-width:720px;background:#0f172a;color:#e5e7eb}.card{border:1px solid #334155;border-radius:16px;padding:24px;background:#111827}.bad{color:#f87171}.muted{color:#94a3b8}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.hidden{display:none}button,a.button{box-sizing:border-box;font:inherit;border-radius:10px;border:1px solid #475569;background:#2563eb;color:#e5e7eb;padding:10px;text-decoration:none;display:inline-block;cursor:pointer}button.secondary,a.secondary{background:#1f2937}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}</style></head><body><section class="card"><h1>Sign in to Brain Control Plane</h1><p>Use an allowlisted Clerk account.</p><section id="current-account" class="hidden"><h2>Current Clerk account</h2><p class="muted">You are already signed in as <span id="account-email" class="mono">unknown account</span>.</p><p>If this account is not allowlisted, sign out and choose another account.</p><div class="row"><a class="button" href="${escapeHtml(redirectUrl)}">Continue to admin</a><button class="secondary" onclick="signOut()">Sign out / switch account</button></div></section><div id="sign-in"></div><p id="error" class="bad"></p></section><script type="application/json" id="config">${escapeHtml(payload)}</script><script async crossorigin="anonymous" data-clerk-publishable-key="${escapeHtml(config.clerkPublishableKey)}" src="https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js"></script><script>const c=JSON.parse(document.getElementById('config').textContent);function clerkEmail(user){const emails=user?.emailAddresses||[];const primary=emails.find(e=>e?.id===user?.primaryEmailAddressId)||emails[0]||user?.primaryEmailAddress;return primary?.emailAddress||user?.primaryEmailAddress?.emailAddress||''}async function signOut(){try{await Clerk.signOut({redirectUrl:location.href})}catch(e){document.getElementById('error').textContent=e?.message||String(e)}}async function mount(){for(let i=0;i<80&&!window.Clerk;i++)await new Promise(r=>setTimeout(r,100));if(!window.Clerk){document.getElementById('error').textContent='Clerk did not load. Use the browser account controls or clear this site session, then retry.';return}await Clerk.load();if(Clerk.user){document.getElementById('account-email').textContent=clerkEmail(Clerk.user)||'unknown Clerk account';document.getElementById('current-account').classList.remove('hidden');return}Clerk.mountSignIn(document.getElementById('sign-in'),{forceRedirectUrl:c.redirectUrl,fallbackRedirectUrl:c.redirectUrl});}mount().catch(e=>document.getElementById('error').textContent=e.message||String(e));</script></body></html>`;
+  const payload = jsonScriptPayload({ publishableKey: config.clerkPublishableKey, redirectUrl });
+  const clerkUiScript = clerkUiScriptUrl(config);
+  const clerkJsScript = clerkJsScriptUrl(config);
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in to Brain Control Plane</title><style>body{font:16px system-ui;margin:3rem;max-width:720px;background:#0f172a;color:#e5e7eb}.card{border:1px solid #334155;border-radius:16px;padding:24px;background:#111827}.bad{color:#f87171}.muted{color:#94a3b8}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.hidden{display:none}button,a.button{box-sizing:border-box;font:inherit;border-radius:10px;border:1px solid #475569;background:#2563eb;color:#e5e7eb;padding:10px;text-decoration:none;display:inline-block;cursor:pointer}button.secondary,a.secondary{background:#1f2937}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}</style></head><body><section class="card"><h1>Sign in to Brain Control Plane</h1><p>Use an allowlisted Clerk account.</p><section id="current-account" class="hidden"><h2>Current Clerk account</h2><p class="muted">You are already signed in as <span id="account-email" class="mono">unknown account</span>.</p><p>If this account is not allowlisted, sign out and choose another account.</p><div class="row"><a class="button" href="${escapeHtml(redirectUrl)}">Continue to admin</a><button class="secondary" onclick="signOut()">Sign out / switch account</button></div></section><div id="sign-in"></div><p id="error" class="bad"></p></section><script type="application/json" id="config">${payload}</script><script async crossorigin="anonymous" src="${escapeHtml(clerkUiScript)}"></script><script async crossorigin="anonymous" data-clerk-publishable-key="${escapeHtml(config.clerkPublishableKey)}" src="${escapeHtml(clerkJsScript)}"></script><script>const c=JSON.parse(document.getElementById('config').textContent);function clerkEmail(user){const emails=user?.emailAddresses||[];const primary=emails.find(e=>e?.id===user?.primaryEmailAddressId)||emails[0]||user?.primaryEmailAddress;return primary?.emailAddress||user?.primaryEmailAddress?.emailAddress||''}async function signOut(){try{await Clerk.signOut({redirectUrl:location.href})}catch(e){document.getElementById('error').textContent=e?.message||String(e)}}async function mount(){for(let i=0;i<80&&(!window.Clerk||!window.__internal_ClerkUICtor);i++)await new Promise(r=>setTimeout(r,100));if(!window.Clerk||!window.__internal_ClerkUICtor){document.getElementById('error').textContent='Clerk sign-in UI did not load. Check browser blockers, then retry.';return}await Clerk.load({ui:{ClerkUI:window.__internal_ClerkUICtor}});if(Clerk.user){document.getElementById('account-email').textContent=clerkEmail(Clerk.user)||'unknown Clerk account';document.getElementById('current-account').classList.remove('hidden');return}Clerk.mountSignIn(document.getElementById('sign-in'),{forceRedirectUrl:c.redirectUrl,fallbackRedirectUrl:c.redirectUrl});}mount().catch(e=>document.getElementById('error').textContent=e.message||String(e));</script></body></html>`;
 }
 
 export function renderBrainAdminDeniedPage(config: BrainAdminServiceConfig, error: string, signInUrl: string, accountEmail = ""): string {
-  const payload = JSON.stringify({ publishableKey: config.clerkPublishableKey, signInUrl });
+  const payload = jsonScriptPayload({ publishableKey: config.clerkPublishableKey, signInUrl });
+  const clerkUiScript = clerkUiScriptUrl(config);
+  const clerkJsScript = clerkJsScriptUrl(config);
   const identity = accountEmail ? `<p class="muted">Current Clerk account: <span class="mono">${escapeHtml(accountEmail)}</span></p>` : `<p class="muted">Current Clerk account could not be verified for this request.</p>`;
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Brain Control Plane denied</title><style>body{font:16px system-ui;margin:3rem;max-width:720px;background:#0f172a;color:#e5e7eb}.card{border:1px solid #334155;border-radius:16px;padding:24px;background:#111827}.bad{color:#f87171}.muted{color:#94a3b8}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}a,button{box-sizing:border-box;font:inherit;border-radius:10px;border:1px solid #475569;background:#2563eb;color:#e5e7eb;padding:10px;text-decoration:none;display:inline-block;cursor:pointer}button.secondary,a.secondary{background:#1f2937}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}</style></head><body><section class="card"><h1>Brain Control Plane access denied</h1><p class="bad">${escapeHtml(error)}</p>${identity}<p>Admin routes require Clerk auth and a non-empty server-side allowlist. Access fails closed; use the action below to switch accounts if this is the wrong Clerk session.</p><div class="row"><a href="${escapeHtml(signInUrl)}">Sign in or switch Clerk account</a><button class="secondary" onclick="signOut()">Sign out</button></div><p id="error" class="bad"></p></section><script type="application/json" id="config">${escapeHtml(payload)}</script><script async crossorigin="anonymous" data-clerk-publishable-key="${escapeHtml(config.clerkPublishableKey)}" src="https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js"></script><script>const c=JSON.parse(document.getElementById('config').textContent);async function signOut(){try{for(let i=0;i<80&&!window.Clerk;i++)await new Promise(r=>setTimeout(r,100));if(window.Clerk){await Clerk.load();await Clerk.signOut({redirectUrl:c.signInUrl});return}}catch(e){document.getElementById('error').textContent=e?.message||String(e)}location.assign(c.signInUrl)}</script></body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Brain Control Plane denied</title><style>body{font:16px system-ui;margin:3rem;max-width:720px;background:#0f172a;color:#e5e7eb}.card{border:1px solid #334155;border-radius:16px;padding:24px;background:#111827}.bad{color:#f87171}.muted{color:#94a3b8}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}a,button{box-sizing:border-box;font:inherit;border-radius:10px;border:1px solid #475569;background:#2563eb;color:#e5e7eb;padding:10px;text-decoration:none;display:inline-block;cursor:pointer}button.secondary,a.secondary{background:#1f2937}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}</style></head><body><section class="card"><h1>Brain Control Plane access denied</h1><p class="bad">${escapeHtml(error)}</p>${identity}<p>Admin routes require Clerk auth and a non-empty server-side allowlist. Access fails closed; use the action below to switch accounts if this is the wrong Clerk session.</p><div class="row"><a href="${escapeHtml(signInUrl)}">Sign in or switch Clerk account</a><button class="secondary" onclick="signOut()">Sign out</button></div><p id="error" class="bad"></p></section><script type="application/json" id="config">${payload}</script><script async crossorigin="anonymous" src="${escapeHtml(clerkUiScript)}"></script><script async crossorigin="anonymous" data-clerk-publishable-key="${escapeHtml(config.clerkPublishableKey)}" src="${escapeHtml(clerkJsScript)}"></script><script>const c=JSON.parse(document.getElementById('config').textContent);async function signOut(){try{for(let i=0;i<80&&!window.Clerk;i++)await new Promise(r=>setTimeout(r,100));if(window.Clerk){await Clerk.load(window.__internal_ClerkUICtor?{ui:{ClerkUI:window.__internal_ClerkUICtor}}:undefined);await Clerk.signOut({redirectUrl:c.signInUrl});return}}catch(e){document.getElementById('error').textContent=e?.message||String(e)}location.assign(c.signInUrl)}</script></body></html>`;
 }

@@ -1,8 +1,9 @@
 # Brain control plane
 
-Brain is the setup and operations control plane for Tim's assistant stack. The
-production servant runtime remains `codex-chat`; Brain does not vendor or merge
-runtime repositories.
+Brain is the external app plus setup/operations control plane for Tim's
+assistant stack. The Brain source repo is abstract/source-only; concrete running
+services are named deployments. The production servant runtime remains
+`codex-chat`; Brain does not vendor or merge runtime repositories.
 
 Brain must not encode Tim-assistant domain workflows, prompts, skills, or intent
 rules. It wraps deployment and control-plane operations for `codex-chat` and
@@ -36,16 +37,18 @@ workspace state:
 <brain-workspace-root>/state/control-plane/deployments.json
 ```
 
-For the current remote Brain workspace this resolves to:
+For the current `tim-main-brain` deployment, the private workspace is local to
+`codex-chat-assistant-1` and resolves to:
 
 ```text
-/home/brain/.brain/workspace/state/control-plane/deployments.json
+/home/tim/.assistant-claude/workspace/state/control-plane/deployments.json
 ```
 
 If a local project note or registry entry mentions a deployment, treat it as a
-secondary pointer only. `brainctl stack status` reports the canonical metadata
-path plus a no-network read command; pass `--metadata-file` only for offline
-tests or local mirrors.
+secondary pointer only. Select a named deployment first; for this conversation
+that is `tim-main-brain` unless Tim specifies otherwise. `brainctl stack status`
+reports the canonical metadata path plus a no-network read command; pass
+`--metadata-file` only for offline tests or local mirrors.
 
 ## Current command surface
 

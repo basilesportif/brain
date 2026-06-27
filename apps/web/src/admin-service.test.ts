@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type http from "node:http";
 import { authorizeBrainAdminRequest, parseAdminAllowedEmails } from "./admin-auth.js";
-import { renderBrainAdminSignInPage } from "./admin-page.js";
+import { renderBrainAdminDeniedPage, renderBrainAdminSignInPage } from "./admin-page.js";
 import { createBrainAdminServer, type BrainAdminServiceConfig, type BrainAdminServiceDeps } from "./admin-service.js";
 import { mergeEnvFileText } from "./env-file.js";
 
@@ -71,6 +71,14 @@ function authHeaders() {
   return { authorization: "Bearer test-token" };
 }
 
+function extractJsonScript(html: string, id: string): unknown {
+  const pattern = new RegExp(`<script type="application/json" id="${id}">([\\s\\S]*?)</script>`);
+  const match = pattern.exec(html);
+  assert.ok(match, `missing JSON script #${id}`);
+  return JSON.parse(match[1] ?? "");
+}
+
+
 async function writeFileRecursive(filePath: string, content: string): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true });
   await writeFile(filePath, content, { mode: 0o755 });
@@ -135,11 +143,18 @@ test("brain admin auth failures show signed-in account and switch-account action
   }
 });
 
-test("brain admin sign-in page does not hide an existing Clerk account", () => {
-  const html = renderBrainAdminSignInPage(config("/tmp/brain-admin-sign-in"), "https://brain.example.test/admin");
-  assert.match(html, /Current Clerk account/);
-  assert.match(html, /Sign out \/ switch account/);
-  assert.match(html, /Continue to admin/);
+test("brain admin auth pages embed parseable JSON config and keep account controls visible", () => {
+  const cfg = config("/tmp/brain-admin-sign-in", { clerkPublishableKey: `pk_test_<unsafe>&value` });
+  const signInHtml = renderBrainAdminSignInPage(cfg, "https://brain.example.test/admin?next=<unsafe>&ok=1");
+  assert.deepEqual(extractJsonScript(signInHtml, "config"), { publishableKey: `pk_test_<unsafe>&value`, redirectUrl: "https://brain.example.test/admin?next=<unsafe>&ok=1" });
+  assert.match(signInHtml, /Current Clerk account/);
+  assert.match(signInHtml, /Sign out \/ switch account/);
+  assert.match(signInHtml, /Continue to admin/);
+
+  const deniedHtml = renderBrainAdminDeniedPage(cfg, "forbidden", "https://brain.example.test/admin/auth/sign-in", "other@example.test");
+  assert.deepEqual(extractJsonScript(deniedHtml, "config"), { publishableKey: `pk_test_<unsafe>&value`, signInUrl: "https://brain.example.test/admin/auth/sign-in" });
+  assert.match(deniedHtml, /other@example\.test/);
+  assert.match(deniedHtml, /Sign out/);
 });
 
 test("brain admin settings identify the concrete local instance separately from repo registry", async () => {

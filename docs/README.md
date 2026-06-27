@@ -4,6 +4,9 @@ Documentation skeleton for the `brain` control-plane repository.
 
 - `control-plane.md` — Brain as setup/orchestration control plane for the
   `codex-chat` servant runtime stack.
+- `../plans/slack-company-brain-runtime.md` — canonical Slack/company-brain
+  roadmap and Brain/codex-chat ownership boundary for the active
+  `tim-main-brain` deployment.
 - `architecture.md` — target component boundaries and data flow.
 - `directory-structure.md` — intended tree and ownership rules.
 - `private-workspace-boundary.md` — what must stay outside git/public packages.

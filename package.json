@@ -14,7 +14,8 @@
     "check": "node scripts/check-skeleton.mjs && pnpm run build && node --test \"dist/**/*.test.js\" \"packages/*/dist/**/*.test.js\" \"packages/config/*/dist/**/*.test.js\" \"packages/providers/*/dist/**/*.test.js\" \"entrypoints/*/dist/**/*.test.js\" \"apps/*/dist/**/*.test.js\" && node dist/brainctl.js doctor --config examples/config/runtime.yaml --pack assistant-packs/core",
     "test": "pnpm run check",
     "brainctl": "node dist/brainctl.js",
-    "brain-admin": "node apps/web/dist/brain-admin.js"
+    "brain-admin": "node apps/web/dist/brain-admin.js",
+    "smoke:admin-signin": "pnpm run build && node apps/web/smoke/admin-signin-smoke.mjs"
   },
   "engines": {
     "node": ">=24",
@@ -37,6 +38,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.7.2",
+    "playwright": "1.56.1",
     "typescript": "^5.9.3"
   }
 }

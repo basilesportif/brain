@@ -1,10 +1,12 @@
 # brain
 
-`brain` is the control-plane and setup-orchestrator repository for Tim's
-assistant stack. Its first responsibility is to resolve, plan, deploy, and
-operate the servant runtime stack made of separate repositories:
+`brain` is the external app/control-plane and setup-orchestrator repository for
+Tim's assistant stack. The repo is abstract/source-only: concrete services are
+named Brain deployments with their own host, env, service, and path settings.
+Its first responsibility is to resolve, plan, deploy, and operate the servant
+runtime stack made of separate repositories:
 
-- `codex-chat` — the servant Telegram/Codex runtime service.
+- `codex-chat` — the internal multi-surface runtime/adapter/engine.
 - `assistant-agent-logic` — reusable assistant logic, scripts, prompts, and
   setup resources.
 - `assistant-agent-data` / workspace — private durable workspace data and
@@ -23,7 +25,15 @@ runtime packages remain experimental/lab compatibility surfaces; they are not
 the production servant runtime source of truth. The web/admin promotion plan is
 captured in `plans/brain-control-plane.md`.
 
-Production service target: `codex-chat.service`. Brain must not be installed as
+Current local deployment target: `tim-main-brain` on
+`codex-chat-assistant-1` (`178.104.208.141`). It runs `brain-admin.service` for
+`https://brain.decisive-outcomes.com/admin` beside the local
+`codex-chat.service` checkout at `/home/tim/pkg/tim/codex-chat`. The public
+Slack Events URL is `https://brain.decisive-outcomes.com/api/slack/events`;
+Brain/Caddy reverse-proxies the raw signed request to codex-chat so codex-chat
+verifies Slack signatures and owns runtime behavior.
+
+Production runtime target: `codex-chat.service`. Brain must not be installed as
 the live assistant (`brain-personal.service` / `brainctl run`) and must not
 substitute its experimental Telegram/Codex runtime for `codex-chat`.
 
@@ -135,7 +145,7 @@ pnpm run brainctl workspace run --path ~/.brain/workspace todo-list.js
 
 ## Design goals
 
-- Brain is the control plane first; the next phase is its long-running
+- Brain is the external app/control plane first; the next phase is its long-running
   web/admin process and orchestration layer. Servant runtime execution belongs
   to `codex-chat` unless and until a future Brain runtime graduates from the
   lab.
@@ -152,6 +162,9 @@ pnpm run brainctl workspace run --path ~/.brain/workspace todo-list.js
   Brain.
 - Treat channel-specific bots as servant runtime/entrypoint concerns, not as
   the control-plane core.
+- Treat `tim-main-brain` as one concrete deployment of the abstract Brain
+  source repo; do not infer service paths from retired single deploy-host
+  metadata.
 - Configure one primary active entrypoint per workspace by default through an explicit `enabledEntrypoints` map.
 - Route outbound actions back to the originating entrypoint unless deliberate config says otherwise.
 - Keep assistant prompts and workflows generic around Brain inbound events, active-entrypoint metadata, and outbound actions, while preserving Telegram behavior through the Telegram entrypoint adapter.

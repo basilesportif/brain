@@ -12,7 +12,7 @@ instance is a concrete web service with its own env/settings for where
 services live. `brainctl stack status` and `brainctl stack plan` help plan new
 or migrated servant stacks, but a running Brain instance does not use the repo
 registry as its source of truth. Instance env/settings and the private
-deployment ledger do. `codex-chat` is the servant Telegram/Codex runtime,
+deployment ledger do. `codex-chat` is the internal multi-surface runtime/adapter/engine,
 `assistant-agent-logic` is a separate logic repository, and
 `assistant-agent-data` / workspace is separate private state. Brain runtime
 packages, provider adapters, and Telegram entrypoint seams are lab/compatibility
