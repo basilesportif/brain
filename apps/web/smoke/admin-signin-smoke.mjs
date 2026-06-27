@@ -59,9 +59,17 @@ async function runAdminDashboardScenario(page, baseUrl, viewport) {
   await page.locator('text=Brain').first().waitFor({ state: 'visible', timeout: 5_000 });
   const navScope = viewport ? '.mobile-tabs' : '.side';
   await page.locator(`${navScope} a[href="#overview"]`).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator(`${navScope} a[href="#slack-setup"]`).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator(`${navScope} a[href="#mission"]`).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator(`${navScope} a[href="#slack"]`).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator(`${navScope} a[href="#manifest"]`).waitFor({ state: 'visible', timeout: 5_000 });
-  await page.locator('text=Deploy / Restart').first().waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#mode-title', { hasText: 'Slack setup required' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#slack-setup').waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#mission').waitFor({ state: 'hidden', timeout: 5_000 });
+  await page.locator('button:has-text("Skip Slack for now")').first().click();
+  await page.locator('#mission-title', { hasText: 'Mission Control' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#mission').waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#deploy-title', { hasText: 'Deploy / Restart' }).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#op-approval').waitFor({ state: 'detached', timeout: 5_000 });
   await page.locator('#op-run').waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#op').selectOption('restart');

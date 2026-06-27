@@ -1,7 +1,7 @@
 # Brain admin UI redesign plan
 
 Date: 2026-06-27  
-Status: plan only; no UI implementation in this change
+Status: integrated plan updated and implementation completed in this change
 
 ## Scope
 
@@ -379,3 +379,117 @@ operator checklist until the redesign instructions are finalized.
   switching.
 - Raw JSON/debug output remains available under Advanced for operators, but it is
   not the primary UI.
+
+## 2026-06-27 integrated state-aware operator console implementation plan
+
+Status: implementation-ready for this change.
+
+This update integrates the attached **State-Aware Operator Console Redesign Plan**
+with the existing Brain admin/control-plane plans (`plans/brain-control-plane.md`,
+`plans/slack-company-brain-runtime.md`, and this admin UI redesign plan) without
+changing Brain/codex-chat ownership boundaries or server-side API/security
+semantics.
+
+### Boundary commitments
+
+- Brain continues to own the Clerk-protected `/admin` operator console,
+  settings-management UX, write-only env/Slack settings handoff, plan-first
+  deploy/restart UI, and Slack setup runbook/wizard wrapper.
+- `codex-chat` continues to own Slack signature verification, runtime event
+  normalization, adapter behavior, and the no-secret Slack manifest contract that
+  Brain renders from the checked-out `codex-chat` script.
+- This implementation is UI/client-only except tests/docs. It must not expose
+  secret values, persist skip/dismiss state, relax exact approval strings, add
+  new mutating APIs, or restart `codex-chat`/`codex-chat` parent processes.
+- Current APIs only expose presence metadata, not live Slack callback/test-event
+  verification. The UI therefore derives `not_configured`, `partial`, and
+  `verified` from required Slack env presence, and labels live callback/test-event
+  verification as manual/diagnostic until a future Brain API exists. `degraded`
+  remains a future state once durable verification telemetry exists.
+
+### State model and default view
+
+Client state on each page load:
+
+```txt
+skipped_for_session = false
+slack_state = derive from required Slack settings presence:
+  none present       -> not_configured
+  some missing       -> partial
+  all required set   -> verified
+```
+
+Default view logic:
+
+```txt
+if slack_state in {not_configured, partial} and !skipped_for_session:
+  show Slack Setup Mode as the dominant primary panel
+else:
+  show Mission Control Mode as the dominant primary panel
+```
+
+`Skip Slack for now` sets only the in-memory `skipped_for_session` flag and
+switches to Mission Control. It is intentionally not written to localStorage,
+sessionStorage, server state, env files, or audit logs; a reload restores the
+Slack wizard when setup is still incomplete.
+
+### Page structure to implement now
+
+1. **Persistent header**
+   - Keep compact Brain identity, target service/host, status chips, refresh, and
+     account menu/switch-account affordance.
+   - Keep dangerous actions out of the global header.
+
+2. **Primary state / next-action panel**
+   - Add a dominant `#mode-panel` immediately below the header/status strip.
+   - Show Slack setup required/partial/connected copy, current mode, primary and
+     secondary actions, details link, and session skip status.
+   - Use green/yellow/red/blue/gray status semantics; only required missing
+     values should feel urgent.
+
+3. **Slack Setup Mode**
+   - Add a checklist-style wizard section using existing safe controls:
+     public base URL/events URL confirmation, secret presence handoff,
+     manifest render/copy/download, Slack app install checklist, verification
+     diagnostics, live canary guidance, and restart-if-needed link.
+   - Wizard fields remain write-only and empty; the canonical runbook remains
+     `docs/slack-setup-runbook.md`.
+
+4. **Mission Control Mode**
+   - Add a `Mission Control` section that summarizes system health, Slack health,
+     runtime config, deploy/restart state, recent activity, and debugging links.
+   - Existing Overview/Slack/Manifest/Env/Deploy/Audit/Advanced sections remain
+     available as progressively disclosed drill-downs.
+
+5. **Slack settings table**
+   - Reorganize rows by Public routing, Slack credentials, and Feature flags.
+   - Translate presence into operator states: `required_missing`,
+     `required_present`, `optional_missing`, `secret_present`, and
+     `verified/presence_only` where applicable.
+   - Include recommended action text instead of raw “not set” only.
+
+6. **Deploy/restart safety**
+   - Preserve existing plan-first client state, live-operation confirmation modal,
+     exact server-side approval semantics, redacted command/log display, and
+     Brain self-service refusal.
+   - Do not add any global restart shortcut.
+
+7. **Tests/smoke**
+   - Extend render assertions for state-aware mode panel, Slack skip button,
+     wizard checklist, Mission Control nav/section, grouped Slack settings, and
+     no-secret rendering.
+   - Extend Playwright smoke to check the Slack setup default, skip-for-session
+     transition, Mission Control section, mobile tabs, and account menu.
+   - Run `pnpm run check` and `pnpm run smoke:admin-signin`.
+
+### Acceptance criteria for this implementation slice
+
+- Reloading the page with incomplete Slack setup defaults to Slack Setup Mode.
+- Clicking `Skip Slack for now` switches to Mission Control without persistence.
+- When required Slack settings are all present, Mission Control is the default.
+- Operators can still reach raw `/health`, `/settings`, `/slack/settings`, and
+  last response under Advanced.
+- Slack and env writes remain presence-only/write-only, clear input values after
+  attempts, and display restart-required guidance.
+- Plan/restart/deploy use the existing `/api/admin/brain/codex-chat/operation`
+  contract with no weakened approval or redaction semantics.
