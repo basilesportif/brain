@@ -180,7 +180,12 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /Overview/);
   assert.match(html, /State-aware operator console/);
   assert.match(html, /Slack setup wizard/);
+  assert.match(html, /id="slack-attention"/);
+  assert.match(html, /Slack setup needs attention/);
+  assert.match(html, /Slack setup is incomplete/);
+  assert.match(html, /Continue Slack setup/);
   assert.match(html, /Skip Slack for now/);
+  assert.match(html, /Missing required setting/);
   assert.match(html, /Mission Control/);
   assert.match(html, /Slack Details/);
   assert.match(html, /Manifest/);
