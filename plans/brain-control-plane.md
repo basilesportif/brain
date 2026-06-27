@@ -6,8 +6,12 @@ Status: architecture decision and phased implementation plan; Phase 3 skeleton s
 ## Decision
 
 Brain is the long-term project home and always-on web/admin control plane for
-`codex-chat` and company-brain operations. `codex-chat` remains the servant
-runtime: it owns channel/runtime adapters, the exact Slack manifest contract,
+`codex-chat` and company-brain operations. Distinguish the abstract Brain
+project/repo from each concrete Brain instance: an instance runs as a web
+service and owns env/settings for the local or remote `codex-chat`,
+`assistant-agent-logic`, workspace, env files, and services it controls. The
+repo registry is useful context, not the source of truth for a running instance.
+`codex-chat` remains the servant runtime: it owns channel/runtime adapters, the exact Slack manifest contract,
 Slack Events API handling, `ActorContext`/`OutputTarget` runtime behavior,
 Slack send/reply behavior, and subagent/runtime orchestration. Slack is another
 `codex-chat` surface adapter, not a separate Brain runtime.
@@ -109,8 +113,12 @@ API with these modules:
 
 ### Stack overview
 
+- show the concrete Brain instance name/host/IP and explicitly state that
+  instance env/settings are authoritative for that running service;
+- show local or remote `codex-chat` host/IP/path/service/env/config selected by
+  the instance, not by stale repo-registry deployment records;
 - show resolved repo-registry entries for `brain`, `codex-chat`,
-  `assistant-agent-logic`, and `assistant-agent-data`;
+  `assistant-agent-logic`, and `assistant-agent-data` as read-only context;
 - show deployed refs, resolved commit SHAs, service names, env file paths, and
   health-check endpoints as metadata;
 - show whether local registry pointers match canonical private deployment
@@ -270,13 +278,21 @@ not a codex-chat admin expansion. Current capabilities are intentionally narrow:
 
 - Clerk-protected `/admin` and `/api/admin/brain/*` routes with fail-closed
   server-side email allowlist.
-- health/settings views for Brain auth, repo-registry pointers, codex-chat
-  env/config metadata, and operation configuration.
+- health/settings views for Brain auth, concrete instance host/IP/workspace
+  paths, local codex-chat host/IP/path/service/env/config metadata, repo-registry
+  read-only context, and operation configuration.
 - write-only codex-chat env/config entry writes with an allowlist and explicit
   approval phrase.
 - approved plan/deploy/restart operation APIs for `codex-chat.service`, with
   deployment command supplied by server env and audit records that do not include
   secret values.
+
+2026-06-27 clarification: this deployed instance runs beside the active local
+`codex-chat.service` on `codex-chat-assistant-1` (`178.104.208.141`) and should
+show/control `/home/tim/pkg/tim/codex-chat`,
+`/home/tim/pkg/tim/assistant-agent-logic`, and
+`/home/tim/.assistant-claude/workspace` from instance settings/env. Do not treat
+repo-registry remote deploy targets as authoritative for this instance.
 
 Remaining Phase 3 work: richer rollback, checkout/ref selection, lockfile
 install/build orchestration, assistant-agent-logic validation from selected refs,

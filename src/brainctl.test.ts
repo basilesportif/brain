@@ -1494,7 +1494,7 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
     assert.equal(statusJson.details.servantRuntime.deploy.envFile, "/etc/codex-chat/env");
     assert.equal(statusJson.details.servantRuntime.deploy.configPath, "/etc/codex-chat/codex-chat.toml");
     assert.deepEqual(statusJson.details.servantRuntime.deploy.envVars, ["TELEGRAM_BOT_TOKEN", "OPENAI_API_KEY"]);
-    assert.deepEqual(statusJson.details.servantRuntime.deploy.expectedTelegramBot, { id: "8820527937", username: "AnnaBrainBot" });
+    assert.deepEqual(statusJson.details.servantRuntime.deploy.expectedTelegramBot, { id: "1234567890", username: "ExampleServantBot" });
     assert.equal(statusJson.details.assistantLogic.alias, "assistant-claude");
     assert.equal(statusJson.details.assistantLogic.repoName, "assistant-agent-logic");
     assert.equal(statusJson.details.assistantLogic.path, "/srv/src/assistant-agent-logic");
@@ -1517,7 +1517,7 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
     assert.ok(statusJson.details.secretMetadataChecks.every((check) => check.value === "redacted" && check.metadataOnly));
     assert.ok(statusJson.details.secretMetadataChecks.some((check) => check.plannedCheck.includes("stat -c") && check.plannedCheck.includes("/etc/codex-chat/env")));
     assert.ok(statusJson.details.secretMetadataChecks.some((check) => check.kind === "env" && check.plannedCheck.includes("grep -qE")));
-    assert.ok(statusJson.details.secretMetadataChecks.some((check) => check.kind === "telegram-getMe" && check.plannedCheck.includes("BRAIN_EXPECTED_BOT_USERNAME=AnnaBrainBot")));
+    assert.ok(statusJson.details.secretMetadataChecks.some((check) => check.kind === "telegram-getMe" && check.plannedCheck.includes("BRAIN_EXPECTED_BOT_USERNAME=ExampleServantBot")));
 
     const plan = spawnBrainctl(["stack", "plan", "--registry", registry, "--repo", brainRepo, "--setup-context", setupContext, "--workspace", "personal"], {
       TELEGRAM_BOT_TOKEN: secretValue,
@@ -1557,7 +1557,7 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
     assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "clone-update-codex-chat-deploy" && action.executor === "ssh" && /ssh codex@app\.example\.test/.test(action.displayCommand ?? "")));
     assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "install-assistant-agent-logic-deps" && action.executor === "ssh" && /ssh dev\.example\.test/.test(action.displayCommand ?? "") && /BRAIN_COMPOSIO_WORKFLOW_DEPS/.test(action.displayCommand ?? "")));
     assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "migrate-telegram-pairing-state" && /BRAIN_PAIRING_MIGRATION/.test(action.displayCommand ?? "") && /rawIdentifiersPrinted=false/.test(action.displayCommand ?? "")));
-    assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "install-codex-chat-systemd" && /BRAIN_EXPECTED_BOT_USERNAME=AnnaBrainBot/.test(action.displayCommand ?? "") && /systemctl restart codex-chat\.service/.test(action.displayCommand ?? "")));
+    assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "install-codex-chat-systemd" && /BRAIN_EXPECTED_BOT_USERNAME=ExampleServantBot/.test(action.displayCommand ?? "") && /systemctl restart codex-chat\.service/.test(action.displayCommand ?? "")));
     assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "assistant-agent-data-clone-or-init-placeholder" && action.executor === "ssh" && /ssh brain@brain\.example\.test/.test(action.displayCommand ?? "")));
     assert.ok(planJson.details.plan.forbidden.some((line) => /Do not vendor or merge/.test(line)));
   } finally {
@@ -1980,7 +1980,7 @@ function stackRegistryFixture(options: {
   const sshIdentity = options.sshIdentity ?? "codex@app.example.test";
   const envFile = options.envFile ?? "/etc/codex-chat/env";
   const configPath = options.configPath ?? "/etc/codex-chat/codex-chat.toml";
-  const expectedTelegramBot = options.expectedTelegramBot ?? { id: "8820527937", username: "AnnaBrainBot" };
+  const expectedTelegramBot = options.expectedTelegramBot ?? { id: "1234567890", username: "ExampleServantBot" };
   const codexRemoteUrl = options.codexRemoteUrl ?? "git@github.com:example/codex-chat.git";
   const assistantLogicRemoteUrl = options.assistantLogicRemoteUrl ?? "git@github.com:example/assistant-agent-logic.git";
   const assistantLogicEnvironment = options.assistantLogicDeployHost || options.assistantLogicDeployPath

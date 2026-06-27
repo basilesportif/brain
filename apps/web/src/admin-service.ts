@@ -37,7 +37,15 @@ export interface BrainAdminServiceConfig {
   clerkPublishableKey: string;
   clerkSecretKey: string;
   clerkAllowedEmails: string;
+  instanceName: string;
+  instanceHost: string;
+  instanceIp: string;
+  workspacePath: string;
+  assistantAgentLogicPath: string;
   repoRegistryPath: string;
+  codexChatHost: string;
+  codexChatIp: string;
+  codexChatPath: string;
   codexChatEnvFile: string;
   codexChatConfigFile?: string;
   codexChatServiceName: string;
@@ -65,6 +73,9 @@ export interface CommandResult {
 
 export function loadBrainAdminServiceConfig(env: NodeJS.ProcessEnv = process.env): BrainAdminServiceConfig {
   const allowedEnvKeys = splitCsv(env.BRAIN_CODEX_CHAT_ENV_KEYS || env.CODEX_CHAT_ADMIN_ALLOWED_ENV_KEYS || DEFAULT_ENV_KEYS.join(","));
+  const localHostname = os.hostname();
+  const localIp = defaultLocalIp();
+  const codexChatPath = env.BRAIN_CODEX_CHAT_PATH || "/home/tim/pkg/tim/codex-chat";
   return {
     enabled: boolEnv(env.BRAIN_ADMIN_ENABLED, true),
     host: env.BRAIN_ADMIN_HOST || "127.0.0.1",
@@ -74,14 +85,22 @@ export function loadBrainAdminServiceConfig(env: NodeJS.ProcessEnv = process.env
     clerkPublishableKey: (env.CLERK_PUBLISHABLE_KEY || env.BRAIN_CLERK_PUBLISHABLE_KEY || "").trim(),
     clerkSecretKey: (env.CLERK_SECRET_KEY || env.BRAIN_CLERK_SECRET_KEY || "").trim(),
     clerkAllowedEmails: (env.CLERK_ALLOWED_EMAILS || env.BRAIN_CLERK_ALLOWED_EMAILS || "").trim(),
+    instanceName: env.BRAIN_INSTANCE_NAME || "local-brain",
+    instanceHost: env.BRAIN_INSTANCE_HOST || env.BRAIN_CODEX_CHAT_HOST || localHostname,
+    instanceIp: env.BRAIN_INSTANCE_IP || env.BRAIN_CODEX_CHAT_IP || localIp,
+    workspacePath: env.BRAIN_WORKSPACE_PATH || "/home/tim/.assistant-claude/workspace",
+    assistantAgentLogicPath: env.BRAIN_ASSISTANT_AGENT_LOGIC_PATH || "/home/tim/pkg/tim/assistant-agent-logic",
     repoRegistryPath: env.BRAIN_REPO_REGISTRY_PATH || "/home/tim/.assistant-claude/workspace/.claude/repo-registry/index.yaml",
-    codexChatEnvFile: env.BRAIN_CODEX_CHAT_ENV_FILE || "~/.config/codex-chat/env",
-    codexChatConfigFile: env.BRAIN_CODEX_CHAT_CONFIG_FILE || undefined,
+    codexChatHost: env.BRAIN_CODEX_CHAT_HOST || env.BRAIN_INSTANCE_HOST || localHostname,
+    codexChatIp: env.BRAIN_CODEX_CHAT_IP || env.BRAIN_INSTANCE_IP || localIp,
+    codexChatPath,
+    codexChatEnvFile: env.BRAIN_CODEX_CHAT_ENV_FILE || "/home/tim/.config/codex-chat/env",
+    codexChatConfigFile: env.BRAIN_CODEX_CHAT_CONFIG_FILE || path.join(codexChatPath, "config/codex-chat.toml"),
     codexChatServiceName: env.BRAIN_CODEX_CHAT_SERVICE_NAME || "codex-chat.service",
     codexChatDeployCommand: env.BRAIN_CODEX_CHAT_DEPLOY_COMMAND || undefined,
     codexChatRestartCommand: env.BRAIN_CODEX_CHAT_RESTART_COMMAND || undefined,
     brainServiceName: env.BRAIN_SERVICE_NAME || "brain-admin.service",
-    auditLogPath: env.BRAIN_ADMIN_AUDIT_LOG || "~/.brain/control-plane/audit.jsonl",
+    auditLogPath: env.BRAIN_ADMIN_AUDIT_LOG || "/home/tim/.brain/control-plane/audit.jsonl",
     allowedEnvKeys,
     operationTimeoutMs: Number.parseInt(env.BRAIN_ADMIN_OPERATION_TIMEOUT_MS || "120000", 10),
   };
@@ -158,8 +177,12 @@ async function serviceHealth(config: BrainAdminServiceConfig) {
     uptimeSeconds: Math.round(process.uptime()),
     node: process.version,
     hostname: os.hostname(),
+    instance: instanceSummary(config),
     auth: authSummary(config),
     codexChat: {
+      host: config.codexChatHost,
+      ip: config.codexChatIp,
+      path: config.codexChatPath,
       serviceName: config.codexChatServiceName,
       envFile,
       configFile: config.codexChatConfigFile ? { path: config.codexChatConfigFile, configured: true } : { configured: false },
@@ -172,11 +195,20 @@ async function serviceSettings(config: BrainAdminServiceConfig) {
   return {
     routePath: config.routePath,
     publicBaseUrl: config.publicBaseUrl || null,
-    repoRegistry: await repoRegistrySummary(config.repoRegistryPath),
+    instance: instanceSummary(config),
+    repoRegistry: {
+      ...(await repoRegistrySummary(config.repoRegistryPath)),
+      sourceOfTruth: false,
+      role: "read-only context only; this running Brain instance is configured by its own env/settings",
+    },
     auth: authSummary(config),
     codexChat: {
+      host: config.codexChatHost,
+      ip: config.codexChatIp,
+      path: config.codexChatPath,
       serviceName: config.codexChatServiceName,
       env,
+      configFile: config.codexChatConfigFile ? { path: config.codexChatConfigFile, configured: true } : { configured: false },
       deployCommandConfigured: Boolean(config.codexChatDeployCommand),
       restartCommand: operationCommand(config, "restart") ? redactedCommand(operationCommand(config, "restart") ?? "") : null,
     },
@@ -235,7 +267,11 @@ function operationCommand(config: BrainAdminServiceConfig, operation: "plan" | "
   const restart = config.codexChatRestartCommand || `systemctl --user restart ${shellArg(config.codexChatServiceName)} || sudo systemctl restart ${shellArg(config.codexChatServiceName)}`;
   if (operation === "restart") return restart;
   return [
+    `# Brain instance: ${shellArg(config.instanceName)} on ${shellArg(config.instanceHost)} (${shellArg(config.instanceIp)})`,
+    `# codex-chat host/ip: ${shellArg(config.codexChatHost)} ${shellArg(config.codexChatIp)}`,
+    `# codex-chat path: ${shellArg(config.codexChatPath)}`,
     `# codex-chat env file: ${shellArg(resolveEnvFilePath(config.codexChatEnvFile))}`,
+    config.codexChatConfigFile ? `# codex-chat config file: ${shellArg(config.codexChatConfigFile)}` : "# codex-chat config file: not configured",
     config.codexChatDeployCommand ? `# deploy: ${config.codexChatDeployCommand}` : "# deploy: not configured; set BRAIN_CODEX_CHAT_DEPLOY_COMMAND",
     `# restart: ${restart}`,
   ].join("\n");
@@ -356,6 +392,28 @@ function isAdminRoutePath(pathname: string, routePath: string): boolean {
 
 function adminSignInPath(routePath: string): string {
   return `${routePath.replace(/\/+$/, "")}/auth/sign-in`;
+}
+
+function instanceSummary(config: BrainAdminServiceConfig) {
+  return {
+    project: "Brain",
+    instanceName: config.instanceName,
+    host: config.instanceHost,
+    ip: config.instanceIp,
+    workspacePath: config.workspacePath,
+    assistantAgentLogicPath: config.assistantAgentLogicPath,
+    configurationSource: "brain-admin environment/defaults",
+    repoRegistrySourceOfTruth: false,
+  };
+}
+
+function defaultLocalIp(): string {
+  for (const infos of Object.values(os.networkInterfaces())) {
+    for (const info of infos ?? []) {
+      if (info.family === "IPv4" && !info.internal) return info.address;
+    }
+  }
+  return "127.0.0.1";
 }
 
 function normalizeRoutePath(value: string): string {

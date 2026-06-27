@@ -18,7 +18,15 @@ function config(root: string, overrides: Partial<BrainAdminServiceConfig> = {}):
     clerkPublishableKey: "pk_test_example",
     clerkSecretKey: "sk_test_example",
     clerkAllowedEmails: "tim.galebach@gmail.com",
+    instanceName: "test-brain",
+    instanceHost: "brain.example.test",
+    instanceIp: "203.0.113.10",
+    workspacePath: path.join(root, "workspace"),
+    assistantAgentLogicPath: path.join(root, "assistant-agent-logic"),
     repoRegistryPath: path.join(root, "repo-registry.yaml"),
+    codexChatHost: "brain.example.test",
+    codexChatIp: "203.0.113.10",
+    codexChatPath: path.join(root, "codex-chat"),
     codexChatEnvFile: path.join(root, "codex-chat.env"),
     codexChatConfigFile: undefined,
     codexChatServiceName: "codex-chat.service",
@@ -93,6 +101,33 @@ test("brain admin page and API require Clerk allowlist auth", async () => {
   }
 });
 
+test("brain admin settings identify the concrete local instance separately from repo registry", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-settings-"));
+  try {
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const settings = await fetch(`${baseUrl}/api/admin/brain/settings`, { headers: authHeaders() });
+      assert.equal(settings.status, 200);
+      const payload = await settings.json() as {
+        instance: { project: string; host: string; ip: string; repoRegistrySourceOfTruth: boolean };
+        repoRegistry: { sourceOfTruth: boolean; role: string };
+        codexChat: { host: string; ip: string; path: string; serviceName: string };
+      };
+      assert.equal(payload.instance.project, "Brain");
+      assert.equal(payload.instance.host, "brain.example.test");
+      assert.equal(payload.instance.ip, "203.0.113.10");
+      assert.equal(payload.instance.repoRegistrySourceOfTruth, false);
+      assert.equal(payload.repoRegistry.sourceOfTruth, false);
+      assert.match(payload.repoRegistry.role, /read-only context/);
+      assert.equal(payload.codexChat.host, "brain.example.test");
+      assert.equal(payload.codexChat.ip, "203.0.113.10");
+      assert.equal(payload.codexChat.serviceName, "codex-chat.service");
+      assert.equal(payload.codexChat.path, path.join(root, "codex-chat"));
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("brain admin env API writes allowlisted keys as write-only presence metadata", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-env-"));
   try {
@@ -155,7 +190,10 @@ test("brain admin operation API requires explicit approval and audits execution"
         body: JSON.stringify({ operation: "plan", approval: "plan codex-chat.service" }),
       });
       assert.equal(plan.status, 200);
-      assert.equal((await plan.json() as { dryRun: boolean }).dryRun, true);
+      const planPayload = await plan.json() as { dryRun: boolean; command: string };
+      assert.equal(planPayload.dryRun, true);
+      assert.match(planPayload.command, /codex-chat path:/);
+      assert.match(planPayload.command, /brain\.example\.test/);
       assert.deepEqual(calls, []);
 
       const restart = await fetch(`${baseUrl}/api/admin/brain/codex-chat/operation`, {

@@ -6,25 +6,42 @@ is `codex-chat`; `assistant-agent-logic` and `assistant-agent-data` stay as
 separate repositories/workspaces. Brain's own runtime service remains
 experimental/lab until deliberately promoted.
 
-`brainctl stack status` and `brainctl stack plan` are the current source of truth
-for control-plane stack resolution. They read repo-registry metadata plus
-ignored setup context, render no-network plans, and refuse repo-boundary
-violations before any executor can act. Deployment status itself is recorded on
-the Brain/control-plane host, not in the local repo registry:
+For abstract/new Brain deployments, `brainctl stack status` and `brainctl stack
+plan` are setup/planning tools. They read repo-registry metadata plus ignored
+setup context, render no-network plans, and refuse repo-boundary violations
+before any executor can act. For a running Brain instance, repo-registry metadata
+is not the source of truth: the concrete Brain web service owns its own
+env/settings for where `codex-chat`, `assistant-agent-logic`, workspaces, env
+files, and systemd services are deployed. Deployment status itself is recorded
+on the Brain/control-plane host, not in the local repo registry:
 
 ```text
 <brain-workspace-root>/state/control-plane/deployments.json
 ```
 
-For the current remote Brain target that is:
+For a conventional remote Brain target that may be:
 
 ```text
 /home/brain/.brain/workspace/state/control-plane/deployments.json
 ```
 
-Local notes and registry entries may point at a deployment, but the remote
-metadata ledger is canonical because it lives with the control plane that owns
-the deployed servant stacks.
+For this local Brain instance, the admin service runs beside the active
+`codex-chat.service` on `codex-chat-assistant-1` (`178.104.208.141`) and should
+report/control the local paths:
+
+```text
+/home/tim/pkg/tim/brain
+/home/tim/pkg/tim/codex-chat
+/home/tim/pkg/tim/assistant-agent-logic
+/home/tim/.assistant-claude/workspace
+/home/tim/.config/codex-chat/env
+/home/tim/pkg/tim/codex-chat/config/codex-chat.toml
+codex-chat.service
+```
+
+Local notes and registry entries may point at historical or planned deployments,
+but the concrete Brain instance settings and private deployment ledger are
+canonical for that instance.
 
 
 ## Canonical setup UX
@@ -56,24 +73,23 @@ Deployment docs and private notes should define:
 Initial bootstrap must not require Composio or any optional integration. Those
 can be configured later after Telegram admin pairing is working.
 
-## Current Brain SSH target
+## Current Brain instance target
 
-The current Brain/control-plane SSH-in identity for Anna is
-`brain@178.104.221.223`.
-Treat `root@178.104.221.223` as bootstrap/root access only when a separate
-privileged context is needed. Normal post-bootstrap setup/status/deployment
-commands should use the non-root `brain` service user, with source checkout
-`/home/brain/brain`, workspace parent `/home/brain/.brain`, private workspace
-`/home/brain/.brain/workspace`, runtime config
-`/home/brain/.brain/workspace/config/runtime.yaml`.
+Brain is an abstract project, but this running Brain instance is local to the
+active codex-chat server. Its source-of-truth settings live in the
+`brain-admin.service` environment (`~/.config/brain-admin/env`) and defaults,
+not in the repo registry. The admin service should show/control local
+`codex-chat.service` on this server and should not redirect operators toward
+retired remote deploy targets.
 
-Production assistant traffic on Anna must run through
-`/home/brain/pkg/tim/codex-chat` and `codex-chat.service`.
-`brain-personal.service` is a legacy Brain lab runtime target and must be
-stopped/disabled when `codex-chat.service` is enabled to avoid double Telegram
-polling. The generated `codex-chat.service` unit conflicts with
-`brain-personal.service`; after a healthy migration, leave the Brain service
-disabled unless an explicit lab smoke test is being run offline.
+Historical Brain/Anna SSH metadata was retired on 2026-06-25 because that server
+is no longer used. Do not run status, deploy, health-check, or smoke-test
+commands against old Brain/Anna hostnames or IPs from historical notes. For any
+future remote setup, collect or confirm a fresh SSH target first.
+
+`brain-personal.service` remains a legacy Brain lab runtime target and must not
+be enabled as a live Telegram poller unless an explicit offline lab smoke test
+requires it.
 
 ## Current safe operations seams
 
@@ -112,7 +128,7 @@ non-deploying by default:
 - `brainctl operations plan` renders preflight, update, restart, rollback, and post-update smoke command lists.
 - `brainctl operations systemd` is deprecated/lab-only Brain supervisor
   scaffolding. It does not write `/etc/systemd/system`, call `systemctl`, or
-  restart anything, and it must not be used for the Anna production assistant.
+  restart anything, and it must not be used for any production assistant.
   Production review/install goes through `brainctl stack plan/apply` and targets
   `codex-chat.service`.
 - `brainctl validate live` renders a guarded Telegram/Codex readiness plan. `--run-safe` executes only no-network/no-secret checks by default.

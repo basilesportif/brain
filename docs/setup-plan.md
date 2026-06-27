@@ -6,12 +6,17 @@ can guide a first local or remote bootstrap for the servant runtime stack
 without access to the maintainer's private workspace, integrations,
 credentials, or hosts.
 
-Status: guided setup documentation. `brainctl stack status` and
-`brainctl stack plan` now establish Brain's control-plane source of truth:
-`codex-chat` is the servant Telegram/Codex runtime, `assistant-agent-logic` is a
-separate logic repository, and `assistant-agent-data` / workspace is separate
-private state. Brain runtime packages, provider adapters, and Telegram
-entrypoint seams are lab/compatibility surfaces until explicitly promoted.
+Status: guided setup documentation. Brain is the abstract project/repo; a Brain
+instance is a concrete web service with its own env/settings for where
+`codex-chat`, `assistant-agent-logic`, workspace data, env files, and systemd
+services live. `brainctl stack status` and `brainctl stack plan` help plan new
+or migrated servant stacks, but a running Brain instance does not use the repo
+registry as its source of truth. Instance env/settings and the private
+deployment ledger do. `codex-chat` is the servant Telegram/Codex runtime,
+`assistant-agent-logic` is a separate logic repository, and
+`assistant-agent-data` / workspace is separate private state. Brain runtime
+packages, provider adapters, and Telegram entrypoint seams are lab/compatibility
+surfaces until explicitly promoted.
 They must not be selected as production setup targets: live assistant traffic
 belongs to `codex-chat.service`, not `brain-personal.service` or
 `brainctl run`.
@@ -20,10 +25,14 @@ service paths, and private workspace/data choices, then stop before
 credentials, privileged service changes, or live deployment unless the user
 explicitly confirms.
 
-Deployment/update must resolve repo authority from the repo registry and refresh
-the real `codex-chat` and `assistant-agent-logic` checkouts before build or
-service restart. Record both the requested branch/ref and the resolved commit
-SHA in deployment metadata. Brain must never deploy stale embedded copies.
+For new abstract setup/migration plans, deployment/update should resolve repo
+authority from the repo registry and refresh the real `codex-chat` and
+`assistant-agent-logic` checkouts before build or service restart. For an
+already-running Brain web/admin instance, use the instance settings/env first;
+repo-registry entries are read-only context and may describe source repos,
+historical notes, or remote targets that are not authoritative for this
+instance. Record both the requested branch/ref and the resolved commit SHA in
+deployment metadata. Brain must never deploy stale embedded copies.
 
 Setup is intentionally re-runnable. At any time, `brainctl setup inspect` or
 `brainctl setup status` should show configured, missing required, missing
@@ -553,12 +562,15 @@ on private workspace knowledge.
 Remote setup should be user-confirmed and should not deploy live services unless
 explicitly requested.
 
-Current Brain remote metadata: use `brain@178.104.221.223` as the future normal
-SSH target / SSH-in identity. Keep `root@178.104.221.223` only as
-bootstrap/root access if a privileged bootstrap context is needed. The expected
-remote checkout is `/home/brain/brain`, the workspace parent is
-`/home/brain/.brain`, and the private workspace is
-`/home/brain/.brain/workspace`.
+Historical Brain/Anna remote metadata was retired on 2026-06-25 because that
+server is no longer used. Do not treat old Brain/Anna hostnames or IPs from
+history as active SSH targets. This active Brain admin instance is local to the
+current codex-chat server (`codex-chat-assistant-1`, `178.104.208.141`) and uses
+local paths/service settings from `~/.config/brain-admin/env`. New remote setup
+must collect or confirm a fresh target before any deployment/status command. The
+conventional remote checkout layout remains `/home/brain/brain`, workspace
+parent `/home/brain/.brain`, and private workspace
+`/home/brain/.brain/workspace` unless the new target chooses different paths.
 
 1. Confirm remote mode and show concise defaults, either from the remote-only
    questions above or with:
