@@ -18,6 +18,27 @@ message, user, command, or permission types. Instead, both Telegram and Slack
 should translate inbound events into the same runtime model and render outbound
 runtime events through surface-specific adapters.
 
+## Detailed Slack context design
+
+The implementation-ready design for Slack channel/thread context, hydration,
+Claude-like UX decisions, data model, telemetry, admin controls, canaries,
+rollout, and rollback now lives in:
+
+```text
+/home/tim/pkg/tim/brain/plans/2026-06-29-slack-channel-thread-context-design.md
+```
+
+Treat that document as the canonical detail layer beneath this roadmap. It is
+docs-only and explicitly preserves Tim's working Slack functionality: read-only
+or shadow context hydration must not change Slack message delivery, output
+targets, `thread_ts`, or subagent callback routing until Tim separately requests
+implementation of a visible behavior change. In particular, the target
+Claude-like decision is **thread-first default for context selection** (existing Slack
+threads hydrate/reply as threads) combined with Tim's **channel-visible root
+default** (root channel mentions should answer in the channel, not in a newly
+synthetic thread, once that separate routing correction is requested and
+canaried).
+
 ## Goals
 
 - Preserve the working Telegram service while making it one adapter among many.
@@ -934,6 +955,42 @@ extension rather than a hidden behavior in the first implementation.
 - [ ] Replace long-term JSON capability state with a real durable store plan and
       migration path.
 - [ ] Ensure subagents receive narrowed run context, not tokens or broad grants.
+
+### Phase 4.5 — Slack channel/thread context hydration design gate
+
+The detailed implementation plan for this slice is
+`plans/2026-06-29-slack-channel-thread-context-design.md`. Treat the design as
+the required pre-implementation checklist for Claude-like Slack context UX. This
+phase is explicitly docs/design and shadow-read oriented until Tim authorizes
+implementation. It must preserve working Slack delivery while preparing
+hydration, source labels, policy, and telemetry.
+
+- [x] Record the Claude-like UX decision: existing threads are thread-first
+      contexts; root channel mentions use bounded channel context and, once a
+      separate visible routing correction is implemented, answer in the channel
+      by default rather than creating a synthetic thread.
+- [x] Specify channel mention context windows, thread mention context windows,
+      explicit context controls, channel memory versus thread sessions, Slack
+      API scopes/history reads, stored event history, fallback behavior,
+      hydration algorithm, schema, privacy/isolation, subagent callback routing,
+      telemetry, Brain admin controls, migration phases, canaries, and
+      rollout/rollback.
+- [ ] Before code changes, decide the first implementation order: shadow
+      hydration before visible channel routing, or visible channel routing before
+      hydration. The conservative default in the design is shadow hydration
+      first.
+- [ ] Add tests/telemetry for source classification and hydration decisions with
+      hydration disabled; do not alter Slack sends.
+- [ ] Add read-only/shadow `HydratedSlackContext` plumbing with no prompt
+      exposure and no output-target changes.
+- [ ] Add Slack Web API history/replies reads only behind Brain policy, rate
+      budgets, scopes checks, source labels, redaction, and mocked tests.
+- [ ] Add optional public-channel history scopes/events only after Brain admin
+      can show policy, installed scopes/events, canary state, and rollback.
+- [ ] Enable prompt context exposure only in allowlisted canary channels after
+      shadow telemetry proves no leakage and no delivery regression.
+- [ ] Implement the root channel-visible routing correction only as a separate
+      visible behavior change with dedicated canaries and rollback.
 
 ### Phase 5 — Slack adapter depth and runtime-owned Slack tools
 
