@@ -57,6 +57,7 @@ Routes:
 - `POST /api/admin/brain/codex-chat/operation` — plan/deploy/restart operations.
 - `GET /api/admin/brain/slack/settings` — explicit Slack env key presence and public Events URL.
 - `POST /api/admin/brain/slack/settings` — write Slack signing secret, bot token, optional app token, enabled flag, and URL/path env keys as write-only values.
+- `GET /api/admin/brain/slack/telemetry` — read-only Slack runtime telemetry summary from codex-chat state; redacted metadata only.
 - `GET /api/admin/brain/slack/manifest` — render the codex-chat-owned Slack manifest contract with Brain's public Events URL.
 - `GET /api/admin/brain/slack/manifest/download` — download the rendered manifest JSON.
 
@@ -117,17 +118,22 @@ the concrete instance instead.
 
 ## Slack callback telemetry boundary
 
-The current admin UI is presence/config oriented for Slack health. It can show
-that required Slack settings are present, render the codex-chat-owned manifest,
-and guide manual Slack URL verification/canaries, but it does not yet provide
-durable live callback or test-event telemetry.
+The admin UI now includes an initial read-only telemetry slice. Brain reads
+`codex-chat`'s `slack_telemetry/summary.json` from the configured state
+directory, sanitizes it again, and displays last inbound/accepted/ignored or
+rejected/outbound attempt/success/failure metadata plus a health summary.
 
-Future callback/test-event telemetry is planned in
-`plans/brain-control-plane.md`. That plan keeps Brain on the control-plane side:
-Brain may proxy raw Slack requests, record redacted metadata, aggregate health,
-and display canary/test outcomes, while `codex-chat` remains the Slack runtime
-engine and signature verifier unless a later explicit architecture decision
-changes that boundary.
+This is observational only. Brain does not send Slack requests, verify Slack
+signatures, parse Slack business payloads for runtime behavior, enqueue work,
+retry outbound sends, or change message routing. `codex-chat` remains the Slack
+runtime engine and signature verifier. Dedicated active canary/test-event
+telemetry is still future work in `plans/brain-control-plane.md`; until then
+canary status is reported as `not_observable`.
+
+Telemetry responses must not include Slack tokens, signing secrets, signatures,
+headers, request bodies, challenge values, message text, channel names, or user
+names. Slack IDs and timestamps are operational metadata only and are exposed
+through the Clerk-protected admin UI.
 
 ## Systemd and Caddy sketch
 

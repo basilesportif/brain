@@ -167,10 +167,53 @@ until those instructions arrive.
 
 ### Future Slack callback/test-event telemetry plan
 
-Status: future work only; do not implement as part of the admin page redesign
-completion. The current Brain UI may label live callback/test-event health as
-manual or telemetry-pending, but it must not claim to verify Slack runtime health
-until this plan is implemented.
+Status: initial read-only slice in progress as of 2026-06-29. The first slice is
+strictly observational: `codex-chat` emits append-only, redacted Slack telemetry
+observations into its own state directory, and Brain reads the resulting summary
+for admin display. Brain still must not claim to own Slack runtime behavior,
+signature verification, idempotency, queueing, or Slack Web API sends.
+
+#### 2026-06-29 read-only telemetry slice
+
+This slice intentionally avoids active canaries, Slack API calls from Brain,
+runtime retries, queue changes, message routing changes, or secret/body storage.
+
+Implemented/target contract:
+
+- `codex-chat` records metadata-only observations for Slack Events API inbound
+  outcomes: last inbound timestamp, event/team/channel/user/type metadata,
+  accepted event, duplicate, ignored reason, rejected reason, response class,
+  and text length only. It never stores Slack request bodies, challenge values,
+  message text, headers, signatures, signing secrets, bot/app tokens, channel
+  names, or user names.
+- `codex-chat` records outbound reply attempt/success/failure metadata around
+  existing Slack reply sends. These hooks are non-blocking and best-effort; a
+  telemetry write failure logs a warning and must not affect Slack send control
+  flow or error propagation.
+- `codex-chat` writes `data/state/slack_telemetry/<day>.jsonl` plus
+  `data/state/slack_telemetry/summary.json` under the configured state dir.
+  Summary schema starts at `schemaVersion: 1` and includes counters plus
+  `lastInboundEvent`, `lastAcceptedEvent`, `lastIgnoredOrRejected`,
+  `lastOutboundAttempt`, `lastOutboundSuccess`, and `lastOutboundFailure`.
+- Brain exposes `GET /api/admin/brain/slack/telemetry`, which reads the
+  `codex-chat` summary file only, sanitizes it again, and returns health,
+  recent canary status, source path, counters, and redacted last-observation
+  fields for the Clerk-protected admin UI.
+- Canary status is `not_observable` until a future active canary runner writes
+  dedicated canary markers. Operators should use accepted inbound plus outbound
+  success as observational signals, not as proof of a named canary.
+
+Guardrails:
+
+- Telemetry hooks must be append-only/read-only from Brain's perspective and
+  best-effort from `codex-chat`; they must not change Slack ack timing,
+  signature verification, normalization, idempotency, enqueue semantics,
+  outbound retry behavior, or exception propagation.
+- Tests must assert no side effects and no storage/display of message bodies or
+  Slack tokens/signatures.
+- Deployment of the `codex-chat` telemetry hooks requires a normal
+  `codex-chat` restart after build. Brain UI changes may be rebuilt/restarted
+  independently through `brain-admin.service`.
 
 #### Boundary and ownership
 

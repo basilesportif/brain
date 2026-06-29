@@ -195,6 +195,9 @@ async function handleAdminApi(request: IncomingMessage, response: ServerResponse
   if (request.method === "GET" && url.pathname === "/api/admin/brain/slack/settings") {
     return sendJson(response, 200, await slackSettingsSummary(config));
   }
+  if (request.method === "GET" && url.pathname === "/api/admin/brain/slack/telemetry") {
+    return sendJson(response, 200, await slackTelemetrySummary(config));
+  }
   if (request.method === "POST" && url.pathname === "/api/admin/brain/slack/settings") {
     const payload = await readJsonBody(request);
     return handleSlackSettingsWrite(response, config, adminEmail, payload);
@@ -281,6 +284,190 @@ async function slackSettingsSummary(config: BrainAdminServiceConfig) {
     values: "write-only; presence only",
     env,
   };
+}
+
+type SlackTelemetryObservationSummary = {
+  observedAt?: string;
+  direction?: string;
+  outcome?: string;
+  reason?: string;
+  eventId?: string;
+  envelopeType?: string;
+  eventType?: string;
+  teamId?: string;
+  enterpriseId?: string;
+  apiAppId?: string;
+  channelId?: string;
+  channelType?: string;
+  userId?: string;
+  botUserId?: string;
+  messageTs?: string;
+  threadTs?: string;
+  slackEventTime?: number;
+  textLength?: number;
+  responseStatus?: number;
+  outboundResultCount?: number;
+  outboundResultChannels?: string[];
+  outboundResultTs?: string[];
+};
+
+type SlackTelemetryAdminSummary = {
+  available: boolean;
+  source: "codex-chat-state-file";
+  path: string;
+  values: string;
+  updatedAt?: string;
+  counters: Record<string, number>;
+  lastInboundEvent?: SlackTelemetryObservationSummary;
+  lastAcceptedEvent?: SlackTelemetryObservationSummary;
+  lastIgnoredOrRejected?: SlackTelemetryObservationSummary;
+  lastOutboundAttempt?: SlackTelemetryObservationSummary;
+  lastOutboundSuccess?: SlackTelemetryObservationSummary;
+  lastOutboundFailure?: SlackTelemetryObservationSummary;
+  health: { state: string; summary: string; generatedAt: string };
+  recentCanary: { status: "not_observable"; summary: string };
+  error?: string;
+};
+
+async function slackTelemetrySummary(config: BrainAdminServiceConfig): Promise<SlackTelemetryAdminSummary> {
+  const summaryPath = await slackTelemetrySummaryPath(config);
+  const generatedAt = new Date().toISOString();
+  const base = {
+    source: "codex-chat-state-file" as const,
+    path: summaryPath,
+    values: "read-only; redacted metadata only; no Slack tokens, signatures, headers, or message bodies",
+    counters: {},
+    recentCanary: {
+      status: "not_observable" as const,
+      summary: "No dedicated Slack canary marker is recorded yet; use last accepted inbound and outbound reply telemetry as observational signals.",
+    },
+  };
+  const raw = await readTextIfPresent(summaryPath);
+  if (!raw) {
+    return {
+      ...base,
+      available: false,
+      health: { state: "unknown", summary: "No codex-chat Slack telemetry summary has been recorded yet.", generatedAt },
+    };
+  }
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const summary = sanitizeSlackTelemetrySummary(parsed, generatedAt);
+    return {
+      ...base,
+      ...summary,
+      available: true,
+    };
+  } catch {
+    return {
+      ...base,
+      available: false,
+      health: { state: "attention", summary: "codex-chat Slack telemetry summary exists but could not be parsed.", generatedAt },
+      error: "invalid_slack_telemetry_summary_json",
+    };
+  }
+}
+
+async function slackTelemetrySummaryPath(config: BrainAdminServiceConfig): Promise<string> {
+  const stateDir = await codexChatStateDir(config);
+  return path.join(stateDir, "slack_telemetry", "summary.json");
+}
+
+async function codexChatStateDir(config: BrainAdminServiceConfig): Promise<string> {
+  const configFile = config.codexChatConfigFile ?? "";
+  const text = configFile ? await readTextIfPresent(configFile) : "";
+  const raw = readTomlValue(text, "service", "stateDir");
+  const stateDir = parseTomlStringValue(raw) || "data/state";
+  return path.isAbsolute(stateDir) ? stateDir : path.join(config.codexChatPath, stateDir);
+}
+
+function sanitizeSlackTelemetrySummary(parsed: Record<string, unknown>, generatedAt: string): Omit<SlackTelemetryAdminSummary, "available" | "source" | "path" | "values"> {
+  const counters = typeof parsed.counters === "object" && parsed.counters && !Array.isArray(parsed.counters)
+    ? Object.fromEntries(Object.entries(parsed.counters as Record<string, unknown>)
+      .filter(([key, value]) => /^[a-z.]+$/.test(key) && typeof value === "number" && Number.isFinite(value))
+      .map(([key, value]) => [key, value as number]))
+    : {};
+  const updatedAt = typeof parsed.updatedAt === "string" ? parsed.updatedAt : undefined;
+  const summary = {
+    updatedAt,
+    counters,
+    lastInboundEvent: sanitizeSlackTelemetryObservation(parsed.lastInboundEvent),
+    lastAcceptedEvent: sanitizeSlackTelemetryObservation(parsed.lastAcceptedEvent),
+    lastIgnoredOrRejected: sanitizeSlackTelemetryObservation(parsed.lastIgnoredOrRejected),
+    lastOutboundAttempt: sanitizeSlackTelemetryObservation(parsed.lastOutboundAttempt),
+    lastOutboundSuccess: sanitizeSlackTelemetryObservation(parsed.lastOutboundSuccess),
+    lastOutboundFailure: sanitizeSlackTelemetryObservation(parsed.lastOutboundFailure),
+  };
+  return {
+    ...summary,
+    health: deriveSlackTelemetryHealth(summary, generatedAt),
+    recentCanary: {
+      status: "not_observable",
+      summary: "No dedicated Slack canary marker is recorded yet; use last accepted inbound and outbound reply telemetry as observational signals.",
+    },
+  };
+}
+
+function sanitizeSlackTelemetryObservation(value: unknown): SlackTelemetryObservationSummary | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const out: SlackTelemetryObservationSummary = {};
+  for (const key of ["observedAt", "direction", "outcome", "reason", "eventId", "envelopeType", "eventType", "teamId", "enterpriseId", "apiAppId", "channelId", "channelType", "userId", "botUserId", "messageTs", "threadTs"] as const) {
+    if (typeof record[key] === "string") out[key] = redactTelemetryText(record[key]);
+  }
+  for (const key of ["slackEventTime", "textLength", "responseStatus", "outboundResultCount"] as const) {
+    if (typeof record[key] === "number" && Number.isFinite(record[key])) out[key] = record[key];
+  }
+  for (const key of ["outboundResultChannels", "outboundResultTs"] as const) {
+    if (Array.isArray(record[key])) out[key] = record[key].filter((item): item is string => typeof item === "string").map(redactTelemetryText).slice(0, 20);
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+function deriveSlackTelemetryHealth(summary: {
+  updatedAt?: string;
+  lastAcceptedEvent?: SlackTelemetryObservationSummary;
+  lastIgnoredOrRejected?: SlackTelemetryObservationSummary;
+  lastOutboundSuccess?: SlackTelemetryObservationSummary;
+  lastOutboundFailure?: SlackTelemetryObservationSummary;
+}, generatedAt: string): SlackTelemetryAdminSummary["health"] {
+  const nowMs = Date.parse(generatedAt);
+  const updatedAtMs = summary.updatedAt ? Date.parse(summary.updatedAt) : NaN;
+  const acceptedMs = summary.lastAcceptedEvent?.observedAt ? Date.parse(summary.lastAcceptedEvent.observedAt) : NaN;
+  const rejectedMs = summary.lastIgnoredOrRejected?.observedAt ? Date.parse(summary.lastIgnoredOrRejected.observedAt) : NaN;
+  const successMs = summary.lastOutboundSuccess?.observedAt ? Date.parse(summary.lastOutboundSuccess.observedAt) : NaN;
+  const failureMs = summary.lastOutboundFailure?.observedAt ? Date.parse(summary.lastOutboundFailure.observedAt) : NaN;
+  if (!Number.isFinite(updatedAtMs)) return { state: "unknown", summary: "No Slack telemetry observations have been recorded yet.", generatedAt };
+  if (Number.isFinite(failureMs) && (!Number.isFinite(successMs) || failureMs > successMs)) {
+    return { state: "degraded", summary: `Last Slack outbound reply failed: ${summary.lastOutboundFailure?.reason ?? "unknown_failure"}.`, generatedAt };
+  }
+  if (Number.isFinite(rejectedMs) && summary.lastIgnoredOrRejected?.reason !== "duplicate_event" && (!Number.isFinite(acceptedMs) || rejectedMs > acceptedMs)) {
+    return { state: "attention", summary: `Last Slack inbound event was not accepted: ${summary.lastIgnoredOrRejected?.reason ?? "unknown_reason"}.`, generatedAt };
+  }
+  if (Number.isFinite(nowMs) && nowMs - updatedAtMs > 24 * 60 * 60_000) {
+    return { state: "stale", summary: `Last Slack telemetry observation is older than 24h (${summary.updatedAt}).`, generatedAt };
+  }
+  return { state: "observing", summary: "Slack telemetry is recording recent accepted inbound events and/or outbound replies.", generatedAt };
+}
+
+function parseTomlStringValue(value: string | null): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return typeof parsed === "string" && parsed ? parsed : undefined;
+  } catch {
+    return /^[A-Za-z0-9_./~-]+$/.test(trimmed) ? trimmed : undefined;
+  }
+}
+
+function redactTelemetryText(value: string): string {
+  return value
+    .replace(/xox[baprs]-[A-Za-z0-9-]+/g, "[redacted-slack-token]")
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/v0=[a-f0-9]{32,}/gi, "v0=[redacted-signature]")
+    .slice(0, 240);
 }
 
 

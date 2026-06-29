@@ -222,6 +222,8 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /Review & confirm/);
   assert.match(html, /Confirm Slack settings write/);
   assert.match(html, /Review & write Slack settings/);
+  assert.match(html, /Read-only Slack telemetry/);
+  assert.match(html, /Raw \/slack\/telemetry/);
   assert.match(html, /writes codex-chat runtime env to disk/i);
   assert.equal(html.includes('id="op-approval"'), false);
   assert.equal(html.includes('id="slack-approval"'), false);
@@ -474,6 +476,70 @@ test("brain admin exposes explicit Slack settings as write-only presence metadat
       const fileText = await readFile(path.join(root, "codex-chat.env"), "utf8");
       assert.match(fileText, /SLACK_SIGNING_SECRET='signing-secret'/);
       assert.match(fileText, /CODEX_CHAT_BASE_URL='https:\/\/brain\.decisive-outcomes\.com'/);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain admin exposes read-only Slack telemetry without leaking message bodies or tokens", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-slack-telemetry-"));
+  try {
+    const summaryPath = path.join(root, "codex-chat", "data", "state", "slack_telemetry", "summary.json");
+    await writeFileRecursive(summaryPath, JSON.stringify({
+      schemaVersion: 1,
+      updatedAt: "2026-06-29T10:00:00.000Z",
+      counters: { "inbound.accepted": 1, "outbound.success": 1 },
+      lastInboundEvent: {
+        observedAt: "2026-06-29T10:00:00.000Z",
+        direction: "inbound",
+        outcome: "accepted",
+        eventType: "app_mention",
+        channelId: "C123",
+        userId: "U123",
+        textLength: 42,
+        text: "do not expose this message body",
+        token: "xoxb-super-secret",
+      },
+      lastAcceptedEvent: {
+        observedAt: "2026-06-29T10:00:00.000Z",
+        direction: "inbound",
+        outcome: "accepted",
+        eventType: "app_mention",
+        channelId: "C123",
+        userId: "U123",
+      },
+      lastOutboundSuccess: {
+        observedAt: "2026-06-29T10:00:02.000Z",
+        direction: "outbound",
+        outcome: "success",
+        channelId: "C123",
+        threadTs: "1782000000.000100",
+        outboundResultCount: 1,
+        reason: "Bearer xoxb-super-secret",
+      },
+    }),);
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const telemetry = await fetch(`${baseUrl}/api/admin/brain/slack/telemetry`, { headers: authHeaders() });
+      assert.equal(telemetry.status, 200);
+      const payload = await telemetry.json() as {
+        available: boolean;
+        path: string;
+        health: { state: string };
+        lastInboundEvent?: { channelId?: string; userId?: string; text?: string; token?: string };
+        lastOutboundSuccess?: { reason?: string };
+      };
+      assert.equal(payload.available, true);
+      assert.equal(payload.path, summaryPath);
+      assert.equal(payload.health.state, "observing");
+      assert.equal(payload.lastInboundEvent?.channelId, "C123");
+      assert.equal(payload.lastInboundEvent?.userId, "U123");
+      assert.equal("text" in (payload.lastInboundEvent ?? {}), false);
+      assert.equal("token" in (payload.lastInboundEvent ?? {}), false);
+      assert.equal(payload.lastOutboundSuccess?.reason, "Bearer [redacted-slack-token]");
+      const serialized = JSON.stringify(payload);
+      assert.equal(serialized.includes("do not expose this message body"), false);
+      assert.equal(serialized.includes("xoxb-super-secret"), false);
     });
   } finally {
     await rm(root, { recursive: true, force: true });
