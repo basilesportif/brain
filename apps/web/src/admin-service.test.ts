@@ -30,6 +30,7 @@ function config(root: string, overrides: Partial<BrainAdminServiceConfig> = {}):
     codexChatPath: path.join(root, "codex-chat"),
     codexChatEnvFile: path.join(root, "codex-chat.env"),
     codexChatConfigFile: undefined,
+    codexHomePath: path.join(root, ".codex"),
     codexChatServiceName: "codex-chat.service",
     codexChatDeployCommand: "echo deploy-ok",
     codexChatRestartCommand: "echo restart-ok",
@@ -187,6 +188,10 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /Skip Slack for now/);
   assert.match(html, /Missing required setting/);
   assert.match(html, /Mission Control/);
+  assert.match(html, /OpenRouter/);
+  assert.match(html, /OpenRouter subagent model settings/);
+  assert.match(html, /Review & write OpenRouter settings/);
+  assert.match(html, /Confirm OpenRouter settings write/);
   assert.match(html, /Slack Details/);
   assert.match(html, /Manifest/);
   assert.match(html, /Runtime Config/);
@@ -282,6 +287,76 @@ test("brain admin env API writes allowlisted keys as write-only presence metadat
       const summaryPayload = await summary.json() as { keys: Array<{ key: string; value: string | null; secret: boolean }> };
       assert.ok(summaryPayload.keys.some((entry) => entry.key === "SLACK_BOT_TOKEN" && entry.secret && entry.value === "redacted"));
       assert.equal(JSON.stringify(summaryPayload).includes("xoxb-super-secret"), false);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+
+
+test("brain admin OpenRouter settings write env, codex profile, and codex-chat config without echoing the key", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-openrouter-"));
+  try {
+    const cfg = config(root, { codexChatConfigFile: path.join(root, "codex-chat", "config", "codex-chat.toml") });
+    await mkdir(path.dirname(cfg.codexChatConfigFile ?? ""), { recursive: true });
+    await writeFile(cfg.codexChatConfigFile ?? "", "version = 1\n\n[subagents]\ndefaultEffort = \"medium\"\n");
+    await withServer(cfg, authDeps(), async (baseUrl) => {
+      const settings = await fetch(`${baseUrl}/api/admin/brain/openrouter/settings`, { headers: authHeaders() });
+      assert.equal(settings.status, 200);
+      const summary = await settings.json() as { env: { envFile: string }; codexProfile: { path: string } };
+
+      const entries = {
+        apiKey: "sk-or-super-secret",
+        model: "anthropic/claude-sonnet-4.5",
+        codexProfile: "openrouter",
+        modelProvider: "openrouter",
+        serviceTierMode: "omit",
+        backend: "codex_app_server"
+      };
+      const keys = [
+        "OPENROUTER_API_KEY",
+        "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL",
+        "CODEX_CHAT_SUBAGENTS_DEFAULT_CODEX_PROFILE",
+        "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL_PROVIDER",
+        "CODEX_CHAT_SUBAGENTS_SERVICE_TIER_MODE",
+        "CODEX_CHAT_SUBAGENTS_ALLOW_PROVIDER_OVERRIDE",
+        "CODEX_CHAT_SUBAGENTS_ALLOWED_CODEX_PROFILES",
+        "CODEX_CHAT_SUBAGENTS_ALLOWED_MODEL_PROVIDERS",
+        "CODEX_CHAT_SUBAGENTS_BACKEND"
+      ];
+      const missingConfirmation = await fetch(`${baseUrl}/api/admin/brain/openrouter/settings`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify(entries),
+      });
+      assert.equal(missingConfirmation.status, 400);
+
+      const write = await fetch(`${baseUrl}/api/admin/brain/openrouter/settings`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ ...entries, confirmation: { token: "brain-admin-openrouter-settings-confirmed-v1", action: "openrouter.settings.write", envFile: summary.env.envFile, profilePath: summary.codexProfile.path, keys } }),
+      });
+      assert.equal(write.status, 200);
+      const payload = await write.json() as { writtenKeys: string[]; values: string; profilePath: string; apiKeyPresent: boolean };
+      assert.deepEqual(payload.writtenKeys, keys);
+      assert.equal(payload.values, "write-only");
+      assert.equal(payload.apiKeyPresent, true);
+      assert.equal(JSON.stringify(payload).includes("sk-or-super-secret"), false);
+
+      const envText = await readFile(path.join(root, "codex-chat.env"), "utf8");
+      assert.match(envText, /OPENROUTER_API_KEY='sk-or-super-secret'/);
+      assert.match(envText, /CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL='anthropic\/claude-sonnet-4\.5'/);
+      const profileText = await readFile(payload.profilePath, "utf8");
+      assert.match(profileText, /base_url = "https:\/\/openrouter\.ai\/api\/v1"/);
+      assert.match(profileText, /env_key = "OPENROUTER_API_KEY"/);
+      assert.equal(profileText.includes("sk-or-super-secret"), false);
+      const configText = await readFile(cfg.codexChatConfigFile ?? "", "utf8");
+      assert.match(configText, /defaultCodexProfile = "openrouter"/);
+      assert.match(configText, /defaultModelProvider = "openrouter"/);
+      assert.match(configText, /serviceTierMode = "omit"/);
+      assert.match(configText, /allowedCodexProfiles = \["openrouter"\]/);
+      assert.match(configText, /backend = "codex_app_server"/);
     });
   } finally {
     await rm(root, { recursive: true, force: true });

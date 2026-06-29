@@ -276,3 +276,9 @@ Current `codex-chat` behavior should migrate as a single-primary workspace confi
 - Telegram attachment download is explicit runtime configuration. Downloaded files belong under private workspace artifacts/state, and voice/audio transcription can be configured through workspace `transcription` (OpenAI) or through the CLI command seam for private deployments. Brain stores successful transcript text on the inbound event/attachment metadata but does not copy transcription tokens or private prompts into the repo. For codex-chat parity at the Telegram edge, disabled/unavailable voice transcription replies `Voice transcription is not enabled.` and does not enter the provider queue, disabled audio remains an attachment-only event, and configured voice/audio transcription errors are suppressed before provider dispatch.
 - Loop and monitor definitions are validated in-process. The default runtime/CLI behavior does not install crontabs, filesystem watchers, or shell monitors; explicit future operator commands should be required for host-level scheduling.
 - Do not enable web or iOS in the migrated workspace until multi-entrypoint routing, identity, permissions, notifications, and conflict handling have explicit config and tests.
+
+## OpenRouter subagent settings
+
+Brain admin exposes an **OpenRouter** section for the local codex-chat target. The form writes `OPENROUTER_API_KEY` to the codex-chat env file as a write-only secret, writes non-secret subagent defaults/allowlists to codex-chat env/config, and creates a user-level `$CODEX_HOME/openrouter.config.toml` Codex profile that references `env_key = "OPENROUTER_API_KEY"`.
+
+After writing settings, use **Deploy / Restart** in Brain: run a fresh plan, then explicitly restart `codex-chat.service`. Then ask codex-chat to dispatch a test subagent with `codexProfile="openrouter"`, `modelProvider="openrouter"`, the chosen OpenRouter model slug, and `serviceTierMode="omit"`.

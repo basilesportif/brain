@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -18,9 +18,21 @@ const SLACK_ENV_KEYS = [
   "SLACK_BOT_TOKEN",
   "SLACK_APP_TOKEN",
 ] as const;
+const OPENROUTER_ENV_KEYS = [
+  "OPENROUTER_API_KEY",
+  "CODEX_CHAT_SUBAGENTS_BACKEND",
+  "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL",
+  "CODEX_CHAT_SUBAGENTS_DEFAULT_CODEX_PROFILE",
+  "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL_PROVIDER",
+  "CODEX_CHAT_SUBAGENTS_SERVICE_TIER_MODE",
+  "CODEX_CHAT_SUBAGENTS_ALLOW_PROVIDER_OVERRIDE",
+  "CODEX_CHAT_SUBAGENTS_ALLOWED_CODEX_PROFILES",
+  "CODEX_CHAT_SUBAGENTS_ALLOWED_MODEL_PROVIDERS",
+] as const;
 const DEFAULT_ENV_KEYS = [
   "CODEX_CHAT_API_ENABLED",
   ...SLACK_ENV_KEYS,
+  ...OPENROUTER_ENV_KEYS,
   "TELEGRAM_BOT_TOKEN",
   "OPENAI_API_KEY",
 ] as const;
@@ -29,6 +41,7 @@ const SECRETISH_RE = /(SECRET|TOKEN|KEY|PASSWORD|COOKIE|SESSION|CREDENTIAL)/i;
 const MAX_BODY_BYTES = 128 * 1024;
 const LIVE_OPERATION_CONFIRMATION_TOKEN = "brain-admin-live-operation-confirmed-v1";
 const SLACK_SETTINGS_CONFIRMATION_TOKEN = "brain-admin-slack-settings-confirmed-v1";
+const OPENROUTER_SETTINGS_CONFIRMATION_TOKEN = "brain-admin-openrouter-settings-confirmed-v1";
 
 export interface BrainAdminServiceConfig {
   enabled: boolean;
@@ -50,6 +63,7 @@ export interface BrainAdminServiceConfig {
   codexChatPath: string;
   codexChatEnvFile: string;
   codexChatConfigFile?: string;
+  codexHomePath: string;
   codexChatServiceName: string;
   codexChatDeployCommand?: string;
   codexChatRestartCommand?: string;
@@ -100,6 +114,7 @@ export function loadBrainAdminServiceConfig(env: NodeJS.ProcessEnv = process.env
     codexChatPath,
     codexChatEnvFile: env.BRAIN_CODEX_CHAT_ENV_FILE || "/home/tim/.config/codex-chat/env",
     codexChatConfigFile: env.BRAIN_CODEX_CHAT_CONFIG_FILE || path.join(codexChatPath, "config/codex-chat.toml"),
+    codexHomePath: env.BRAIN_CODEX_HOME || env.CODEX_HOME || path.join(os.homedir(), ".codex"),
     codexChatServiceName: env.BRAIN_CODEX_CHAT_SERVICE_NAME || "codex-chat.service",
     codexChatDeployCommand: env.BRAIN_CODEX_CHAT_DEPLOY_COMMAND || undefined,
     codexChatRestartCommand: env.BRAIN_CODEX_CHAT_RESTART_COMMAND || undefined,
@@ -168,6 +183,13 @@ async function handleAdminApi(request: IncomingMessage, response: ServerResponse
     const payload = await readJsonBody(request);
     return handleEnvWrite(response, config, adminEmail, payload);
   }
+  if (request.method === "GET" && url.pathname === "/api/admin/brain/openrouter/settings") {
+    return sendJson(response, 200, await openRouterSettingsSummary(config));
+  }
+  if (request.method === "POST" && url.pathname === "/api/admin/brain/openrouter/settings") {
+    const payload = await readJsonBody(request);
+    return handleOpenRouterSettingsWrite(response, config, adminEmail, payload);
+  }
   if (request.method === "GET" && url.pathname === "/api/admin/brain/slack/settings") {
     return sendJson(response, 200, await slackSettingsSummary(config));
   }
@@ -206,6 +228,7 @@ async function serviceHealth(config: BrainAdminServiceConfig) {
       serviceName: config.codexChatServiceName,
       envFile,
       configFile: config.codexChatConfigFile ? { path: config.codexChatConfigFile, configured: true } : { configured: false },
+      codexHome: { path: config.codexHomePath },
     },
   };
 }
@@ -229,11 +252,13 @@ async function serviceSettings(config: BrainAdminServiceConfig) {
       serviceName: config.codexChatServiceName,
       env,
       configFile: config.codexChatConfigFile ? { path: config.codexChatConfigFile, configured: true } : { configured: false },
+      codexHome: { path: config.codexHomePath },
       deployCommandConfigured: Boolean(config.codexChatDeployCommand),
       operationCommands: operationCommandSummary(config),
       restartCommand: operationCommand(config, "restart") ? redactedCommand(operationCommand(config, "restart") ?? "") : null,
     },
     slack: await slackSettingsSummary(config),
+    openRouter: await openRouterSettingsSummary(config),
   };
 }
 
@@ -252,6 +277,96 @@ async function slackSettingsSummary(config: BrainAdminServiceConfig) {
     values: "write-only; presence only",
     env,
   };
+}
+
+
+async function openRouterSettingsSummary(config: BrainAdminServiceConfig) {
+  const env = await envPresenceSummary(config, OPENROUTER_ENV_KEYS);
+  const codexProfile = await codexProfileMetadata(config.codexHomePath, "openrouter");
+  const codexChatConfig = config.codexChatConfigFile ? await codexChatProviderConfigSummary(config.codexChatConfigFile) : { configured: false };
+  return {
+    values: "write-only; presence only",
+    keyEnv: "OPENROUTER_API_KEY",
+    recommendedCodexProfile: "openrouter",
+    recommendedModelProvider: "openrouter",
+    recommendedServiceTierMode: "omit",
+    codexProfile,
+    codexChatConfig,
+    env,
+    restartPath: "Use Deploy / Restart: run plan, then restart codex-chat after writing settings.",
+    testDispatch: "After restart, ask codex-chat to dispatch a subagent with codexProfile=openrouter, modelProvider=openrouter, serviceTierMode=omit, and the chosen OpenRouter model slug."
+  };
+}
+
+async function handleOpenRouterSettingsWrite(response: ServerResponse, config: BrainAdminServiceConfig, adminEmail: string, payload: Record<string, unknown>): Promise<void> {
+  let input: OpenRouterSettingsInput;
+  try {
+    input = parseOpenRouterSettingsPayload(payload);
+  } catch (error) {
+    return sendJson(response, 400, { error: "invalid_openrouter_settings", message: error instanceof Error ? error.message : String(error) });
+  }
+  const confirmation = parseOpenRouterSettingsConfirmation(payload.confirmation);
+  const envFile = resolveEnvFilePath(config.codexChatEnvFile);
+  const configFile = config.codexChatConfigFile ?? "";
+  const profilePath = codexProfilePath(config.codexHomePath, input.codexProfile);
+  const writtenEnvKeys = [
+    ...(input.apiKey ? ["OPENROUTER_API_KEY"] : []),
+    "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL",
+    "CODEX_CHAT_SUBAGENTS_DEFAULT_CODEX_PROFILE",
+    "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL_PROVIDER",
+    "CODEX_CHAT_SUBAGENTS_SERVICE_TIER_MODE",
+    "CODEX_CHAT_SUBAGENTS_ALLOW_PROVIDER_OVERRIDE",
+    "CODEX_CHAT_SUBAGENTS_ALLOWED_CODEX_PROFILES",
+    "CODEX_CHAT_SUBAGENTS_ALLOWED_MODEL_PROVIDERS",
+    ...(input.backend ? ["CODEX_CHAT_SUBAGENTS_BACKEND"] : [])
+  ];
+  if (!confirmation
+    || confirmation.token !== OPENROUTER_SETTINGS_CONFIRMATION_TOKEN
+    || confirmation.action !== "openrouter.settings.write"
+    || confirmation.envFile !== envFile
+    || confirmation.profilePath !== profilePath
+    || !sameStringSet(confirmation.keys, writtenEnvKeys)) {
+    return sendJson(response, 400, {
+      error: "confirmation_required",
+      required: { token: OPENROUTER_SETTINGS_CONFIRMATION_TOKEN, action: "openrouter.settings.write", envFile, profilePath, keys: writtenEnvKeys }
+    });
+  }
+
+  const updates: Record<string, string> = {
+    CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL: input.model,
+    CODEX_CHAT_SUBAGENTS_DEFAULT_CODEX_PROFILE: input.codexProfile,
+    CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL_PROVIDER: input.modelProvider,
+    CODEX_CHAT_SUBAGENTS_SERVICE_TIER_MODE: input.serviceTierMode,
+    CODEX_CHAT_SUBAGENTS_ALLOW_PROVIDER_OVERRIDE: "true",
+    CODEX_CHAT_SUBAGENTS_ALLOWED_CODEX_PROFILES: input.codexProfile,
+    CODEX_CHAT_SUBAGENTS_ALLOWED_MODEL_PROVIDERS: input.modelProvider
+  };
+  if (input.apiKey) updates.OPENROUTER_API_KEY = input.apiKey;
+  if (input.backend) updates.CODEX_CHAT_SUBAGENTS_BACKEND = input.backend;
+
+  await writeMergedEnvFile(config.codexChatEnvFile, updates, "Brain OpenRouter settings");
+  await writeOpenRouterCodexProfile(config.codexHomePath, input);
+  if (config.codexChatConfigFile) await writeCodexChatProviderConfig(config.codexChatConfigFile, input);
+  await appendAudit(config, {
+    action: "openrouter.settings.write",
+    adminEmail,
+    envFile,
+    configFile: config.codexChatConfigFile ?? null,
+    profilePath,
+    keys: writtenEnvKeys,
+    values: "write-only"
+  });
+  return sendJson(response, 200, {
+    ok: true,
+    envFile,
+    configFile: config.codexChatConfigFile ?? null,
+    profilePath,
+    writtenKeys: writtenEnvKeys,
+    values: "write-only",
+    presence: await readEnvKeyPresence(config.codexChatEnvFile, writtenEnvKeys),
+    apiKeyPresent: Boolean(input.apiKey) || Boolean((await readEnvKeyPresence(config.codexChatEnvFile, ["OPENROUTER_API_KEY"])).OPENROUTER_API_KEY),
+    restartRequired: true
+  });
 }
 
 async function envPresenceSummary(config: BrainAdminServiceConfig, keysToRead: readonly string[]) {
@@ -388,6 +503,186 @@ async function handleOperation(response: ServerResponse, config: BrainAdminServi
   return sendJson(response, result.status === 0 ? 200 : 500, { ok: result.status === 0, operation, status: result.status, signal: result.signal, timedOut: result.timedOut, stdout: redactOutput(result.stdout), stderr: redactOutput(result.stderr) });
 }
 
+
+
+interface OpenRouterSettingsInput {
+  apiKey?: string;
+  model: string;
+  codexProfile: string;
+  modelProvider: string;
+  serviceTierMode: "auto" | "always" | "omit";
+  backend?: "codex_exec" | "codex_app_server";
+}
+
+function parseOpenRouterSettingsPayload(payload: Record<string, unknown>): OpenRouterSettingsInput {
+  const apiKey = typeof payload.apiKey === "string" ? payload.apiKey.trim() : "";
+  const model = stringField(payload.model, "model", "anthropic/claude-sonnet-4.5");
+  const codexProfile = stringField(payload.codexProfile, "codexProfile", "openrouter");
+  const modelProvider = stringField(payload.modelProvider, "modelProvider", "openrouter");
+  const serviceTierMode = stringField(payload.serviceTierMode, "serviceTierMode", "omit");
+  const backendRaw = typeof payload.backend === "string" ? payload.backend.trim() : "";
+  if (!/^[A-Za-z0-9._/-]+$/.test(model)) throw new Error("Invalid OpenRouter model slug");
+  if (!/^[A-Za-z0-9._-]+$/.test(codexProfile)) throw new Error("Invalid Codex profile name");
+  if (!/^[A-Za-z0-9._-]+$/.test(modelProvider)) throw new Error("Invalid model provider name");
+  if (!["auto", "always", "omit"].includes(serviceTierMode)) throw new Error("Invalid service tier mode");
+  if (backendRaw && backendRaw !== "codex_exec" && backendRaw !== "codex_app_server") throw new Error("Invalid subagent backend");
+  return { apiKey: apiKey || undefined, model, codexProfile, modelProvider, serviceTierMode: serviceTierMode as "auto" | "always" | "omit", backend: backendRaw as OpenRouterSettingsInput["backend"] || undefined };
+}
+
+function stringField(value: unknown, name: string, fallback: string): string {
+  const out = typeof value === "string" ? value.trim() : fallback;
+  if (!out) throw new Error(`${name} is required`);
+  return out;
+}
+
+function parseOpenRouterSettingsConfirmation(value: unknown): { token?: string; action?: string; envFile?: string; profilePath?: string; keys: string[] } | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  return {
+    token: typeof record.token === "string" ? record.token : undefined,
+    action: typeof record.action === "string" ? record.action : undefined,
+    envFile: typeof record.envFile === "string" ? record.envFile : undefined,
+    profilePath: typeof record.profilePath === "string" ? record.profilePath : undefined,
+    keys: Array.isArray(record.keys) ? record.keys.filter((key): key is string => typeof key === "string") : [],
+  };
+}
+
+function codexProfilePath(codexHomePath: string, profile: string): string {
+  return path.join(resolveEnvFilePath(codexHomePath), `${profile}.config.toml`);
+}
+
+async function writeOpenRouterCodexProfile(codexHomePath: string, input: OpenRouterSettingsInput): Promise<void> {
+  const filePath = codexProfilePath(codexHomePath, input.codexProfile);
+  const body = [
+    "# Managed by Brain control plane. No API key value is stored here.",
+    `model = ${tomlString(input.model)}`,
+    `model_provider = ${tomlString(input.modelProvider)}`,
+    "model_reasoning_effort = \"medium\"",
+    "",
+    `[model_providers.${input.modelProvider}]`,
+    "name = \"OpenRouter\"",
+    "base_url = \"https://openrouter.ai/api/v1\"",
+    "wire_api = \"chat\"",
+    "env_key = \"OPENROUTER_API_KEY\"",
+    "env_key_instructions = \"Set OPENROUTER_API_KEY in the codex-chat service environment.\"",
+    ""
+  ].join("\n");
+  await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmp, body, { mode: 0o600 });
+  await rename(tmp, filePath);
+  await chmod(filePath, 0o600);
+}
+
+async function writeCodexChatProviderConfig(filePath: string, input: OpenRouterSettingsInput): Promise<void> {
+  const resolved = resolveEnvFilePath(filePath);
+  await mkdir(path.dirname(resolved), { recursive: true, mode: 0o700 });
+  const current = await readTextIfPresent(resolved);
+  let next = updateTomlSection(current, "subagents", {
+    defaultModel: input.model,
+    defaultCodexProfile: input.codexProfile,
+    defaultModelProvider: input.modelProvider,
+    serviceTierMode: input.serviceTierMode,
+    allowProviderOverride: true,
+    allowedCodexProfiles: [input.codexProfile],
+    allowedModelProviders: [input.modelProvider],
+    ...(input.backend ? { backend: input.backend } : {})
+  });
+  const tmp = `${resolved}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmp, next, { mode: 0o600 });
+  await rename(tmp, resolved);
+  await chmod(resolved, 0o600);
+}
+
+async function codexProfileMetadata(codexHomePath: string, profile: string): Promise<{ path: string; present: boolean; mode?: string; size?: number }> {
+  const filePath = codexProfilePath(codexHomePath, profile);
+  try {
+    const info = await stat(filePath);
+    return { path: filePath, present: true, mode: `0${(info.mode & 0o777).toString(8)}`, size: info.size };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { path: filePath, present: false };
+    throw error;
+  }
+}
+
+async function codexChatProviderConfigSummary(filePath: string): Promise<{ configured: boolean; path: string; subagents?: Record<string, unknown> }> {
+  const resolved = resolveEnvFilePath(filePath);
+  const text = await readTextIfPresent(resolved);
+  return {
+    configured: Boolean(text),
+    path: resolved,
+    subagents: {
+      defaultModel: readTomlValue(text, "subagents", "defaultModel"),
+      defaultCodexProfile: readTomlValue(text, "subagents", "defaultCodexProfile"),
+      defaultModelProvider: readTomlValue(text, "subagents", "defaultModelProvider"),
+      serviceTierMode: readTomlValue(text, "subagents", "serviceTierMode"),
+      allowProviderOverride: readTomlValue(text, "subagents", "allowProviderOverride"),
+      allowedCodexProfiles: readTomlValue(text, "subagents", "allowedCodexProfiles"),
+      allowedModelProviders: readTomlValue(text, "subagents", "allowedModelProviders"),
+    }
+  };
+}
+
+function updateTomlSection(sourceText: string, section: string, updates: Record<string, string | boolean | string[]>): string {
+  const lines = sourceText.replace(/\r\n/g, "\n").split("\n");
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  const header = `[${section}]`;
+  let start = lines.findIndex((line) => line.trim() === header);
+  if (start < 0) {
+    if (lines.length > 0 && lines[lines.length - 1]?.trim() !== "") lines.push("");
+    lines.push(header);
+    start = lines.length - 1;
+  }
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^\s*\[[^\]]+\]\s*$/.test(lines[i] ?? "")) { end = i; break; }
+  }
+  const updateKeys = new Set(Object.keys(updates));
+  const seen = new Set<string>();
+  for (let i = start + 1; i < end; i++) {
+    const match = /^\s*([A-Za-z0-9_]+)\s*=/.exec(lines[i] ?? "");
+    const key = match?.[1];
+    if (!key || !updateKeys.has(key)) continue;
+    lines[i] = `${key} = ${tomlValue(updates[key] ?? "")}`;
+    seen.add(key);
+  }
+  const additions = Object.keys(updates).filter((key) => !seen.has(key)).map((key) => `${key} = ${tomlValue(updates[key] ?? "")}`);
+  lines.splice(end, 0, ...additions);
+  return `${lines.join("\n")}\n`;
+}
+
+function readTomlValue(sourceText: string, section: string, key: string): string | null {
+  const sectionMatch = new RegExp(`^\\s*\\[${escapeRegExp(section)}\\]\\s*$`, "m").exec(sourceText);
+  if (!sectionMatch) return null;
+  const rest = sourceText.slice((sectionMatch.index ?? 0) + sectionMatch[0].length);
+  const nextSection = rest.search(/\n\s*\[[^\]]+\]\s*/);
+  const body = nextSection >= 0 ? rest.slice(0, nextSection) : rest;
+  const keyMatch = new RegExp(`^\\s*${escapeRegExp(key)}\\s*=\\s*(.+?)\\s*$`, "m").exec(body);
+  return keyMatch?.[1] ?? null;
+}
+
+function tomlValue(value: string | boolean | string[]): string {
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (Array.isArray(value)) return `[${value.map(tomlString).join(", ")}]`;
+  return tomlString(value);
+}
+
+function tomlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function readTextIfPresent(filePath: string): Promise<string> {
+  try {
+    return await readFile(filePath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+    throw error;
+  }
+}
 
 function operationCommandSummary(config: BrainAdminServiceConfig): Record<"plan" | "restart" | "deploy", { configured: boolean; command: string | null }> {
   return {
