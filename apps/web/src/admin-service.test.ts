@@ -40,6 +40,7 @@ function config(root: string, overrides: Partial<BrainAdminServiceConfig> = {}):
     operationTimeoutMs: 5_000,
     slackEventsBaseUrl: "https://brain.decisive-outcomes.com",
     slackEventsPath: "/api/slack/events",
+    slackAppId: undefined,
     ...overrides,
   } as BrainAdminServiceConfig;
 }
@@ -206,6 +207,8 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /https:\/\/brain\.decisive-outcomes\.com\/api\/slack\/events/);
   assert.match(html, /no trailing slash/);
   assert.match(html, /I configured this inside Slack, not only in Brain/);
+  assert.match(html, /Open Slack API app settings/);
+  assert.match(html, /https:\/\/api\.slack\.com\/apps/);
   assert.match(html, /Finish \/ record install metadata/);
   assert.match(html, /Required settings/);
   assert.match(html, /Public routing/);
@@ -430,8 +433,10 @@ test("brain admin exposes explicit Slack settings as write-only presence metadat
     await withServer(config(root), authDeps(), async (baseUrl) => {
       const settings = await fetch(`${baseUrl}/api/admin/brain/slack/settings`, { headers: authHeaders() });
       assert.equal(settings.status, 200);
-      const settingsPayload = await settings.json() as { publicEventsUrl: string; env: { allowedKeys: string[]; keys: Array<{ key: string; present: boolean; value: string | null }> } };
+      const settingsPayload = await settings.json() as { publicEventsUrl: string; appSettingsUrl: string; slackAppId: string | null; env: { allowedKeys: string[]; keys: Array<{ key: string; present: boolean; value: string | null }> } };
       assert.equal(settingsPayload.publicEventsUrl, "https://brain.decisive-outcomes.com/api/slack/events");
+      assert.equal(settingsPayload.slackAppId, null);
+      assert.equal(settingsPayload.appSettingsUrl, "https://api.slack.com/apps");
       assert.ok(settingsPayload.env.allowedKeys.includes("SLACK_SIGNING_SECRET"));
       assert.ok(settingsPayload.env.allowedKeys.includes("SLACK_APP_TOKEN"));
 
@@ -469,6 +474,23 @@ test("brain admin exposes explicit Slack settings as write-only presence metadat
       const fileText = await readFile(path.join(root, "codex-chat.env"), "utf8");
       assert.match(fileText, /SLACK_SIGNING_SECRET='signing-secret'/);
       assert.match(fileText, /CODEX_CHAT_BASE_URL='https:\/\/brain\.decisive-outcomes\.com'/);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+
+test("brain admin links directly to Slack app settings when a non-secret app id is configured", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-slack-app-id-"));
+  try {
+    await withServer(config(root, { slackAppId: "A0123456789" }), authDeps(), async (baseUrl) => {
+      const settings = await fetch(`${baseUrl}/api/admin/brain/slack/settings`, { headers: authHeaders() });
+      assert.equal(settings.status, 200);
+      const payload = await settings.json() as { appSettingsUrl: string; slackAppId: string | null };
+      assert.equal(payload.slackAppId, "A0123456789");
+      assert.equal(payload.appSettingsUrl, "https://api.slack.com/apps/A0123456789");
+      assert.equal(JSON.stringify(payload).includes("xox"), false);
     });
   } finally {
     await rm(root, { recursive: true, force: true });

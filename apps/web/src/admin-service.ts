@@ -73,6 +73,7 @@ export interface BrainAdminServiceConfig {
   operationTimeoutMs: number;
   slackEventsBaseUrl: string;
   slackEventsPath: string;
+  slackAppId?: string;
 }
 
 export interface BrainAdminServiceDeps {
@@ -124,6 +125,7 @@ export function loadBrainAdminServiceConfig(env: NodeJS.ProcessEnv = process.env
     operationTimeoutMs: Number.parseInt(env.BRAIN_ADMIN_OPERATION_TIMEOUT_MS || "120000", 10),
     slackEventsBaseUrl: (env.BRAIN_SLACK_EVENTS_BASE_URL || SLACK_EVENTS_BASE_URL).trim(),
     slackEventsPath: normalizeRoutePath(env.BRAIN_SLACK_EVENTS_PATH || SLACK_EVENTS_PATH),
+    slackAppId: normalizeSlackAppId(env.BRAIN_SLACK_APP_ID || env.SLACK_APP_ID || env.CODEX_CHAT_SLACK_APP_ID || ""),
   };
 }
 
@@ -272,6 +274,8 @@ async function slackSettingsSummary(config: BrainAdminServiceConfig) {
     publicEventsUrl: buildSlackEventsUrl(config.slackEventsBaseUrl, config.slackEventsPath),
     eventsBaseUrl: config.slackEventsBaseUrl,
     eventsPath: config.slackEventsPath,
+    slackAppId: config.slackAppId ?? null,
+    appSettingsUrl: buildSlackAppSettingsUrl(config.slackAppId),
     upstream: "codex-chat internal API on 127.0.0.1:49346",
     runtimeOwner: "codex-chat verifies Slack signatures and normalizes runtime events",
     values: "write-only; presence only",
@@ -465,6 +469,18 @@ async function runNodeScript(command: string, args: string[], timeoutMs: number)
       resolve({ status, signal, stdout, stderr, timedOut });
     });
   });
+}
+
+function normalizeSlackAppId(value: string): string | undefined {
+  const trimmed = value.trim();
+  // Slack app IDs are non-secret identifiers such as A0123456789. Reject
+  // unexpected input instead of reflecting arbitrary config into an href.
+  if (!trimmed) return undefined;
+  return /^A[A-Z0-9]{8,}$/.test(trimmed) ? trimmed : undefined;
+}
+
+function buildSlackAppSettingsUrl(appId?: string): string {
+  return appId ? `https://api.slack.com/apps/${appId}` : "https://api.slack.com/apps";
 }
 
 function buildSlackEventsUrl(baseUrl: string, eventsPath: string): string {
