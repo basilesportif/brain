@@ -202,6 +202,10 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /Advanced/);
   assert.match(html, /Slack setup wizard/);
   assert.match(html, /Slack setup wizard state/);
+  assert.match(html, /Configure Event Subscriptions inside Slack/);
+  assert.match(html, /https:\/\/brain\.decisive-outcomes\.com\/api\/slack\/events/);
+  assert.match(html, /no trailing slash/);
+  assert.match(html, /I configured this inside Slack, not only in Brain/);
   assert.match(html, /Finish \/ record install metadata/);
   assert.match(html, /Required settings/);
   assert.match(html, /Public routing/);

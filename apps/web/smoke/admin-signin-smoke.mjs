@@ -82,6 +82,9 @@ async function runAdminDashboardScenario(page, baseUrl, viewport) {
   await page.locator('#mode-title').filter({ hasText: /Slack setup wizard: Slack (setup required|partially configured)/ }).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#slack-setup').waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#slack-setup.setup-primary').waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#slack-wizard', { hasText: 'Configure Event Subscriptions inside Slack' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#slack-wizard', { hasText: 'no trailing slash' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#slack-wizard', { hasText: 'I configured this inside Slack, not only in Brain' }).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#mission').waitFor({ state: 'hidden', timeout: 5_000 });
   await page.locator('button:has-text("Skip Slack for now")').first().click();
   await page.locator('#mission-title', { hasText: 'Mission Control' }).waitFor({ state: 'visible', timeout: 5_000 });

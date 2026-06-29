@@ -113,7 +113,16 @@ Use these steps for first install or manifest updates:
 9. Open **OAuth & Permissions** and click **Install to Workspace** or
    **Reinstall to Workspace** if Slack says scopes changed.
 10. Approve the requested bot scopes.
-11. Open **Event Subscriptions** and verify Slack accepts the request URL.
+11. **Do the Event Subscriptions step inside Slack, not only in Brain:**
+    1. In the Slack API app settings, open **Event Subscriptions**.
+    2. Turn **Enable Events** **On**.
+    3. Paste exactly
+       `https://brain.decisive-outcomes.com/api/slack/events` as the
+       **Request URL**. Do **not** add a trailing slash.
+    4. Wait for Slack to show **Verified** next to the Request URL.
+    5. Click **Save Changes**.
+    6. Confirm this checklist item in your notes: "I configured Event
+       Subscriptions inside Slack, not only in Brain."
 12. If using private channels, invite the bot to each private channel with
     `/invite @<bot name>`.
 
