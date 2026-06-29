@@ -170,6 +170,21 @@ secrets:
 - Slack's manifest request URL exactly matches the Brain Events URL.
 - The signing secret was copied from **Basic Information**, not from OAuth.
 
+## Current validation boundary
+
+Brain can currently verify the control-plane pieces: the configured public
+Events URL, rendered manifest contents, Slack env-key presence metadata,
+configured service path/name, and whether `brain-admin.service` and
+`codex-chat.service` are active. `codex-chat` can verify runtime pieces once
+Slack calls it: request signatures, URL verification responses, event
+deduplication/normalization, model dispatch, and Slack Web API replies.
+
+Until the future Slack callback/test-event telemetry plan is implemented, Brain
+does not have an automatic dashboard proof that Slack delivered an event or that
+a canary reply succeeded. Treat Slack's Event Subscriptions verification screen,
+manual DM/app-mention canaries, and redacted codex-chat Slack logs as the live
+source of truth.
+
 ## Live Slack canary checklist
 
 Run these from Slack after restart:
