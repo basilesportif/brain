@@ -124,6 +124,7 @@ API with these modules:
 - show local or remote `codex-chat` host/IP/path/service/env/config selected by
   the instance, not by stale repo-registry deployment records;
 - expose an explicit Slack settings panel for `SLACK_SIGNING_SECRET`, `SLACK_BOT_TOKEN`, optional `SLACK_APP_TOKEN`, `CODEX_CHAT_SLACK_ENABLED`, `CODEX_CHAT_SLACK_EVENTS_PATH`, and `CODEX_CHAT_BASE_URL`, with values write-only and presence-only;
+- expose model-provider configuration status for `codex-chat`: main-loop startup model/provider/profile, subagent default model/provider/profile, per-dispatch override policy and allowlists, service-tier mode, and provider env-key presence metadata;
 - render, copy, and download the codex-chat-owned Slack manifest using Brain's public Events URL;
 - show resolved repo-registry entries for `brain`, `codex-chat`,
   `assistant-agent-logic`, and `assistant-agent-data` as read-only context;
@@ -321,6 +322,20 @@ UI additions:
 7. Promote health state from `configured_presence_only` to live states in the UI
    after successful production canaries and operator review.
 
+### Model-provider defaults and override control plane
+
+Brain should become the operator-facing UI/control plane for `codex-chat` model-provider defaults and policies. `codex-chat` remains the runtime owner for actually resolving a dispatch, enforcing allowlists, launching Codex child processes, and reporting status/detail metadata.
+
+Brain's future model-provider administration should:
+
+- edit redacted `codex-chat` config/env metadata for main-loop startup model/provider/profile and subagent default model/provider/profile;
+- manage provider override policy, including per-dispatch override enablement, allowed Codex profiles, allowed model-provider IDs, allowed behavior profiles, and service-tier mode;
+- show provider API-key/env-key presence only, never raw values;
+- make clear that the main loop remains OpenAI until an operator applies a startup-time provider/model change and restarts `codex-chat`;
+- support a subagent pilot workflow first, including one-off per-dispatch override testing for a selected model/provider before promoting it to a default;
+- render planned config/env diffs and require explicit approval before writes or restarts;
+- after apply/restart, display the active main-loop selection, subagent defaults, recent dispatch overrides, and any allowlist denials from `codex-chat` status/detail surfaces.
+
 ### Environment and secrets metadata
 
 - manage env var names, secret-reference names, file paths, required/optional
@@ -494,6 +509,9 @@ and canonical deployment-ledger writes beyond the initial JSONL audit trail.
 
 - [ ] Add Slack, Telegram, provider, queue, loop/monitor, and subagent
       health/status views.
+- [ ] Add model-provider defaults UI for `codex-chat`, covering main-loop
+      startup settings, subagent defaults, per-dispatch override policy,
+      allowlists, env-key presence metadata, and approved apply/restart flow.
 - [ ] Run safe Slack canary plans and display outcomes without exposing token
       values.
 - [ ] Record operation outcomes and make failures visible in the admin UI.
