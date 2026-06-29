@@ -214,23 +214,55 @@ source of truth.
 
 ## Live Slack canary checklist
 
-Run these from Slack after restart:
+Run these from Slack after restart. The canaries must prove both delivery and
+multi-channel conversation coherence; Slack should feel like the Telegram main
+loop inside the right conversation, without leaking context across channels.
 
-1. **Public channel mention** — mention the bot:
+1. **Public channel root-to-thread** — mention the bot:
    `@Brain canary: reply with the current UTC time and the word slack-canary`.
-2. **Direct message** — DM the bot with the same canary prompt.
-3. **Private channel** — invite the bot with `/invite @Brain`, then send a
-   canary mention/message in the private channel.
-4. **MPIM/group DM** — include the bot in a group DM and send the canary prompt.
+   Confirm the reply starts/uses a thread. Then reply in that thread with
+   `what word did I ask you to include?` and confirm the same thread session
+   remembers `slack-canary`.
+2. **Public channel ambient context** — in the same public channel, make a short
+   preceding non-secret statement, then mention the bot asking it to use the
+   recent channel context. Confirm any channel context used is bounded and the
+   assistant continues in the new thread.
+3. **Second public channel isolation** — repeat a similar prompt in a different
+   public channel and confirm the first channel's details are not reused unless
+   an explicit capability-checked channel read is requested.
+4. **Direct message** — DM the bot with the canary prompt, follow up later, and
+   confirm the DM conversation resumes without reading public/private channel
+   context by default.
+5. **Private channel** — invite the bot with `/invite @Brain`, then send a
+   canary mention/message, follow up in the thread, and confirm replies stay in
+   the private channel thread.
+6. **Private-to-public leakage guard** — from a public channel, ask for details
+   from the private-channel canary without granting export. Confirm the runtime
+   refuses or asks for explicit authorization rather than leaking private
+   context.
+7. **MPIM/group DM** — include the bot in a group DM and run the continuity
+   prompt/follow-up. Confirm member/channel metadata is not treated as an
+   authorization bypass.
+8. **Subagent callback routing** — from a Slack thread, ask for work that
+   dispatches a subagent. Confirm progress/final callback output returns to the
+   originating Slack thread/DM after the main turn hibernates or waits.
 
 For each canary, confirm:
 
 - Slack receives a timely reply in the correct channel/thread/DM.
 - codex-chat logs show accepted Slack event delivery, not signature rejection.
 - event normalization identifies the correct team/channel/user/thread.
-- runtime dispatch completes and `chat.postMessage` succeeds.
-- no raw Slack tokens or signing secrets appear in logs, browser responses, or
-  copied troubleshooting output.
+- conversation/session identity is correct for root mentions, thread replies,
+  DMs, MPIMs, public channels, and private channels.
+- selected context source is expected: thread-only, bounded channel window,
+  channel summary/search, or denied/no-context.
+- runtime dispatch completes and `chat.postMessage` succeeds against the
+  intended `OutputTarget`.
+- subagent progress/final callbacks carry the originating Slack channel/thread
+  metadata and do not fall back to an unrelated channel.
+- no raw Slack tokens, signing secrets, raw private-channel text, or unrelated
+  channel context appear in logs, browser responses, copied troubleshooting
+  output, or public-channel replies.
 
 If delivery fails, check Slack **Event Subscriptions** retry/error details,
 Brain/codex-chat health, and codex-chat journal lines around the Slack
