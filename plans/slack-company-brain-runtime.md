@@ -578,9 +578,15 @@ installed and live app-mention/DM/private-channel canaries pass.
 - [x] Implement Slack renderer support for source-thread/source-conversation
       text replies and final answers through `OutputTarget`.
 - [x] Add tests with fixture events and no live network calls by default.
-- [ ] Install the real Slack app in a workspace, point Events API at the
-      deployed codex-chat URL, and run live app-mention/DM/private-channel
-      canaries before declaring Phase 2 operationally complete.
+- [~] Install the real Slack app in a workspace, point Events API at the Brain
+      public URL that reverse-proxies to codex-chat, and run live
+      app-mention/DM/private-channel canaries before declaring Phase 2
+      operationally complete. Basic inbound Slack Events delivery through
+      `https://brain.decisive-outcomes.com/api/slack/events` is confirmed as of
+      2026-06-29, and an outbound reply directive was attempted; final outbound
+      Slack reply success still needs a canary proving the reply lands in the
+      expected source thread/DM/channel with the installed app scopes and bot
+      membership.
 
 ### Phase 3 — promote Brain as the long-running web/admin control plane
 

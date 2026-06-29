@@ -107,7 +107,8 @@ Use these steps for first install or manifest updates:
 4. Select the target workspace, currently **Decisive Outcomes**.
 5. Choose **JSON** if Slack asks for the manifest format.
 6. Paste the Brain-rendered manifest JSON, or upload the downloaded JSON file.
-7. Review the summary. Confirm the Events URL is exactly
+7. Review the summary. Confirm the app/bot display name is **Brain** and the
+   Events URL is exactly
    `https://brain.decisive-outcomes.com/api/slack/events`.
 8. Click **Create** / **Save Changes**.
 9. Open **OAuth & Permissions** and click **Install to Workspace** or
@@ -128,6 +129,15 @@ Use these steps for first install or manifest updates:
 
 For existing apps, update **App Manifest**, save, then reinstall if Slack reports
 new scopes or event subscriptions.
+
+If an older Slack app named **Codex Chat** or similar still exists, keep it only
+as a temporary rollback path until the Brain app passes the canary checklist.
+Then remove the old app from Slack: open <https://api.slack.com/apps>, select
+the old Codex/Codex Chat app, use Slack's uninstall/remove-from-workspace action
+under **App Home** or **OAuth & Permissions**, and delete/archive the app if it
+is no longer needed. Do not reuse old bot tokens in docs or git; write the
+Brain app's current signing secret and bot token only through Brain's write-only
+settings flow.
 
 ## Where to find Slack secrets
 
@@ -181,6 +191,14 @@ secrets:
 
 ## Current validation boundary
 
+Live status as of 2026-06-29: the basic first Slack validation step is working.
+Inbound Slack Events delivery to codex-chat through Brain's public URL
+(`https://brain.decisive-outcomes.com/api/slack/events`) has been confirmed,
+and an outbound reply directive was attempted. Treat the outbound reply as not
+fully proven until a canary confirms Slack receives the reply in the expected
+source thread/DM/channel; any remaining issue is likely in outbound scope,
+channel membership, or reply routing rather than inbound Events delivery.
+
 Brain can currently verify the control-plane pieces: the configured public
 Events URL, rendered manifest contents, Slack env-key presence metadata,
 configured service path/name, and whether `brain-admin.service` and
@@ -199,9 +217,9 @@ source of truth.
 Run these from Slack after restart:
 
 1. **Public channel mention** — mention the bot:
-   `@Codex Chat canary: reply with the current UTC time and the word slack-canary`.
+   `@Brain canary: reply with the current UTC time and the word slack-canary`.
 2. **Direct message** — DM the bot with the same canary prompt.
-3. **Private channel** — invite the bot with `/invite @Codex Chat`, then send a
+3. **Private channel** — invite the bot with `/invite @Brain`, then send a
    canary mention/message in the private channel.
 4. **MPIM/group DM** — include the bot in a group DM and send the canary prompt.
 
@@ -244,7 +262,7 @@ should make the same safe sequence explicit:
 
 1. Confirm Brain instance and runtime target.
 2. Show/copy Brain Events URL.
-3. Render/copy/download the codex-chat-owned manifest.
+3. Render/copy/download the Brain Slack manifest from the codex-chat runtime contract.
 4. Guide Slack UI app creation/update and install-to-workspace.
 5. Prompt for signing secret and bot token as write-only values.
 6. Plan and restart codex-chat after env writes.

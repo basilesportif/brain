@@ -202,7 +202,7 @@ async function handleAdminApi(request: IncomingMessage, response: ServerResponse
   }
   if (request.method === "GET" && url.pathname === "/api/admin/brain/slack/manifest/download") {
     const manifest = await renderSlackManifestForBrain(config);
-    return sendDownload(response, "codex-chat.slack.manifest.json", manifest.text);
+    return sendDownload(response, "brain.slack.manifest.json", manifest.text);
   }
   if (request.method === "POST" && url.pathname === "/api/admin/brain/codex-chat/operation") {
     const payload = await readJsonBody(request);

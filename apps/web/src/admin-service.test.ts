@@ -492,6 +492,10 @@ process.stdout.write(JSON.stringify({ settings: { event_subscriptions: { request
       assert.equal(payload.requestUrl, "https://brain.decisive-outcomes.com/api/slack/events");
       assert.equal(payload.renderer, script);
       assert.match(payload.text, /brain\.decisive-outcomes\.com\/api\/slack\/events/);
+
+      const download = await fetch(`${baseUrl}/api/admin/brain/slack/manifest/download`, { headers: authHeaders() });
+      assert.equal(download.status, 200);
+      assert.equal(download.headers.get("content-disposition"), 'attachment; filename="brain.slack.manifest.json"');
     });
   } finally {
     await rm(root, { recursive: true, force: true });
