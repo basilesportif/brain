@@ -1,37 +1,42 @@
 # Slack Channel and Thread Context Hydration Design
 
 Date: 2026-06-29
-Status: detailed implementation plan / docs-only / no runtime behavior change
+Status: implementation approved / active runtime behavior
 Owners: Brain control plane, codex-chat Slack runtime adapter
 Parent plan: [`plans/slack-company-brain-runtime.md`](./slack-company-brain-runtime.md)
 
-## Implementation safety notice
+## Implementation decision and safety notice
 
-This document is intentionally **docs-only**. It does not request or authorize a
-runtime implementation yet.
+Tim has decided not to start with a shadow-only rollout. Implement the visible
+Slack behavior from the start while preserving the already-working Slack
+inbound/outbound path and Telegram behavior. The active product decision is
+Claude-like Slack UX:
 
-Until Tim explicitly asks for implementation, every Slack context/hydration step
-below must be treated as planning, shadow-mode design, or read-only validation.
-The current working Slack path must remain protected:
+1. Root Slack channel `app_mention` events reply in a Slack thread attached to
+   the invoking root message (`thread_ts = event.ts`).
+2. Mentions already inside an existing Slack thread continue in that source
+   thread (`thread_ts = event.thread_ts`).
+3. Root channel mentions hydrate a safely bounded, redacted recent source-channel
+   window. Existing thread mentions hydrate safely bounded, redacted source-thread
+   replies.
+4. Hydration is prompt-visible in the main loop, not shadow-only, but it must
+   fail closed to source-event-only context when Slack scopes, membership, rate
+   limits, or other API errors prevent history reads.
+5. Subagents and late callbacks must persist and reuse the originating Slack
+   output target so root-channel work returns to the attached root thread and
+   thread-originated work returns to the same thread.
+6. Telemetry must record metadata-only routing/context decisions without storing
+   raw Slack text in telemetry.
 
-1. Slack Events delivery through Brain to codex-chat must continue to fast-ack,
-   enqueue, normalize, and send replies exactly as the current runtime supports.
-2. Context hydration must initially be additive and read-only. It must not change
-   `chat.postMessage` routing, `thread_ts`, channel IDs, direct-message routing,
-   subagent callback delivery, or final response delivery in production.
-3. New scopes, event subscriptions, journal retention, context summaries,
-   telemetry, and Brain admin controls must be gated by explicit feature flags
-   and per-workspace/per-channel allowlists.
-4. Any future change that affects visible Slack delivery must be separately
-   implemented, reviewed, canaried, and rolled back independently from history
-   reads or context indexing.
-5. The first implementation slice should prove hydration in logs/telemetry using
-   shadow outputs and test fixtures before a prompt sees hydrated text.
+Guardrails remain: fast-ack Slack Events, keep Slack tokens out of prompts and
+subagents, bound all history reads, redact prompt context, keep source channel
+and thread labels attached, do not read/post across Slack boundaries without an
+explicit future control, and do not break Telegram.
 
 ## Research inputs and UX takeaways
 
 The design borrows UX lessons from Anthropic/Claude Slack surfaces while keeping
-Brain/codex-chat's policy and Tim's preferred channel-visible behavior.
+Brain/codex-chat's policy and Tim's root-thread delivery behavior.
 
 Primary inputs checked on 2026-06-29:
 
@@ -79,13 +84,13 @@ Observed Claude-like UX principles to adapt:
 
 Brain/codex-chat deviations from Claude where Tim has made a product decision:
 
-- Claude Tag may complete work in a Slack thread. Brain's root-channel default
-  remains **channel-visible**: a root channel mention should post the answer to
-  the main channel unless an explicit routing control says to use a thread.
-- Brain adopts a **thread-first default for context selection**, not thread-forcing delivery:
-  if the source event is already in a Slack thread, hydrate/reply within that
-  thread; if the source event is a root channel mention, hydrate the channel
-  window and reply in the channel by default.
+- Brain's root-channel default is now **root-thread delivery**: a root channel
+  mention hydrates recent channel context and posts the answer in a Slack thread
+  attached to the invoking message.
+- Brain adopts a **source-specific context selection** default: if the source
+  event is already in a Slack thread, hydrate/reply within that thread; if the
+  source event is a root channel mention, hydrate the channel window and reply in
+  the attached root thread.
 - Brain must preserve Telegram/codex-chat semantics and subagent routing; Slack
   context is another adapter/context source, not a replacement for the shared
   runtime model.
@@ -97,8 +102,9 @@ Brain/codex-chat deviations from Claude where Tim has made a product decision:
 - Make Brain feel like a Slack-native company-brain participant that understands
   the immediate channel or thread without requiring users to restate recent
   context.
-- Preserve Tim's channel-visible default for root Slack mentions: answers to
-  root channel mentions should remain visible in the channel by default.
+- Preserve Tim's root-thread default for root Slack mentions: answers to root
+  channel mentions should post in a Slack thread attached to the invoking
+  message.
 - Make existing Slack threads first-class side sessions: if a user mentions or
   replies to Brain inside a thread, Brain should use that thread and keep output
   there.
@@ -143,9 +149,6 @@ Brain/codex-chat deviations from Claude where Tim has made a product decision:
 
 ## Non-goals
 
-- Do not implement this document as part of this docs-only change.
-- Do not change current Slack message delivery, thread routing, or subagent
-  callback behavior until a separate implementation request is made.
 - Do not add broad workspace-wide Slack search by default.
 - Do not store all Slack messages for all channels.
 - Do not use Slack display names, channel names, or membership snapshots as the
@@ -165,32 +168,31 @@ Brain/codex-chat deviations from Claude where Tim has made a product decision:
 
 ## Decision record
 
-### DR-001: Thread-first context selection, channel-visible root delivery
+### DR-001: Source-specific context selection, root-thread delivery
 
-**Decision:** Use the most specific Slack conversation boundary for context:
-existing thread first, otherwise root channel. Do not synthesize a new thread
-for root channel mentions as a context default. Visible delivery for root channel
-mentions remains channel-visible by default.
+**Decision:** Use the source-specific Slack boundary for context and delivery.
+Existing thread mentions hydrate/reply in the source thread. Root channel
+mentions hydrate recent channel context and reply in a Slack thread attached to
+the invoking root message (`thread_ts = event.ts`).
 
-**Rationale:** Claude-like Slack UX teaches that threads carry their own context
-and channel mentions use recent channel messages. Tim's explicit preference is
-that a root channel mention should not hide the answer in a new thread. This
-combines both: thread-first when a thread exists, channel-first visible output
-when the user spoke in the channel.
+**Rationale:** Claude-like Slack UX teaches that thread mentions use thread
+context and direct channel mentions can use recent channel messages. Tim's
+implementation decision is to keep root channel asks visible as roots while
+placing Brain's answer and follow-ups in the attached Slack thread.
 
 **Implementation impact:**
 
 - Existing thread mention: `conversationKey = slack:team:{T}:channel:{C}:thread:{thread_ts}`;
-  default `OutputTarget.threadId = thread_ts`.
-- Root channel mention: `conversationKey = slack:team:{T}:channel:{C}`;
-  default `OutputTarget.threadId = undefined`.
-- Shadow-mode hydration can be implemented before this visible routing change,
-  but production routing must not change until separately requested.
+  default `OutputTarget.threadId = thread_ts`; hydrate `conversations.replies`.
+- Root channel mention: `conversationKey = slack:team:{T}:channel:{C}:thread:{message_ts}`;
+  default `OutputTarget.threadId = message_ts`; hydrate bounded
+  `conversations.history` for the source channel.
+- Hydration is assist-mode from the first implementation, with source-event-only
+  fallback when history is unavailable.
 
-**Rollback:** The context hydrator can be disabled without changing delivery.
-The future channel-visible routing correction can be separately rolled back to
-current thread-synthesizing behavior if canaries fail, while leaving read-only
-hydration disabled or in shadow mode.
+**Rollback:** Disable context hydration to source-event-only if needed. Reverting
+root-thread delivery would be a visible product rollback and must preserve
+existing thread callbacks and Telegram behavior.
 
 ### DR-002: Channel memory is not a live model session
 
@@ -272,9 +274,9 @@ non-marketplace over time, and limits/scopes can differ by installation.
   `thread_ts` distinct from its own `ts`.
 - **Existing thread mention:** A Slack message where `thread_ts` is present and
   points to the parent/root thread message; for replies, `thread_ts !== ts`.
-- **Synthetic thread:** Current/legacy behavior where a root channel message's
-  own `ts` is used as `thread_ts` so the bot replies in a newly-created thread.
-  This is not the target product behavior for root channel mentions.
+- **Root-attached thread:** Target behavior where a root channel message's own `ts`
+  is used as `thread_ts` so Brain replies in the Slack thread attached to the
+  invoking message.
 - **Channel context window:** Bounded set of recent channel messages around or
   before the source event, excluding unrelated threads unless policy requests
   thread summaries.
@@ -324,8 +326,9 @@ non-marketplace over time, and limits/scopes can differ by installation.
   Slack signature headers forwarded unchanged by Brain/Caddy.
 - Slack event handling remains fast-ack + enqueue; no long model or history work
   should run inside the HTTP handler.
-- Existing reply sending through `SlackGateway.sendText` must remain unchanged
-  until a visible routing implementation is requested.
+- Existing reply sending through `SlackGateway.sendText` remains the renderer; it
+  must use the normalized/stored `OutputTarget` and never invent a fallback
+  channel.
 - Telemetry must remain metadata-first and must not persist raw Slack message
   bodies by default.
 
@@ -342,11 +345,11 @@ User posts in `#project`:
 Target behavior:
 
 1. Brain recognizes this as a root channel mention.
-2. Brain creates/resumes the channel-visible session for `#project`.
+2. Brain creates/resumes the root-attached thread session for the invoking message in `#project`.
 3. Brain hydrates a bounded recent channel window and/or channel summary,
    subject to policy/scopes/grants.
-4. Brain answers in `#project` as a main-channel message with no `thread_ts` by
-   default.
+4. Brain answers in the Slack thread attached to the invoking root message
+   (`thread_ts = source message ts`) by default.
 5. The answer can include a small context note, for example: "I used recent
    messages in #project from the last 45 minutes." The exact wording is a UX
    detail, but telemetry must record the selected context source.
@@ -422,9 +425,8 @@ conversation but do not grant cross-channel permissions.
 ## Channel mention context windows
 
 A channel mention context window is the bounded context Brain may use when the
-source event is a root channel mention. It is a retrieval policy, not a message
-delivery policy. In read-only/shadow phases it must produce telemetry only and
-must not affect where Slack replies are sent.
+source event is a root channel mention. It is a retrieval policy; delivery remains the normalized stored `OutputTarget`
+(the attached root thread for root channel mentions).
 
 Default planning shape:
 
@@ -519,7 +521,6 @@ Brain admin should expose:
 
 - workspace-level Slack context mode:
   - `off`: no hydration beyond event text;
-  - `shadow`: hydrate and telemetry only, no prompt injection;
   - `assist`: hydrate source channel/thread into prompts;
   - `ambient`: future proactive/summary modes, disabled initially.
 - per-channel hydration allowlist.
@@ -530,8 +531,8 @@ Brain admin should expose:
 - max additional channels per turn.
 - max Slack history calls per turn and per channel/minute.
 - fallback text policy for missing scopes/rate limits.
-- whether root channel delivery is still legacy synthetic-thread or target
-  channel-visible behavior.
+- whether root channel delivery is root-attached-thread behavior (current
+  decision) or a future explicitly approved alternative.
 - canary channel list and canary status.
 - channel summary promotion controls.
 - export controls between private/public/DM/Telegram/dashboard.
@@ -1001,8 +1002,8 @@ normalize Slack event
   -> redact + label + filter
   -> assemble HydratedSlackContext
   -> emit telemetry
-  -> in shadow mode: stop before prompt exposure
-  -> in assist mode: inject prompt context
+  -> inject prompt context when source-scoped hydration succeeds
+  -> fall back to source-event-only context when hydration fails
   -> renderer sends output only to stored OutputTarget
 ```
 
@@ -1087,8 +1088,9 @@ Default source plans:
 | MPIM | source event + MPIM recent/session summary only |
 | private channel | source event + recent private-channel window/summary if allowlisted |
 
-Admin policy can set `hydrationMode = off|shadow|assist`. If `off`, plan
-returns source event only and telemetry explains `history_disabled`.
+Admin policy can set `hydrationMode = off|assist` for this implementation. If
+`off`, the plan returns source event only and telemetry explains
+`history_disabled`.
 
 #### Step 4: Compute capability checks
 
@@ -1219,20 +1221,16 @@ Truncation order:
 Never silently replace private context with public context or another channel's
 summary.
 
-#### Step 9: Assemble prompt context or shadow report
+#### Step 9: Assemble prompt context
 
-If policy mode is `shadow`:
-
-- compute `HydratedSlackContext`;
-- store telemetry and possibly a redacted debug artifact if enabled;
-- do not include hydrated text in the model prompt;
-- do not change output routing.
-
-If policy mode is `assist`:
+In assist mode:
 
 - pass prompt-safe `HydratedSlackContext` to the main loop context builder;
 - include denial/fallback explanation metadata;
 - keep output routing from stored `OutputTarget` unchanged.
+
+If hydration is disabled or unavailable, package source-event-only context and
+telemetry so the model does not claim to have read broader history.
 
 #### Step 10: Emit telemetry
 
@@ -1250,8 +1248,9 @@ Emit metadata-only telemetry for:
 
 ## Data model and schema
 
-The first implementation can use the existing state mechanisms only for shadow
-metadata, but production should use a durable store with migrations. The shapes
+The first implementation can use existing state mechanisms for telemetry and
+source-scoped prompt hydration, but production policy/history should use a
+durable store with migrations. The shapes
 below are implementation-ready contracts, not a mandate for a specific database.
 
 ### Tables / collections
@@ -1470,7 +1469,7 @@ Implementation can start with types before persistence:
 ```ts
 interface SlackContextPolicySnapshot {
   policyId: string;
-  hydrationMode: "off" | "shadow" | "assist" | "ambient";
+  hydrationMode: "off" | "assist" | "ambient";
   eventHistoryMode: "none" | "triggered_only" | "allowlisted_events" | "summary_only" | "audit_metadata_only";
   channelWindow: { maxMessages: number; maxMinutes?: number; maxTokens: number };
   threadWindow: { maxMessages: number; maxMinutes?: number; maxTokens: number };
@@ -1596,12 +1595,12 @@ then composes visible output to the stored target.
 ### Channel-originated work
 
 - Source: root channel mention.
-- Default output target: channel, no `thread_ts` after the channel-visible
-  routing correction is implemented.
-- Subagent progress/final/failure: return to main session; renderer posts in
-  channel unless explicit reroute exists.
+- Default output target: channel + `thread_ts` equal to the invoking root
+  message timestamp.
+- Subagent progress/final/failure: return to main/session mailbox; renderer posts
+  in the attached root thread unless explicit reroute exists.
 - Late callback after hibernation: reload session + output target from durable
-  binding; do not fall back to DM, global ops channel, or synthetic thread.
+  binding; do not fall back to DM, global ops channel, or another thread.
 
 ### Thread-originated work
 
@@ -1657,7 +1656,6 @@ Suggested event classes:
 - `slack.context.hydration_denied`
 - `slack.context.hydration_fallback`
 - `slack.context.prompt_exposed`
-- `slack.context.shadow_only`
 - `slack.context.api_rate_limited`
 - `slack.context.truncated`
 - `slack.session.created`
@@ -1737,10 +1735,10 @@ Brain admin Slack page should add sections:
    - request URL status;
    - env secret presence metadata only.
 2. **Context mode**
-   - workspace default: off/shadow/assist;
+   - workspace default: off/assist;
    - per-channel overrides;
-   - root channel delivery mode: current legacy vs target channel-visible when
-     implementation is requested.
+   - root channel delivery mode: root-attached-thread (current decision) and
+     any explicitly approved future alternative.
 3. **Channel allowlist**
    - public/private/MPIM/DM policy rows;
    - hydration enabled;
@@ -1785,149 +1783,28 @@ capabilities and telemetry. Suggested Brain-to-codex-chat interactions:
 - Brain never asks codex-chat to reveal Slack secrets; it only manages presence
   and write-only updates.
 
-## Migration phases
+## Implementation path
 
-### Phase A — docs and design guardrails (this change)
+Tim has chosen to skip a shadow-only first slice. The current implementation path
+is:
 
-- Add this design document.
-- Link it from the canonical Brain Slack runtime plan and codex-chat pointer.
-- Explicitly state no implementation and no delivery changes.
-- Preserve current Slack functionality.
+1. Normalize root channel app mentions to an output target with
+   `thread_ts = message_ts`; normalize existing thread mentions to the supplied
+   source `thread_ts`.
+2. Hydrate bounded source-channel history for root channel mentions and bounded
+   source-thread replies for thread mentions.
+3. Redact and label Slack snippets before prompt exposure.
+4. Emit metadata-only telemetry for source kind, selected context source, message
+   counts, fallback codes, truncation, prompt exposure, and output thread
+   presence.
+5. Persist stored Slack output targets through subagent dispatch/callback paths.
+6. Keep rollback simple: disable hydration to source-event-only if Slack history
+   reads misbehave, while preserving root-thread delivery unless Tim requests a
+   visible product rollback.
 
-Exit criteria:
-
-- Docs committed/pushed.
-- Tim answers open implementation question(s).
-
-### Phase B — fixture and telemetry scaffolding only
-
-- Add unit fixtures for root channel mention, thread mention, DM, MPIM, private
-  channel, Slack Connect-like metadata, retry/duplicate, and denied scopes.
-- Add source classification helper tests in codex-chat.
-- Add telemetry enums/metadata for context decisions, but keep hydration off.
-- Do not add Slack history scopes yet.
-- Do not change visible `OutputTarget` behavior.
-
-Exit criteria:
-
-- Tests prove classification and telemetry without external Slack calls.
-- Brain admin can show context mode = off.
-
-### Phase C — shadow hydrator from source event + event journal skeleton
-
-- Add `HydratedSlackContext` types.
-- Add hydrator interface returning source event only.
-- Add event journal schema/migration in the chosen store, or a local private
-  prototype if production store is not selected.
-- Store triggered-only event metadata and optional redacted text per retention
-  policy.
-- Emit shadow hydration telemetry.
-- Do not expose hydrated context to prompts.
-- Do not change output routing.
-
-Exit criteria:
-
-- Shadow telemetry says what would have been hydrated.
-- No user-visible behavior changes.
-
-### Phase D — Slack Web API read client behind feature flag
-
-- Add runtime-owned `SlackHistoryClient`.
-- Add Web API call wrappers for `conversations.history` and
-  `conversations.replies` with timeouts, rate-limit handling, and no raw token
-  exposure.
-- Add config/policy but keep mode shadow.
-- Add tests using mocked fetch; no live Slack calls in unit tests.
-- Brain admin shows missing/installed scopes and rate budget.
-
-Exit criteria:
-
-- In shadow mode, canaries report recent-window availability/fallback without
-  prompt exposure.
-- Rate-limit and missing-scope paths tested.
-
-### Phase E — Manifest/scopes canary for channel history
-
-- Add optional manifest profile or documented manifest update for
-  `channels:history`, `channels:read`, and optionally `message.channels`.
-- Reinstall only in a test/canary workspace/channel.
-- Enable hydration shadow mode for one public canary channel.
-- Compare API window vs event journal behavior.
-
-Exit criteria:
-
-- Slack install status confirms scopes/events.
-- Canaries prove no delivery regression.
-- Brain admin shows context source decisions.
-
-### Phase F — Assist-mode prompt hydration for source channel/thread only
-
-- Enable prompt exposure only for allowlisted canary channel(s).
-- Start with root channel recent window and existing thread replies.
-- Keep explicit additional-channel reads disabled.
-- Keep visible routing unchanged unless Tim separately requested channel-visible
-  routing implementation.
-- Add prompt packaging redaction/source-label tests.
-
-Exit criteria:
-
-- Canary questions use recent context correctly.
-- No cross-channel leakage in tests/canaries.
-- User-facing fallback text is accurate.
-
-### Phase G — Channel-visible root routing correction
-
-This is a visible behavior change and must be requested/approved separately.
-
-- Change root channel `app_mention` normalization/runtime context so root
-  channel mentions use channel conversation key and no `thread_ts` output target.
-- Keep existing thread mentions thread-scoped.
-- Update tests and canaries.
-- Roll out only after hydration has already been proven safe or keep hydration
-  disabled while routing is canaried.
-
-Exit criteria:
-
-- Public/private root mentions reply in channel.
-- Existing thread mentions reply in thread.
-- Late callbacks route correctly.
-
-### Phase H — Event journaling and summaries for selected channels
-
-- Enable `allowlisted_events` only in selected channels.
-- Add compaction jobs and source-attributed summaries.
-- Add retention purge.
-- Add Brain admin summary and purge controls.
-- Keep private channels summary/export locked down.
-
-Exit criteria:
-
-- Summaries improve context without raw-history dependence.
-- Purge/retention jobs verified.
-- Source-label filtering proven.
-
-### Phase I — Explicit cross-channel/context controls
-
-- Add prompt-language explicit controls.
-- Add temporary capability grants for one-time reads/exports.
-- Later add Slack interactive buttons.
-- Add denial/fallback UX.
-
-Exit criteria:
-
-- DM asking for channel summary requires explicit grant.
-- Private-to-public export denial works.
-- Authorized explicit target post works in canary.
-
-### Phase J — Ambient/proactive mode (future)
-
-Only after all previous phases:
-
-- Enable ambient monitoring in selected channels.
-- Add scheduler/leases and spend limits.
-- Add proactive follow-up rules.
-- Add opt-out and quiet-hours controls.
-- Add stronger admin audit and rate controls.
+Deferred work remains: durable event journals, channel summaries, explicit
+cross-channel controls, admin policy UI, interactive Slack buttons, retention
+purge, and ambient/proactive modes.
 
 ## Canary and test matrix
 
@@ -1936,11 +1813,11 @@ Only after all previous phases:
 | Area | Cases |
 | --- | --- |
 | Source classification | root channel, root private channel, thread reply, thread root with `thread_ts == ts`, DM, MPIM, unknown channel type |
-| Conversation key | channel key has no thread, thread key includes thread, DM key by channel ID, MPIM key by channel ID |
-| Output target | root channel target has no `threadId` after routing phase; thread target has `threadId`; DM has no cross-target |
+| Conversation key | root channel mention key uses attached root thread, existing thread key includes source thread, DM key by channel ID, MPIM key by channel ID |
+| Output target | root channel target has `threadId = message_ts`; existing thread target has `threadId = thread_ts`; DM has no cross-target |
 | Context controls | parse source-only, thread-only, recent channel, include channel, explicit output, no-history |
 | Capability checks | allow source channel, deny additional channel, deny private export, allow explicit grant |
-| Hydrator source plan | channel default, thread default, DM default, no-history, shadow/off modes |
+| Hydrator source plan | channel default, thread default, DM default, no-history/off modes |
 | Web API client | success, missing_scope, not_in_channel, channel_not_found, rate_limited, timeout, malformed payload |
 | Event journal | append idempotency, retention expiry, source labels, no raw text in metadata-only mode |
 | Prompt packaging | source labels preserved, untrusted context instruction, redaction, truncation order |
@@ -1966,9 +1843,9 @@ Only after all previous phases:
 | Canary | Steps | Pass criteria |
 | --- | --- | --- |
 | Public channel current behavior baseline | Mention Brain in canary channel before changes | Existing delivery still works |
-| Public channel shadow hydration | Enable shadow only; mention Brain referencing recent messages | Telemetry shows channel window/fallback; visible reply unchanged |
+| Public channel hydration | Mention Brain referencing recent messages | Prompt context and telemetry show channel window/fallback; reply lands in attached root thread |
 | Public channel assist hydration | Enable assist in canary; ask about recent allowed discussion | Answer uses only allowed recent channel context |
-| Public channel continuity | Ask follow-up root mention | Same channel session/summary used; no new synthetic session after routing phase |
+| Public channel continuity | Ask follow-up in the attached root thread | Same root thread session used; no cross-channel/thread leakage |
 | Existing public thread | Mention Brain inside a thread | Thread replies used; output stays in thread |
 | Thread isolation | Ask in another thread for first thread details | No leakage without explicit include |
 | Second channel isolation | Ask similar question in another channel | No first-channel context appears |
@@ -1998,30 +1875,29 @@ Before rollout beyond canary:
 
 ### Rollout sequence
 
-1. Docs approved.
-2. Implement classification/telemetry tests, hydration off.
-3. Enable shadow source-event hydrator.
-4. Enable shadow Slack API reads in one canary channel.
-5. Add optional public history scopes and reinstall in canary only.
-6. Enable assist prompt hydration for one canary channel.
-7. Expand to private/DM/MPIM canaries.
-8. Separately implement channel-visible root routing correction if Tim approves.
-9. Add event journaling/summaries for selected high-value channels.
-10. Add explicit cross-channel controls.
-11. Consider ambient/proactive only after all safety gates pass.
+1. Docs updated to record Tim's root-thread/assist-mode decision.
+2. Implement normalization, bounded hydration, prompt packaging, telemetry, and tests.
+3. Build and deploy codex-chat with the existing Slack fast-ack path preserved.
+4. Run live canaries for root channel mention -> attached thread, existing thread
+   continuation, history fallback, subagent callback routing, and second-channel
+   isolation.
+5. If public channel history scopes are missing, add optional public history scopes
+   and reinstall only after confirming the fallback path remains safe.
+6. Add event journaling/summaries for selected high-value channels.
+7. Add explicit cross-channel controls.
+8. Consider ambient/proactive only after all safety gates pass.
 
 ### Rollback levers
 
 Each lever should be available independently:
 
 - `SLACK_CONTEXT_HYDRATION_MODE=off` or Brain policy equivalent.
-- Disable prompt exposure but leave shadow telemetry.
+- Disable prompt exposure by setting hydration off/source-event-only.
 - Disable Slack Web API history reads.
 - Disable event journal writes.
 - Disable summary retrieval.
 - Disable explicit cross-channel includes.
-- Disable channel-visible routing correction and return to prior routing if that
-  visible change has been implemented.
+- Revert root-thread delivery only as an explicit visible product rollback.
 - Revert manifest to minimal scopes/events and reinstall if broader scopes cause
   operational concern.
 - Purge raw event journal for selected channel/retention class.
@@ -2039,8 +1915,8 @@ After rollback:
 
 ## Implementation task breakdown
 
-This is an implementation-ready checklist for a future request. Do not execute
-from this docs-only task.
+This checklist now reflects the active implementation request. Items beyond
+source-scoped history hydration remain future work.
 
 ### codex-chat tasks
 
@@ -2048,7 +1924,7 @@ from this docs-only task.
 2. Add `HydratedSlackContext` types.
 3. Add `SlackContextPolicySnapshot` loader seam.
 4. Add metadata-only telemetry enums/events.
-5. Add no-op/source-only hydrator in shadow mode.
+5. Add source-only fallback hydrator for disabled/unavailable history.
 6. Add mocked Slack history client.
 7. Add Web API wrappers with token isolation, timeouts, rate limits.
 8. Add event journal interface and in-memory/test implementation.
@@ -2056,7 +1932,7 @@ from this docs-only task.
 10. Add capability-check integration points.
 11. Add subagent routing binding persistence contract.
 12. Add canary fixtures and integration tests.
-13. Later: implement root channel routing correction.
+13. Root channel routing is now root-attached-thread behavior.
 14. Later: implement event journal durable store and summaries.
 15. Later: implement explicit context controls and interactive actions.
 
@@ -2084,9 +1960,7 @@ from this docs-only task.
 
 ## Open questions
 
-1. Should the first implementation prioritize **shadow Slack Web API hydration**
-   or the **root channel routing correction**? They are separable; the safest
-   plan is shadow hydration first, visible routing second.
+1. Answered 2026-06-29: implement visible root-thread delivery and assist-mode source-scoped hydration from the start; do not start shadow-only.
 2. What durable store should hold channel policies, event journal metadata,
    summaries, and subagent routing bindings for production?
 3. For Tim's main workspace, is the Brain Slack app an internal customer-built
