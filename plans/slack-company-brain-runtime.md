@@ -124,7 +124,7 @@ originated.
 Examples:
 
 - reply to the source Telegram chat/message
-- reply to the source Slack thread
+- reply to the source Slack channel or explicit source thread
 - post a progress update to a Slack channel
 - DM a user on Slack
 - send an admin notification to Telegram
@@ -169,12 +169,20 @@ leases, compressed memory, effective grants, and archive metadata for that key.
 
 Default conversation granularity:
 
-- Slack app mention in a channel creates or resumes a Slack thread session
-  keyed by workspace/team ID, channel ID, and `thread_ts` (falling back to the
-  message timestamp when starting a thread).
+- Slack root `app_mention` in a channel creates or resumes a channel-visible
+  conversation session keyed by workspace/team ID and channel ID, and posts the
+  default response back into the main channel rather than creating a reply
+  thread. This keeps shared company-brain context visible to everyone in the
+  channel.
+- Slack messages that are already inside a reply thread create or resume an
+  explicit thread session keyed by workspace/team ID, channel ID, and
+  `thread_ts`; outputs for that session stay in the source thread unless an
+  authorized reroute posts a summary to the channel.
 - Slack DM creates or resumes the DM conversation ID.
 - Slack MPIM/private group creates or resumes the Slack conversation ID, with
-  member and capability context captured as part of the session metadata.
+  member and capability context captured as part of the session metadata; if a
+  reply thread is used inside that conversation, it can become a distinct
+  thread session.
 - Telegram creates or resumes by chat ID, plus `message_thread_id`/forum topic
   where available.
 
@@ -207,57 +215,130 @@ return output, artifacts, and progress to the owning session mailbox/progress
 sink, where the session runtime performs capability checks, output routing, and
 final composition.
 
-### Slack multi-channel and thread coherence requirement
+### Slack channel-first and explicit-thread coherence requirement
 
-Slack must behave like Tim's Telegram main-loop conversation where continuity is
-intentional and coherent, while also respecting Slack's multi-channel topology.
-The current Slack pain point is that reply threads and channel-level continuity
-do not yet feel like one reliable assistant memory: a reply in a thread should
-know the thread's prior turns, a later channel mention should know the allowed
-channel context, and neither should accidentally inherit another channel's
-private state.
+Slack must behave like a shared company-brain participant, not like a bot that
+hides every answer in a newly-created Slack thread. Tim's current preference is
+channel-first continuity: when someone mentions Brain in the main channel, the
+answer should default to the main channel so everyone has the same shared
+context. Reply threads still matter, but they are explicit side conversations:
+if a user is already in a Slack reply chain, that thread is a distinct
+conversation/session with its own history and output target.
 
 #### Channel-scoped and thread-scoped identity
 
 - Define two related but distinct runtime keys for Slack:
-  - `SlackChannelContextKey = {enterpriseId?, teamId, channelId}` for ambient
-    channel memory, summaries, capability scope, membership/visibility snapshots,
-    and rollout/canary state.
+  - `SlackChannelConversationKey = {enterpriseId?, teamId, channelId}` for the
+    shared main-channel assistant session, ambient channel memory, summaries,
+    capability scope, membership/visibility snapshots, and rollout/canary state.
   - `SlackThreadConversationKey = {enterpriseId?, teamId, channelId, threadTs}`
-    for a live or hibernated assistant conversation in a Slack reply thread.
-- For a root `app_mention`, set `threadTs = event.thread_ts ?? event.ts` and
-  start the reply thread immediately. All subsequent replies in that thread
-  resume the same `ConversationSession`.
+    for an explicit reply-thread assistant session.
+- A root channel `app_mention` with no source `thread_ts` uses the channel key
+  and a channel `OutputTarget` with no `thread_ts`. It must not synthesize
+  `threadTs = event.ts` just to force a reply thread.
+- A Slack event that already has `thread_ts` different from its own `ts` uses
+  the thread key and a thread `OutputTarget`. All subsequent messages in that
+  reply chain resume the same `ConversationSession`.
+- A root channel message may explicitly ask Brain to "take this to a thread";
+  that is an explicit routing request, not the default. The runtime should log
+  that choice and create the thread session only after the renderer has a valid
+  Slack thread timestamp.
 - For DMs, use a Slack conversation key based on `{enterpriseId?, teamId,
   channelId}` because the DM channel itself is the conversational container.
-  MPIMs and private channels may still create thread-scoped sessions when Slack
-  supplies `thread_ts`.
-- Persist session records separately from channel records. A channel may have
-  many active or archived thread sessions, but a thread session belongs to
-  exactly one channel context.
+  MPIMs and private channels use conversation-level continuity by default and
+  thread-level continuity only when Slack supplies a source `thread_ts`.
+- Persist channel session records separately from thread records. A channel may
+  have many active or archived thread sessions, but a thread session belongs to
+  exactly one channel context and does not replace the shared channel session.
 
-#### When to use channel context versus thread context
+#### Avoiding context fragmentation
 
-- Thread context is the default prompt history for a thread reply: root message,
-  assistant replies, user follow-ups, subagent callbacks, progress updates, and
-  final outputs for that `SlackThreadConversationKey`.
-- Channel context is ambient and opt-in/bounded: recent allowed channel messages,
-  pinned summary, channel purpose/topic snapshots, rollout notes, and indexed
-  channel summaries may be retrieved only when the request needs them and the
-  effective grants allow that channel read.
-- A root channel mention may use a small bounded channel window to understand
-  what the user is referring to, then create a thread-scoped session for the
-  actual assistant turn. Do not keep appending unrelated channel chatter to the
-  thread session after the thread has started unless it is explicitly fetched as
-  channel context.
-- A message posted inside an existing thread should prefer thread history over
-  channel history. Fetch channel context only for explicit phrases such as
-  "from this channel", "recent discussion", "what did we decide here", or when
-  a capability-checked retrieval policy says the channel summary is needed.
-- DMs use DM conversation context by default and must not silently read public or
-  private channel context without explicit channel selection and grants.
+- Do not create a new assistant session for every root channel mention. Root
+  mentions in the same Slack channel should resume the channel-visible session
+  and its compressed channel turn summary, subject to TTL/cost limits.
+- Do not append every ambient channel message to the live model context. Store a
+  bounded, source-labelled event journal and/or summaries, then hydrate only the
+  relevant recent window or summary for the turn.
+- When a thread produces a decision that should become shared channel context,
+  the assistant may post or propose a concise channel summary only with an
+  explicit output policy such as "summarize this thread back to the channel".
+  Otherwise, the thread stays a side-session and the channel session sees it
+  only as an attributed summary when grants allow retrieval.
+- Channel summaries must be source-attributed by channel and time window. A
+  later channel turn can use that summary; a different channel, DM, or public
+  output cannot use it without an explicit export/read grant.
 
-#### Cross-channel leakage controls
+#### When to continue a thread versus the channel
+
+- **Continue the channel session** when the inbound Slack event is a root
+  channel `app_mention` or an approved channel command with no source
+  `thread_ts`. Progress/final/error output goes to the main channel by default.
+- **Continue the thread session** when the inbound event is in an existing reply
+  thread (`thread_ts` present and not equal to the message `ts`), when the user
+  explicitly asks to move the current channel discussion into a thread, or when
+  an existing thread-owned subagent/loop callback returns.
+- **Do not silently switch surfaces.** A thread answer stays in the thread; a
+  channel answer stays in the channel. Cross-posting from a thread to the
+  channel, from a private channel to a public channel, or from Slack to Telegram
+  requires explicit read/export/write grants and an explicit `OutputTarget`.
+- **DMs stay DMs.** DM context must not silently read public/private channel
+  history without explicit channel selection and grants, even if the DM author
+  is a member of those channels.
+
+#### Channel message context: API reads and recorded event history
+
+Slack channel-first answers need channel context. There are two viable sources,
+and the runtime should support both behind one capability-checked hydrator:
+
+1. **On-demand Slack Web API reads.** Use `conversations.history` for a bounded
+   channel window and `conversations.replies` for a bounded thread window when a
+   turn needs context. The current manifest already has private-channel/DM/MPIM
+   history and read scopes (`groups:history`, `groups:read`, `im:history`,
+   `im:read`, `mpim:history`, `mpim:read`). Public channel reads need additional
+   bot scopes such as `channels:history` and `channels:read`; Slack documents
+   `channels:history` as viewing messages in public channels the app has been
+   added to, and `conversations.history` as returning a portion of message
+   events for a conversation. [Slack scopes](https://docs.slack.dev/reference/scopes/channels.history/),
+   [conversations.history](https://docs.slack.dev/reference/methods/conversations.history/).
+2. **Recorded event history.** Subscribe only in allowlisted channels to message
+   events the runtime is permitted to retain, then write an append-only,
+   source-labelled event journal with retention/compaction. For public channel
+   ambient history this likely means adding the `message.channels` bot event and
+   the matching public-channel history/read scopes; app mentions alone are not
+   enough to reconstruct full channel context. Slack's Events API sends selected
+   subscribed events to the app's HTTP endpoint, and Slack documents the
+   `message.channels` event for public channel messages. [Events API](https://docs.slack.dev/apis/events-api/),
+   [message.channels](https://docs.slack.dev/reference/events/message.channels/).
+
+Recommended plan: start with on-demand bounded API hydration for allowlisted
+channels because it gives correct context without storing every channel message;
+then add recorded event history for selected high-value channels when operators
+want lower-latency summaries, auditability, and fewer repeated history reads.
+Both sources must emit the same `HydratedSlackContext` shape: source labels,
+time range, message count, truncation flag, retrieval reason, capability check
+IDs, and redaction/retention policy.
+
+#### Safe context hydration
+
+- Hydrate context only after deriving the conversation key, actor, effective
+  grants, output target, and retrieval reason for the turn.
+- Use small defaults: e.g. thread root plus recent replies for a thread; root
+  channel mention plus the last N channel messages or last M minutes for a
+  channel turn; indexed summaries only when the request asks about older
+  channel state.
+- Preserve Slack source labels on every snippet before it reaches prompts:
+  `{surface: slack, enterpriseId?, teamId, channelId, channelType, threadTs?,
+  messageTs?, source: api|event_journal|summary}`.
+- Store raw hydrated windows only under short retention unless an operator has
+  enabled durable event journaling for that channel. Prefer compact,
+  source-attributed summaries for long-term memory.
+- Treat cached display names, channel names, topics, and membership as advisory
+  context. They help explain results but never authorize access.
+- If context cannot be safely hydrated because scopes, channel membership, or
+  grants are missing, answer with a transparent limitation instead of guessing
+  or falling back to another channel's memory.
+
+#### Privacy and cross-channel isolation
 
 - Every persisted message, summary, embedding, artifact, subagent result, and
   audit row derived from Slack must carry source labels at least
@@ -265,13 +346,11 @@ private state.
   messageTs?}` plus capability labels inherited from the source.
 - Retrieval must filter by both source labels and effective grants before any
   text reaches the main loop, subagents, or callback composer. Private-channel
-  summaries are never eligible for public-channel, different-private-channel, or
-  Telegram output unless an explicit output-target grant permits export.
+  summaries are never eligible for public-channel, different-private-channel,
+  DM, or Telegram output unless an explicit output-target grant permits export.
 - The runtime must reject ambiguous output routing. A request that reads one
   channel but asks to post elsewhere needs separate read and write/export grants
   and an explicit `OutputTarget`.
-- Cached display names, channel names, and Slack membership are advisory only;
-  they cannot authorize access or override runtime capability labels.
 - Summary compaction must preserve source boundaries. A workspace-wide digest is
   a collection of per-channel/per-thread attributed summaries, not a single
   unlabelled memory blob.
@@ -279,19 +358,19 @@ private state.
 #### Subagents, callbacks, and output targeting
 
 - Subagent dispatch from Slack must include the owning
-  `conversationSessionId`, originating `SlackThreadConversationKey` or DM key,
-  default `OutputTarget`, and a narrowed capability set. Do not pass raw Slack
-  bot tokens or broad workspace history access to child agents.
+  `conversationSessionId`, the originating `SlackChannelConversationKey` or
+  `SlackThreadConversationKey`, default `OutputTarget`, and a narrowed
+  capability set. Do not pass raw Slack bot tokens or broad workspace history
+  access to child agents.
+- For channel-originated work, `return_to_main`, `send_to_user`, progress,
+  failure, and direct-fallback callbacks default to the source channel with no
+  `thread_ts` so the channel keeps the shared context.
+- For thread-originated work, callbacks default to the source `channelId` and
+  `threadTs`. Late callbacks after hibernation/restart must still land in that
+  originating thread, not the main channel or a global ops channel.
 - `return_to_main` callbacks return to the owning session mailbox first; the
-  main loop composes the visible reply in the original Slack thread/DM unless an
+  main loop composes the visible reply in the stored output target unless an
   explicit authorized reroute exists.
-- `send_to_user` or progress callbacks should target the originating Slack
-  `channelId` and `threadTs` by default. If the originating message was a DM,
-  target that DM conversation. If the source was a channel root mention, post in
-  the created thread, not as a new channel root message.
-- Job status, cancellation, steering, and progress updates must include the same
-  Slack channel/thread identifiers as the parent run so late callbacks after
-  hibernation or restart land in the correct thread.
 - Loop, monitor, and system callbacks that were triggered by Slack context must
   carry their source labels and output target explicitly; do not fall back to a
   global Slack ops channel unless the policy says to notify ops.
@@ -306,11 +385,14 @@ working without storing secrets or raw message bodies:
 - session create/resume/hibernate/archive counts keyed by channel/thread/DM;
 - inbound-to-ack latency, enqueue latency, turn start latency, first progress
   latency, final reply latency, and Slack Web API send result class;
-- selected context source: thread-only, thread-plus-channel-window, channel
-  summary, explicit channel search, or denied/no-context;
-- capability check outcomes for read channel, read thread, post source thread,
-  post explicit channel, DM, export/cross-surface, and subagent dispatch;
-- output target actually used for each progress/final/error send;
+- selected context source: channel-only, channel-plus-history-window,
+  channel-summary, thread-only, thread-plus-channel-summary, explicit channel
+  search, recorded event journal, or denied/no-context;
+- capability check outcomes for read channel, read thread, post source channel,
+  post source thread, post explicit channel, DM, export/cross-surface, and
+  subagent dispatch;
+- output target actually used for each progress/final/error send, including
+  whether `thread_ts` was absent (channel default) or present (thread context);
 - subagent job ownership and callback routing by `conversationSessionId`,
   channel ID, and thread timestamp;
 - leakage guard denials, ambiguous target denials, and private-to-public export
@@ -325,33 +407,39 @@ selection, Slack sends, and callback routing.
 #### Migration and testing canaries
 
 Before Slack is considered Telegram-parity for conversation feel, run canaries
-that prove both continuity and isolation:
+that prove both channel-first continuity and thread isolation:
 
-1. **Public channel root-to-thread**: mention the bot in a public channel, verify
-   it replies in a thread, then send a thread follow-up that depends on the
-   first answer. Confirm the same thread session resumes.
-2. **Public channel ambient context**: reference recent allowed channel context
-   from a root mention and verify the assistant uses only a bounded channel
-   window/summary and then continues in the new thread.
-3. **Second public channel isolation**: ask a similar question in another public
+1. **Public channel default reply**: mention Brain in a public channel and
+   verify the response is posted as a main-channel message with no `thread_ts`.
+2. **Public channel continuity**: ask a second root channel follow-up that
+   depends on the first answer and verify the same channel session/summary is
+   used rather than a new synthetic thread session.
+3. **Existing thread continuity**: mention or reply to Brain inside a Slack
+   reply thread and verify the response stays in that thread and resumes the
+   thread session on follow-up.
+4. **Channel context hydration**: reference recent allowed channel discussion
+   from a root mention and verify Brain uses only the bounded API/event-journal
+   window or channel summary selected by policy.
+5. **Second public channel isolation**: ask a similar question in another public
    channel and verify no first-channel details appear unless explicitly
    retrieved with grants.
-4. **Private channel**: invite the bot, start a thread, follow up in-thread, and
-   confirm replies stay in the private thread and telemetry labels the channel
-   as private.
-5. **Private-to-public denial**: ask in a public channel for a summary of the
+6. **Private channel**: invite the bot, use both a root channel mention and an
+   in-thread follow-up, and confirm root replies stay private-channel-visible
+   while thread replies stay in-thread.
+7. **Private-to-public denial**: ask in a public channel for a summary of the
    private canary thread without an export grant and verify a clean denial.
-6. **DM continuity**: DM the bot, follow up later, and verify the DM session
+8. **DM continuity**: DM the bot, follow up later, and verify the DM session
    resumes without reading public/private channel context by default.
-7. **MPIM/group DM**: run the same continuity test in an MPIM and verify member
+9. **MPIM/group DM**: run the same continuity test in an MPIM and verify member
    context is metadata only, not an authorization bypass.
-8. **Subagent callback routing**: dispatch a Slack-originated subagent from a
-   thread, allow it to complete after the main turn hibernates, and verify the
-   callback/final summary lands in the originating thread.
-9. **Restart/hibernation resume**: restart or simulate worker hibernation between
-   thread messages in a safe canary environment and verify the same session and
-   output target are recovered from durable state.
-10. **Telemetry audit**: for each canary, verify redacted telemetry links inbound
+10. **Subagent callback routing**: dispatch one channel-originated and one
+    thread-originated subagent, allow completion after the main turn hibernates,
+    and verify callbacks/final summaries land in the stored channel or thread
+    target respectively.
+11. **Restart/hibernation resume**: restart or simulate worker hibernation in a
+    safe canary environment and verify the same channel/thread sessions and
+    output targets are recovered from durable state.
+12. **Telemetry audit**: for each canary, verify redacted telemetry links inbound
     event, session key, selected context source, capability checks, subagent
     callbacks, and outbound Slack result without exposing raw text or secrets.
 
@@ -477,7 +565,8 @@ Required metadata:
 
 Slack renderer responsibilities:
 
-- reply to the source thread by default
+- post channel-originated answers back to the source channel by default
+- reply inside the source thread when the inbound event is already threaded
 - post to an explicitly selected target channel when authorized
 - DM a user when authorized
 - update a progress/checklist message as `ProgressEvent`s arrive
@@ -493,7 +582,7 @@ validation.
 
 Expose Slack reads only as capability-checked tools owned by the runtime:
 
-- fetch source thread/context
+- fetch source channel/context and source thread/context
 - read recent channel history
 - search selected channels
 - fetch permalink/message metadata
@@ -508,7 +597,7 @@ unbounded raw history.
 
 Expose Slack writes only as capability-checked runtime tools:
 
-- post reply to source thread
+- post reply to source channel or source thread
 - post/update progress message
 - post to explicit target channel
 - DM explicit target user
@@ -534,8 +623,8 @@ the full enforcement/bundles/admin design.
 Capability state should support:
 
 - actor grants: stable actor-level permissions
-- conversation grants: permissions tied to a specific Slack thread, DM, MPIM,
-  private group, Telegram chat, or Telegram forum topic
+- conversation grants: permissions tied to a specific Slack channel session,
+  Slack thread, DM, MPIM, private group, Telegram chat, or Telegram forum topic
 - workspace grants: permissions tied to a Slack workspace/team, Telegram
   administrative scope, or other organization-level resource
 - temporary run grants: short-lived grants approved in-context for one run or
@@ -555,9 +644,10 @@ whom.
 
 Capability selectors must distinguish narrow and broad resources. Examples:
 
-- reading the source Slack thread is different from reading the whole channel
+- reading a source Slack thread is different from reading the shared channel
+  session or whole channel history
 - reading a Slack channel is different from exporting its summary to Telegram
-- posting back to the source thread is different from posting to an arbitrary
+- posting back to the source channel/thread is different from posting to an arbitrary
   Slack channel
 - DMing the requesting actor is different from DMing any workspace member
 - source-attributed summaries, embeddings, and compressed memories inherit the
@@ -637,8 +727,9 @@ Recommended flow:
 8. Audit records link conversation sessions, checklist items, subagents, tool
    calls, outputs, and capability checks by correlation ID.
 
-Slack should get the richest renderer first: an updating checklist message,
-threaded details, approval buttons, and final answer. Telegram can initially use
+Slack should get the richest renderer first: an updating checklist message in
+the channel or explicit thread selected by `OutputTarget`, optional threaded
+details when requested, approval buttons, and final answer. Telegram can initially use
 concise messages such as "3/6 done" and final summaries, while still receiving
 all underlying progress events in the audit log.
 
@@ -718,13 +809,16 @@ installed and live app-mention/DM/private-channel canaries pass.
       validation.
 - [x] Implement Events API verification, idempotency, fast ack, and queueing.
 - [x] Normalize app mentions and DMs into shared runtime events.
-- [x] Create/resume thread-scoped sessions for channel app mentions and
-      conversation-scoped sessions for DMs/MPIM/private groups.
+- [x] Create/resume the initial Slack compatibility sessions. Current code still
+      creates thread-scoped sessions for root channel app mentions; update this
+      to the channel-first model above so root mentions use channel sessions and
+      only existing reply chains use thread sessions.
 - [x] Resolve Slack user/channel metadata as adapter metadata when available
       from Events API payloads; do not treat cached display snapshots as
       authorization truth.
 - [x] Implement Slack renderer support for source-thread/source-conversation
-      text replies and final answers through `OutputTarget`.
+      text replies and final answers through `OutputTarget`; update canaries and
+      tests so channel-originated targets omit `thread_ts` by default.
 - [x] Add tests with fixture events and no live network calls by default.
 - [~] Install the real Slack app in a workspace, point Events API at the Brain
       public URL that reverse-proxies to codex-chat, and run live
@@ -733,7 +827,7 @@ installed and live app-mention/DM/private-channel canaries pass.
       `https://brain.decisive-outcomes.com/api/slack/events` is confirmed as of
       2026-06-29, and an outbound reply directive was attempted; final outbound
       Slack reply success still needs a canary proving the reply lands in the
-      expected source thread/DM/channel with the installed app scopes and bot
+      expected source channel/thread/DM with the installed app scopes and bot
       membership.
 
 ### Phase 3 — promote Brain as the long-running web/admin control plane
