@@ -79,7 +79,7 @@ async function runAdminDashboardScenario(page, baseUrl, viewport) {
   await page.locator(`${navScope} a[href="#mission"]`).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator(`${navScope} a[href="#slack"]`).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator(`${navScope} a[href="#manifest"]`).waitFor({ state: 'visible', timeout: 5_000 });
-  await page.locator('#mode-title', { hasText: 'Slack setup wizard: Slack setup required' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#mode-title').filter({ hasText: /Slack setup wizard: Slack (setup required|partially configured)/ }).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#slack-setup').waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#slack-setup.setup-primary').waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#mission').waitFor({ state: 'hidden', timeout: 5_000 });
@@ -88,6 +88,19 @@ async function runAdminDashboardScenario(page, baseUrl, viewport) {
   await page.locator('#mission').waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#deploy-title', { hasText: 'Deploy / Restart' }).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#op-approval').waitFor({ state: 'detached', timeout: 5_000 });
+  await page.locator('#slack-approval').waitFor({ state: 'detached', timeout: 5_000 });
+  await page.locator('summary:has-text("Update Slack settings")').click();
+  await page.locator('#slack-SLACK_BOT_TOKEN').fill('xoxb-super-secret');
+  await page.locator('button:has-text("Review & write Slack settings")').click();
+  await page.locator('#slack-confirm-modal').waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#slack-confirm-title', { hasText: 'Confirm Slack settings write' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#slack-confirm-keys', { hasText: 'SLACK_BOT_TOKEN' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#slack-confirm-keys', { hasText: 'write-only secret' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#slack-confirm-summary', { hasText: 'Runtime env file' }).waitFor({ state: 'visible', timeout: 5_000 });
+  const confirmText = await page.locator('#slack-confirm-modal').innerText();
+  assert.equal(confirmText.includes('xoxb-super-secret'), false);
+  await page.locator('#slack-confirm-button').click();
+  await page.locator('#slack-result', { hasText: 'Slack settings written' }).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#op-run').waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#op').selectOption('restart');
   await page.locator('text=Review & confirm restart').waitFor({ state: 'visible', timeout: 5_000 });

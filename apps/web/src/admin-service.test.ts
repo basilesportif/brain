@@ -208,8 +208,12 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /Draft only — codex-chat remains source of truth/);
   assert.match(html, /Confirm live operation/);
   assert.match(html, /Review & confirm/);
+  assert.match(html, /Confirm Slack settings write/);
+  assert.match(html, /Review & write Slack settings/);
+  assert.match(html, /writes codex-chat runtime env to disk/i);
   assert.equal(html.includes('id="op-approval"'), false);
-  assert.match(html, /write Slack settings/);
+  assert.equal(html.includes('id="slack-approval"'), false);
+  assert.equal(html.includes('Type exactly: write Slack settings'), false);
   assert.equal(html.includes("xoxb-super-secret"), false);
   assert.equal(html.includes("signing-secret"), false);
 });
@@ -352,10 +356,29 @@ test("brain admin exposes explicit Slack settings as write-only presence metadat
       assert.ok(settingsPayload.env.allowedKeys.includes("SLACK_SIGNING_SECRET"));
       assert.ok(settingsPayload.env.allowedKeys.includes("SLACK_APP_TOKEN"));
 
+      const entries = { SLACK_SIGNING_SECRET: "signing-secret", SLACK_BOT_TOKEN: "xoxb-super-secret", CODEX_CHAT_BASE_URL: "https://brain.decisive-outcomes.com" };
+      const missingConfirmation = await fetch(`${baseUrl}/api/admin/brain/slack/settings`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ entries }),
+      });
+      assert.equal(missingConfirmation.status, 400);
+      assert.deepEqual(await missingConfirmation.json(), {
+        error: "confirmation_required",
+        required: { token: "brain-admin-slack-settings-confirmed-v1", action: "slack.settings.write", envFile: path.join(root, "codex-chat.env"), keys: ["SLACK_SIGNING_SECRET", "SLACK_BOT_TOKEN", "CODEX_CHAT_BASE_URL"] },
+      });
+
+      const legacyApprovalOnly = await fetch(`${baseUrl}/api/admin/brain/slack/settings`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ approval: "write Slack settings", entries }),
+      });
+      assert.equal(legacyApprovalOnly.status, 400);
+
       const write = await fetch(`${baseUrl}/api/admin/brain/slack/settings`, {
         method: "POST",
         headers: { ...authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ approval: "write Slack settings", entries: { SLACK_SIGNING_SECRET: "signing-secret", SLACK_BOT_TOKEN: "xoxb-super-secret", CODEX_CHAT_BASE_URL: "https://brain.decisive-outcomes.com" } }),
+        body: JSON.stringify({ entries, confirmation: { token: "brain-admin-slack-settings-confirmed-v1", action: "slack.settings.write", envFile: path.join(root, "codex-chat.env"), keys: Object.keys(entries) } }),
       });
       assert.equal(write.status, 200);
       const payload = await write.json() as { writtenKeys: string[]; values: string; presence: Record<string, boolean> };

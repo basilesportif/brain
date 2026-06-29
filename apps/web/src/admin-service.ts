@@ -28,6 +28,7 @@ const DEFAULT_ENV_KEYS = [
 const SECRETISH_RE = /(SECRET|TOKEN|KEY|PASSWORD|COOKIE|SESSION|CREDENTIAL)/i;
 const MAX_BODY_BYTES = 128 * 1024;
 const LIVE_OPERATION_CONFIRMATION_TOKEN = "brain-admin-live-operation-confirmed-v1";
+const SLACK_SETTINGS_CONFIRMATION_TOKEN = "brain-admin-slack-settings-confirmed-v1";
 
 export interface BrainAdminServiceConfig {
   enabled: boolean;
@@ -281,10 +282,6 @@ async function handleEnvWrite(response: ServerResponse, config: BrainAdminServic
 }
 
 async function handleSlackSettingsWrite(response: ServerResponse, config: BrainAdminServiceConfig, adminEmail: string, payload: Record<string, unknown>): Promise<void> {
-  const approval = typeof payload.approval === "string" ? payload.approval.trim() : "";
-  if (approval !== "write Slack settings") {
-    return sendJson(response, 400, { error: "approval_required", expected: "write Slack settings" });
-  }
   const entries = parseEntries(payload.entries);
   const allowed = new Set<string>(SLACK_ENV_KEYS);
   const updates: Record<string, string> = {};
@@ -294,10 +291,25 @@ async function handleSlackSettingsWrite(response: ServerResponse, config: BrainA
     if (typeof value !== "string" || value.length === 0) return sendJson(response, 400, { error: "env_value_required", key });
     updates[key] = value;
   }
-  if (Object.keys(updates).length === 0) return sendJson(response, 400, { error: "no_entries" });
+  const writtenKeys = Object.keys(updates);
+  if (writtenKeys.length === 0) return sendJson(response, 400, { error: "no_entries" });
+
+  const envFile = resolveEnvFilePath(config.codexChatEnvFile);
+  const confirmation = parseSlackSettingsConfirmation(payload.confirmation);
+  if (!confirmation
+    || confirmation.token !== SLACK_SETTINGS_CONFIRMATION_TOKEN
+    || confirmation.action !== "slack.settings.write"
+    || confirmation.envFile !== envFile
+    || !sameStringSet(confirmation.keys, writtenKeys)) {
+    return sendJson(response, 400, {
+      error: "confirmation_required",
+      required: { token: SLACK_SETTINGS_CONFIRMATION_TOKEN, action: "slack.settings.write", envFile, keys: writtenKeys },
+    });
+  }
+
   await writeMergedEnvFile(config.codexChatEnvFile, updates, "Brain Slack settings");
-  await appendAudit(config, { action: "slack.settings.write", adminEmail, keys: Object.keys(updates), envFile: resolveEnvFilePath(config.codexChatEnvFile), values: "write-only" });
-  return sendJson(response, 200, { ok: true, envFile: resolveEnvFilePath(config.codexChatEnvFile), writtenKeys: Object.keys(updates), values: "write-only", presence: await readEnvKeyPresence(config.codexChatEnvFile, Object.keys(updates)), restartRequired: true });
+  await appendAudit(config, { action: "slack.settings.write", adminEmail, keys: writtenKeys, envFile, values: "write-only" });
+  return sendJson(response, 200, { ok: true, envFile, writtenKeys, values: "write-only", presence: await readEnvKeyPresence(config.codexChatEnvFile, writtenKeys), restartRequired: true });
 }
 
 async function renderSlackManifestForBrain(config: BrainAdminServiceConfig): Promise<{ requestUrl: string; eventsPath: string; renderer: string; validation?: unknown; manifest: unknown; text: string }> {
@@ -383,6 +395,24 @@ function operationCommandSummary(config: BrainAdminServiceConfig): Record<"plan"
     restart: { configured: Boolean(operationCommand(config, "restart")), command: operationCommand(config, "restart") ? redactedCommand(operationCommand(config, "restart") ?? "") : null },
     deploy: { configured: Boolean(operationCommand(config, "deploy")), command: operationCommand(config, "deploy") ? redactedCommand(operationCommand(config, "deploy") ?? "") : null },
   };
+}
+
+function parseSlackSettingsConfirmation(value: unknown): { token?: string; action?: string; envFile?: string; keys: string[] } | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  return {
+    token: typeof record.token === "string" ? record.token : undefined,
+    action: typeof record.action === "string" ? record.action : undefined,
+    envFile: typeof record.envFile === "string" ? record.envFile : undefined,
+    keys: Array.isArray(record.keys) ? record.keys.filter((key): key is string => typeof key === "string") : [],
+  };
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const leftSet = new Set(left);
+  if (leftSet.size !== right.length) return false;
+  return right.every((value) => leftSet.has(value));
 }
 
 function parseLiveOperationConfirmation(value: unknown): { token?: string; operation?: string; serviceName?: string; freshPlan?: boolean; bypassedFreshPlan?: boolean } | null {
