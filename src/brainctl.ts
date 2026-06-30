@@ -12,7 +12,7 @@ import YAML from "yaml";
 import { validateAssistantPack } from "@brain/assistant-pack-schema";
 import { FakeEntrypointAdapter } from "@brain/entrypoint-protocol";
 import { defaultBackupExclude, defaultBackupInclude, validateWorkspaceConfig, type BrainConfig, type EntrypointConfig, type TranscriptionConfig, type WorkspaceConfig } from "@brain/workspace-schema";
-import { AutomationRuntime, BrainRuntime, BrainSupervisor, EchoProviderAdapter, EmployeeLifecycle, FakeProviderAdapter, FileAutomationLockStore, FileAutomationSpool, FileEmployeeStore, FileSubagentJobStore, ProviderEmployeeRuntime, ProviderSubagentExecutor, RuntimeCommandInterceptor, RuntimeEntrypointBridge, StaticSubagentExecutor, SubagentLifecycle, createGuardedLiveValidationPlan, createOperationsPlan, formatAssistantCommandOutput, parseBrainDirectives, renderSystemdService, type BrainSupervisorLogRecord, type OperationsPlan, type ProviderAdapter, type ProviderTurnEvent, type RuntimeLogEntry, type SubagentExecutor } from "@brain/runtime-core";
+import { AutomationRuntime, BrainRuntime, BrainSupervisor, EchoProviderAdapter, EmployeeLifecycle, FakeProviderAdapter, FileAutomationLockStore, FileAutomationSpool, FileEmployeeStore, FileSubagentJobStore, ProviderEmployeeRuntime, ProviderSubagentExecutor, RuntimeCommandInterceptor, RuntimeEntrypointBridge, StaticSubagentExecutor, SubagentLifecycle, createGuardedLiveValidationPlan, createOperationsPlan, formatAssistantCommandOutput, parseBrainDirectives, renderSystemdService, type AssistantWorkspaceCommandPort, type BrainSupervisorLogRecord, type OperationsPlan, type ProviderAdapter, type ProviderTurnEvent, type RuntimeLogEntry, type SubagentExecutor } from "@brain/runtime-core";
 import { FileTelegramPairingStore, FileTelegramPollingStateStore, OpenAITelegramAttachmentTranscriber, TelegramBotApiClient, TelegramEntrypointAdapter, loadTelegramToken, type TelegramAttachmentTranscriber } from "@brain/entrypoint-telegram";
 import { createCodexProvider, type CodexTransportKind } from "@brain/provider-codex";
 import { createClaudeCodeProvider, type ClaudeCodeTransportKind } from "@brain/provider-claude-code";
@@ -28,22 +28,26 @@ const program = new Command();
 const TELEGRAM_DOWNLOAD_MAX_BYTES = 52_428_800;
 const DEFAULT_WORKSPACE_ID = "personal";
 const DEFAULT_SERVICE_USER = "brain";
+const DEFAULT_MAIN_LOOP_MODEL = "gpt-5.5";
+const DEFAULT_MAIN_LOOP_EFFORT = "medium";
 
 type SetupDefaultsTarget = "local" | "remote";
 
 program
   .name("brainctl")
-  .description("Operator CLI for validating and preparing Brain runtime workspaces.")
+  .description("Operator CLI for Brain control-plane setup/deployment. Production assistant runtime belongs to codex-chat.")
   .version("0.0.0");
 
 program.command("setup")
   .description("Create a private workspace directory scaffold without writing secrets.")
-  .argument("[mode]", "optional mode: defaults, inspect, status, reset, telegram-token-script, or codex-auth-script")
+  .argument("[mode]", "optional mode: defaults, remote-bootstrap, inspect, status, reset, telegram-token-script, composio-api-key-script, or codex-auth-script")
   .option("--workspace <name>", "workspace id", DEFAULT_WORKSPACE_ID)
   .option("--target <target>", "defaults target: local or remote")
   .option("--ssh-host <host>", "remote SSH IP/DNS host for setup defaults")
-  .option("--ssh-user <user>", "remote SSH login user for setup defaults; defaults to root in remote mode")
+  .option("--ssh-user <user>", "remote initial SSH login user for setup defaults/bootstrap; defaults to root in remote mode")
   .option("--service-user <user>", "remote non-root service user for defaults", DEFAULT_SERVICE_USER)
+  .option("--ssh-alias <alias>", "optional SSH config Host alias to generate/update after remote bootstrap")
+  .option("--ssh-config <path>", "optional SSH config path to generate/update after remote bootstrap")
   .option("--service-name <name>", "systemd service name for setup status")
   .option("--path <path>", "private workspace path; setup defaults to ~/.brain/workspace for the default workspace, inspect defaults to config workspacePath")
   .option("--config <path>", "runtime YAML/TOML/JSON config to inspect before planning")
@@ -52,7 +56,9 @@ program.command("setup")
   .option("--token-file <path>", "private Telegram token file for generated token storage script")
   .option("--adapter-config <path>", "private Telegram adapter config file for generated token storage script")
   .option("--service-env <path>", "private service env file for generated token storage script")
+  .option("--codex-chat-env <path>", "private codex-chat service env file to receive TELEGRAM_BOT_TOKEN from operator input")
   .option("--secrets-env <path>", "private secrets env file for generated token storage script")
+  .option("--composio-env <path>", "private workspace .env file for generated Composio API key storage script")
   .option("--binary <path>", "provider binary for generated setup helper scripts")
   .option("--verbose", "include derived config, secrets, state, log, and command details in setup defaults")
   .option("--force", "allow explicitly requested non-destructive rewrites in future setup flows")
@@ -63,6 +69,9 @@ program.command("setup")
     if (mode === "defaults") {
       return exitWith(await setupDefaultsCommand(options));
     }
+    if (mode === "remote-bootstrap") {
+      return exitWith(await setupRemoteBootstrapCommand(options));
+    }
     if (mode === "inspect" || mode === "status") {
       return exitWith(await setupInspectCommand({ ...options, config: options.config ?? "examples/config/runtime.yaml" }));
     }
@@ -72,10 +81,13 @@ program.command("setup")
     if (mode === "telegram-token-script") {
       return exitWith(await setupTelegramTokenScriptCommand(options));
     }
+    if (mode === "composio-api-key-script") {
+      return exitWith(await setupComposioApiKeyScriptCommand(options));
+    }
     if (mode === "codex-auth-script") {
       return exitWith(await setupCodexAuthScriptCommand(options));
     }
-    if (mode) return exitWith({ ok: false, summary: `unknown setup mode: ${mode}`, details: { supported: ["defaults", "inspect", "status", "reset", "telegram-token-script", "codex-auth-script"] } });
+    if (mode) return exitWith({ ok: false, summary: `unknown setup mode: ${mode}`, details: { supported: ["defaults", "remote-bootstrap", "inspect", "status", "reset", "telegram-token-script", "composio-api-key-script", "codex-auth-script"] } });
     return exitWith(await setupCommand(options));
   });
 
@@ -86,7 +98,7 @@ program.command("doctor")
   .action(async (options) => exitWith(await doctorCommand(options)));
 
 program.command("start")
-  .description("Prepare or foreground a long-running Brain supervisor. Defaults to a safe dry-run plan unless --foreground is supplied.")
+  .description("Lab-only Brain supervisor seam. Production assistant service deployment must use `brainctl stack ...` to run codex-chat.")
   .option("--foreground", "run the supervisor in this process instead of printing the start plan")
   .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
   .option("--workspace <id>", "workspace id", "personal")
@@ -104,11 +116,12 @@ program.command("start")
   .option("--app-server-url <url>", "Codex app-server WebSocket URL")
   .option("--telegram-token-env <name>", "Telegram token env var for explicit live polling")
   .option("--telegram-token-file <path>", "Telegram token file for explicit live polling")
-  .option("--telegram-polling", "enable live Telegram getUpdates polling; requires a token ref")
+  .option("--telegram-polling", "deprecated/disabled: Brain must not own live Telegram polling; deploy codex-chat.service")
   .option("--telegram-max-polls <n>", "maximum Telegram polls before stopping", parseNumberOption)
   .option("--polling-state <path>", "Telegram polling offset state path")
   .option("--telegram-pairing", "use optional one-time /pair code bootstrap instead of default first-user pairing")
   .option("--telegram-pairing-state <dir>", "directory for Telegram paired identity state")
+  .option("--telegram-max-admin-pairs <n>", "maximum distinct Telegram admin user/chat pairs for first-user pairing", parseNumberOption)
   .option("--telegram-downloads", "download Telegram attachments to the private artifact directory before provider turns")
   .option("--telegram-download-dir <path>", "directory for downloaded Telegram attachments")
   .option("--telegram-transcription-command <cmd>", "private command used to transcribe local voice/audio/video files; receives file path as argv[1]")
@@ -117,7 +130,7 @@ program.command("start")
   .action(async (options) => exitWith(await startCommand(options)));
 
 program.command("run")
-  .description("Run the Brain supervisor in the foreground. Provider and entrypoint default to runtime config; pass --fake for test/dev smoke.")
+  .description("Run the lab Brain supervisor in the foreground. Do not use as a production assistant service; deploy codex-chat with `brainctl stack ...`.")
   .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--entrypoint <kind>", "override entrypoint kind from config: fake or telegram")
@@ -134,11 +147,12 @@ program.command("run")
   .option("--app-server-url <url>", "Codex app-server WebSocket URL")
   .option("--telegram-token-env <name>", "Telegram token env var for explicit live polling")
   .option("--telegram-token-file <path>", "Telegram token file for explicit live polling")
-  .option("--telegram-polling", "enable live Telegram getUpdates polling; requires a token ref")
+  .option("--telegram-polling", "deprecated/disabled: Brain must not own live Telegram polling; deploy codex-chat.service")
   .option("--telegram-max-polls <n>", "maximum Telegram polls before stopping", parseNumberOption)
   .option("--polling-state <path>", "Telegram polling offset state path")
   .option("--telegram-pairing", "use optional one-time /pair code bootstrap instead of default first-user pairing")
   .option("--telegram-pairing-state <dir>", "directory for Telegram paired identity state")
+  .option("--telegram-max-admin-pairs <n>", "maximum distinct Telegram admin user/chat pairs for first-user pairing", parseNumberOption)
   .option("--telegram-downloads", "download Telegram attachments to the private artifact directory before provider turns")
   .option("--telegram-download-dir <path>", "directory for downloaded Telegram attachments")
   .option("--telegram-transcription-command <cmd>", "private command used to transcribe local voice/audio/video files; receives file path as argv[1]")
@@ -185,7 +199,7 @@ operations.command("plan")
   .option("--repo <path>", "deployment checkout path", process.cwd())
   .action(async (options) => exitWith(await operationsPlanCommand(options)));
 operations.command("systemd")
-  .description("Render a systemd service unit to stdout JSON without installing it.")
+  .description("Render the deprecated/lab Brain supervisor unit without installing it. Production uses stack/systemd codex-chat plans.")
   .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--state <path>", "runtime state root")
@@ -206,6 +220,43 @@ operations.command("validate")
   .option("--service-user <user>", "systemd service user", "brain")
   .option("--repo <path>", "deployment checkout path", process.cwd())
   .action(async (options) => exitWith(await operationsValidateCommand(options)));
+
+const stack = program.command("stack").description("Control-plane inspection and no-network plans for the servant runtime stack");
+stack.command("status")
+  .description("Resolve codex-chat, assistant-agent-logic, assistant-agent-data/workspace, service metadata, and remote deployment metadata without contacting hosts.")
+  .option("--registry <path>", "repo-registry index.yaml path")
+  .option("--repo <path>", "Brain control-plane checkout path used to find ignored setup context", process.cwd())
+  .option("--setup-context <path>", "explicit setup-context.json path")
+  .option("--metadata-file <path>", "local/offline deployment metadata file to read instead of the canonical remote path")
+  .option("--workspace <id>", "workspace id", DEFAULT_WORKSPACE_ID)
+  .option("--environment <name>", "codex-chat app environment", "production")
+  .action(async (options) => exitWith(await stackStatusCommand(options)));
+stack.command("plan")
+  .description("Render a no-network setup/deploy plan for codex-chat + assistant-agent-logic + assistant-agent-data.")
+  .option("--registry <path>", "repo-registry index.yaml path")
+  .option("--repo <path>", "Brain control-plane checkout path used to find ignored setup context", process.cwd())
+  .option("--setup-context <path>", "explicit setup-context.json path")
+  .option("--metadata-file <path>", "local/offline deployment metadata file to read instead of the canonical remote path")
+  .option("--workspace <id>", "workspace id", DEFAULT_WORKSPACE_ID)
+  .option("--environment <name>", "codex-chat app environment", "production")
+  .action(async (options) => exitWith(await stackPlanCommand(options)));
+stack.command("apply")
+  .description("Apply the servant stack with explicit approval gates. Defaults to dry-run and supports mock/local/ssh executors.")
+  .option("--registry <path>", "repo-registry index.yaml path")
+  .option("--repo <path>", "Brain control-plane checkout path used to find ignored setup context", process.cwd())
+  .option("--setup-context <path>", "explicit setup-context.json path")
+  .option("--metadata-file <path>", "local/offline deployment metadata file to write/read for tests or local-only control planes")
+  .option("--workspace <id>", "workspace id", DEFAULT_WORKSPACE_ID)
+  .option("--environment <name>", "codex-chat app environment", "production")
+  .option("--executor <kind>", "executor kind: dry-run, mock, local, or ssh", "dry-run")
+  .option("--dry-run", "force dry-run planning even when approval flags are supplied")
+  .option("--approve", "approve non-secret git/build/metadata execution for this run")
+  .option("--approve-data", "approve assistant-agent-data clone/init/validation actions")
+  .option("--approve-config", "approve writing codex-chat config/env templates with secret placeholders only")
+  .option("--approve-service", "approve systemd service install/start actions")
+  .option("--approve-health", "approve live/read-only health verification actions")
+  .option("--now <iso>", "timestamp to record in deployment metadata")
+  .action(async (options) => exitWith(await stackApplyCommand(options)));
 
 const web = program.command("web").description("Generated static web page validation and publisher commands");
 web.command("setup")
@@ -283,28 +334,28 @@ backup.command("status")
   .option("--path <path>", "private workspace path override")
   .action(async (options) => exitWith(await backupCommand("status", options)));
 
-const workspaceCommands = program.command("workspace").description("Brain assistant workspace helpers for native stores and vendored integrations");
+const workspaceCommands = program.command("workspace").description("Legacy/lab Brain assistant workspace helpers; production uses assistant-agent-logic plus assistant-agent-data");
 workspaceCommands.command("scaffold")
-  .description("Create the Brain assistant workspace scaffold without overwriting stores or secrets.")
+  .description("Create the legacy/lab Brain assistant workspace scaffold without overwriting stores or secrets.")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--path <path>", "private workspace path")
   .option("--assistant-repo <path>", "deprecated; ignored because Brain uses the native @brain/assistant-logic package")
   .option("--dry-run", "show planned scaffold paths without writing files")
   .action(async (options) => exitWith(await workspaceScaffoldCommand(options)));
 workspaceCommands.command("status")
-  .description("Inspect Brain assistant workspace parity metadata, including vendored live-integration scripts.")
+  .description("Inspect legacy/lab Brain assistant workspace parity metadata, including vendored live-integration scripts.")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--path <path>", "private workspace path")
   .option("--assistant-repo <path>", "deprecated; ignored because Brain uses the native @brain/assistant-logic package")
   .action(async (options) => exitWith(await workspaceStatusCommand(options)));
 workspaceCommands.command("commands")
-  .description("List Brain assistant-logic commands, including native stores and vendored live integrations.")
+  .description("List legacy/lab Brain assistant-logic commands, including native stores and vendored live integrations.")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--path <path>", "private workspace path")
   .option("--assistant-repo <path>", "deprecated; ignored because Brain uses the native @brain/assistant-logic package")
   .action(async (options) => exitWith(await workspaceCommandsCommand(options)));
 workspaceCommands.command("run")
-  .description("Run a Brain assistant-logic command with ASSISTANT_WORKSPACE and private roots set.")
+  .description("Run a legacy/lab Brain assistant-logic command with ASSISTANT_WORKSPACE and private roots set.")
   .option("--workspace <id>", "workspace id", "personal")
   .option("--path <path>", "private workspace path")
   .option("--assistant-repo <path>", "deprecated; ignored because Brain uses the native @brain/assistant-logic package")
@@ -313,7 +364,7 @@ workspaceCommands.command("run")
   .allowUnknownOption(true)
   .action(async (script: string, scriptArgs: string[], options) => exitWith(await workspaceRunCommand(script, scriptArgs, options)));
 
-const composio = program.command("composio").description("Optional Composio setup/status checks for Google Calendar and chat data sources");
+const composio = program.command("composio").description("Optional Composio setup/status checks for Gmail and Google Calendar data sources");
 composio.command("setup")
   .description("Render generic Composio setup prompts and missing metadata refs without using real credentials.")
   .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
@@ -476,6 +527,7 @@ interface SupervisorRunCommandOptions {
   pollingState?: string;
   telegramPairing?: boolean;
   telegramPairingState?: string;
+  telegramMaxAdminPairs?: number;
   telegramDownloads?: boolean;
   telegramDownloadDir?: string;
   telegramTranscriptionCommand?: string;
@@ -502,6 +554,7 @@ type ResolvedSupervisorRuntimeResult =
   | (CliResult & { ok: false; runtime?: undefined });
 
 async function startCommand(options: SupervisorRunCommandOptions & { foreground?: boolean }): Promise<CliResult> {
+  if (options.telegramPolling) return disabledBrainLiveTelegramPollingResult();
   const config = await loadValidConfig(options.config);
   if (!config.ok || !config.config) return config;
   const selection = resolveSupervisorRuntime(config.config, options);
@@ -525,6 +578,7 @@ async function startCommand(options: SupervisorRunCommandOptions & { foreground?
         logPath: paths.logPath,
         liveTelegramPolling: Boolean(options.telegramPolling),
         telegramBootstrapPairing: options.telegramPairing ? "optional /pair code" : "first-user",
+        telegramMaxAdminPairs: telegramMaxAdminPairsOption(options),
         telegramTranscription: publicTelegramTranscriptionRuntime(telegramTranscriptionRuntime(selection.runtime, options)),
         automationFile: options.automationFile ? path.resolve(options.automationFile) : undefined,
         deployment: "not performed",
@@ -535,6 +589,7 @@ async function startCommand(options: SupervisorRunCommandOptions & { foreground?
 }
 
 async function runCommand(options: SupervisorRunCommandOptions): Promise<CliResult> {
+  if (options.telegramPolling) return disabledBrainLiveTelegramPollingResult();
   const config = await loadValidConfig(options.config);
   if (!config.ok || !config.config) return config;
   const selection = resolveSupervisorRuntime(config.config, options);
@@ -578,8 +633,10 @@ async function runCommand(options: SupervisorRunCommandOptions): Promise<CliResu
     subagents,
     employees,
     automation,
+    assistantCommands: createCliAssistantCommandPort(options.workspace, workspace.workspacePath),
     logs: logReader,
     health: { health: () => supervisor?.health() ?? { ok: false, detail: "supervisor not constructed" } },
+    mainLoop: { model: DEFAULT_MAIN_LOOP_MODEL, effort: DEFAULT_MAIN_LOOP_EFFORT },
   });
   supervisor = new BrainSupervisor({
     runtime,
@@ -625,6 +682,24 @@ async function runCommand(options: SupervisorRunCommandOptions): Promise<CliResu
     process.off("SIGTERM", onSignal);
     await subagents.shutdown("brainctl run stopped").catch(() => undefined);
   }
+}
+
+function disabledBrainLiveTelegramPollingResult(): CliResult {
+  return {
+    ok: false,
+    summary: "Brain live Telegram polling is disabled; deploy/start codex-chat.service instead",
+    details: {
+      replacement: "pnpm run brainctl stack plan --environment <env>; pnpm run brainctl stack apply --approve --approve-service --approve-health ...",
+      policy: [
+        "Brain is the deployment/control-plane coordinator only.",
+        "The live assistant runtime is codex-chat.service.",
+        "assistant-agent-logic remains the canonical assistant-domain logic checkout.",
+        "Keeping Brain polling disabled prevents double polling and stale domain behavior.",
+      ],
+      sideEffects: "none",
+      secretValuesPrinted: false,
+    },
+  };
 }
 
 async function healthCommand(options: { config: string; workspace: string; state?: string; log?: string }): Promise<CliResult> {
@@ -709,7 +784,7 @@ async function operationsPlanCommand(options: OperationsCommandOptions): Promise
   const plan = operationsPlan(options, selection.runtime);
   return {
     ok: true,
-    summary: "operations plan rendered without deployment side effects",
+    summary: "deprecated lab Brain runtime operations plan rendered without deployment side effects; use stack plan/apply for codex-chat production",
     details: {
       plan,
       sideEffects: "none",
@@ -725,12 +800,13 @@ async function operationsSystemdCommand(options: OperationsCommandOptions): Prom
   const plan = operationsPlan(options, selection.runtime);
   return {
     ok: true,
-    summary: "systemd unit rendered without installing or restarting services",
+    summary: "deprecated lab Brain runtime systemd unit rendered without installing or restarting services; use stack plan/apply for codex-chat production",
     details: {
       unitPath: plan.unitPath,
       serviceName: plan.serviceName,
       serviceUser: plan.serviceUser,
       unit: renderSystemdService(plan),
+      productionReplacement: "pnpm run brainctl stack plan --environment <env>; pnpm run brainctl stack apply --approve ... deploys codex-chat.service",
       sideEffects: "none",
     },
   };
@@ -752,7 +828,7 @@ async function operationsValidateCommand(options: OperationsCommandOptions): Pro
   ]);
   return {
     ok: true,
-    summary: "operations readiness validated without deployment side effects",
+    summary: "deprecated lab Brain runtime operations readiness validated without deployment side effects; use stack status for codex-chat production",
     details: {
       serviceName: plan.serviceName,
       unitPath: plan.unitPath,
@@ -778,6 +854,2038 @@ function operationsPlan(options: OperationsCommandOptions, runtime?: ResolvedSup
     providerKind: runtime?.providerKind,
     entrypointKind: runtime?.entrypointKind,
   });
+}
+
+interface StackCommandOptions {
+  registry?: string;
+  repo?: string;
+  setupContext?: string;
+  metadataFile?: string;
+  workspace: string;
+  environment: string;
+}
+
+type StackExecutorKind = "dry-run" | "mock" | "local" | "ssh";
+type StackApprovalGate = "apply" | "data" | "config" | "service" | "health";
+
+interface StackApplyOptions extends StackCommandOptions {
+  executor?: string;
+  dryRun?: boolean;
+  approve?: boolean;
+  approveData?: boolean;
+  approveConfig?: boolean;
+  approveService?: boolean;
+  approveHealth?: boolean;
+  now?: string;
+}
+
+interface RepoRegistryIndex {
+  version?: unknown;
+  controller_root?: unknown;
+  repos?: Record<string, RepoRegistryRepo>;
+}
+
+interface RepoRegistryRepo {
+  alias?: unknown;
+  host?: unknown;
+  path?: unknown;
+  repo_name?: unknown;
+  default_branch?: unknown;
+  current_branch?: unknown;
+  remote_url?: unknown;
+  deploy_host?: unknown;
+  deploy_path?: unknown;
+  apps?: unknown;
+  ops?: unknown;
+}
+
+interface StackRepoResolution {
+  role: "control-plane" | "servant-runtime" | "assistant-logic" | "assistant-data";
+  alias: string;
+  repoName: string;
+  host: string;
+  path: string;
+  branch?: string;
+  requestedRef?: string;
+  remoteUrl?: string;
+  source: string;
+  registryKey?: string;
+  present: boolean;
+}
+
+interface DeploymentRepoRef {
+  role: StackRepoResolution["role"];
+  repoName: string;
+  host: string;
+  path: string;
+  requestedRef?: string;
+  resolvedSha?: string;
+  verified: boolean;
+}
+
+interface StackStatusDetails {
+  workspaceId: string;
+  role: string;
+  dryRun: true;
+  networkAccess: false;
+  sideEffects: "none";
+  secretValuesPrinted: false;
+  registry: {
+    path: string;
+    present: boolean;
+    version?: unknown;
+    controllerRoot?: string;
+    issues: string[];
+  };
+  setupContext: Awaited<ReturnType<typeof readStackSetupContext>>;
+  controlPlane: StackRepoResolution;
+  servantRuntime: StackRepoResolution & {
+    appEnvironment: string;
+    deploy: {
+      host?: string;
+      path?: string;
+      sshIdentity?: string;
+      runtimeUser?: string;
+      serviceName?: string;
+      envFile?: string;
+      configPath?: string;
+      envVars: string[];
+      expectedTelegramBot?: TelegramBotIdentity;
+      healthChecks: Array<{ kind: string; command: string }>;
+    };
+  };
+  assistantLogic: StackRepoResolution;
+  assistantData: StackRepoResolution & {
+    workspacePath?: string;
+    promptRequired: boolean;
+    migrationPlaceholder: string;
+  };
+  servicePaths: {
+    deployHost?: string;
+    sshIdentity?: string;
+    deployPath?: string;
+    serviceName?: string;
+    envFile?: string;
+    configPath?: string;
+    setupContextConfigPath?: string;
+  };
+  secretMetadataChecks: Array<Record<string, unknown>>;
+  deploymentMetadata: StackDeploymentMetadataStatus;
+  repoBoundaries: ReturnType<typeof analyzeStackRepoBoundaries>;
+  missing: string[];
+}
+
+interface TelegramBotIdentity {
+  id?: string;
+  username?: string;
+}
+
+interface StackDeploymentMetadataStatus {
+  canonical: {
+    sourceOfTruth: "remote-brain-workspace" | "local-brain-workspace";
+    host?: string;
+    sshIdentity?: string;
+    workspaceRoot: string;
+    path: string;
+    relativePath: string;
+    schema: {
+      kind: typeof DEPLOYMENT_METADATA_KIND;
+      version: typeof DEPLOYMENT_METADATA_VERSION;
+    };
+    note: string;
+  };
+  localReadOverride?: string;
+  read: {
+    attempted: boolean;
+    present: boolean;
+    path: string;
+    metadata?: Awaited<ReturnType<typeof fileMetadata>>;
+    validation: DeploymentMetadataValidation;
+    plannedReadCommand?: string;
+  };
+  deployments: Array<{
+    id: string;
+    stack: string;
+    workspace: string;
+    environment: string;
+    status: string;
+    updatedAt: string;
+    serviceName?: string;
+    deployHost?: string;
+  }>;
+  secretValuesStored: false;
+  localProjectNotesAreSecondary: true;
+}
+
+interface DeploymentMetadataValidation {
+  ok: boolean;
+  issues: string[];
+}
+
+interface DeploymentMetadataStore {
+  version: 1;
+  kind: typeof DEPLOYMENT_METADATA_KIND;
+  updatedAt: string;
+  canonical: {
+    sourceOfTruth: "remote-brain-workspace" | "local-brain-workspace";
+    workspaceRoot: string;
+    path: string;
+    relativePath: string;
+  };
+  deployments: DeploymentMetadataRecord[];
+  secretValuesStored: false;
+}
+
+interface DeploymentMetadataRecord {
+  id: string;
+  stack: "codex-chat";
+  workspace: string;
+  environment: string;
+  status: "planned" | "blocked" | "partially_applied" | "applied" | "healthy" | "failed";
+  updatedAt: string;
+  source: "brainctl stack apply";
+  controlPlane: Pick<StackRepoResolution, "host" | "path" | "repoName">;
+  servantRuntime: {
+    repoName: string;
+    sourceHost: string;
+    sourcePath: string;
+    deployHost?: string;
+    deployPath?: string;
+    branch?: string;
+    requestedRef?: string;
+    resolvedSha?: string;
+    deployResolvedSha?: string;
+    remoteUrl?: string;
+    serviceName?: string;
+    runtimeUser?: string;
+  };
+  assistantLogic: Pick<StackRepoResolution, "host" | "path" | "repoName" | "branch" | "requestedRef" | "remoteUrl"> & {
+    resolvedSha?: string;
+  };
+  assistantData: Pick<StackRepoResolution, "host" | "path" | "repoName" | "branch" | "remoteUrl"> & {
+    promptRequired: boolean;
+    migrationStatus: "placeholder";
+  };
+  config: {
+    configPath?: string;
+    envFile?: string;
+    envVars: Array<{ name: string; value: "redacted"; metadataOnly: true }>;
+    renderedConfigPreview: string;
+    renderedEnvPreview: string;
+  };
+  health: {
+    status: "not_run" | "planned" | "passed" | "failed";
+    checks: Array<{ kind: string; command: string }>;
+  };
+  approvals: Record<StackApprovalGate, boolean>;
+  executor: {
+    requested: StackExecutorKind;
+    effective: StackExecutorKind;
+    dryRun: boolean;
+    networkAccess: boolean;
+  };
+  lastPlan: {
+    actionCount: number;
+    approvedActionCount: number;
+    executedActionCount: number;
+    failedActionCount: number;
+  };
+  repositories: DeploymentRepoRef[];
+  secretValuesStored: false;
+}
+
+interface StackExecutorAction {
+  id: string;
+  title: string;
+  phase: "preflight" | "git" | "assistant-data" | "config" | "state" | "systemd" | "health" | "metadata";
+  executor: "local" | "ssh" | "operator-prompt" | "metadata-file";
+  requiredGate: StackApprovalGate;
+  hostIdentity?: string;
+  command?: string;
+  displayCommand?: string;
+  writesMetadata?: boolean;
+  metadataOnly?: boolean;
+  repoUpdate?: Pick<DeploymentRepoRef, "role" | "repoName" | "host" | "path" | "requestedRef">;
+  secretValuesPrinted: false;
+  approved: boolean;
+  sideEffectsIfExecuted: string;
+}
+
+const DEFAULT_REPO_REGISTRY_INDEX = "/home/tim/.assistant-claude/workspace/.claude/repo-registry/index.yaml";
+const DEPLOYMENT_METADATA_VERSION = 1 as const;
+const DEPLOYMENT_METADATA_KIND = "brain.control-plane.deployments" as const;
+const DEPLOYMENT_METADATA_RELATIVE_PATH = "state/control-plane/deployments.json";
+const STACK_REQUIRED_ALIASES = {
+  codexChat: ["codex-chat"],
+  assistantLogic: ["assistant-agent-logic", "assistant-claude"],
+  assistantData: ["assistant-agent-data", "assistant-data"],
+} as const;
+
+async function stackStatusCommand(options: StackCommandOptions): Promise<CliResult> {
+  const status = await resolveStackStatus(options);
+  return {
+    ok: status.missing.length === 0 && status.repoBoundaries.ok,
+    summary: status.missing.length === 0 && status.repoBoundaries.ok
+      ? "servant runtime stack resolved from repo registry without network side effects"
+      : "servant runtime stack resolution needs attention before planning",
+    details: status,
+  };
+}
+
+async function stackPlanCommand(options: StackCommandOptions): Promise<CliResult> {
+  const status = await resolveStackStatus(options);
+  const plan = renderStackNoNetworkPlan(status);
+  return {
+    ok: status.missing.length === 0 && status.repoBoundaries.ok,
+    summary: status.missing.length === 0 && status.repoBoundaries.ok
+      ? "servant runtime setup/deploy plan rendered without network or mutation"
+      : "servant runtime setup/deploy plan rendered with unresolved prerequisites",
+    details: {
+      status,
+      plan,
+      dryRun: true,
+      networkAccess: false,
+      sideEffects: "none",
+      secretValuesPrinted: false,
+    },
+  };
+}
+
+async function stackApplyCommand(options: StackApplyOptions): Promise<CliResult> {
+  const executor = normalizeStackExecutor(options.executor);
+  if (!executor) {
+    return { ok: false, summary: "stack apply executor must be dry-run, mock, local, or ssh", details: { supported: ["dry-run", "mock", "local", "ssh"] } };
+  }
+  const status = await resolveStackStatus(options);
+  const approvals = stackApprovals(options);
+  const dryRun = Boolean(options.dryRun || !approvals.apply || executor === "dry-run");
+  const effectiveExecutor: StackExecutorKind = dryRun ? "dry-run" : executor;
+  const plan = renderStackNoNetworkPlan(status);
+  const actions = renderStackExecutorActions(status, approvals);
+  const canApply = status.missing.length === 0 && status.repoBoundaries.ok;
+  const blockedReason = canApply ? undefined : "unresolved stack status prerequisites or repo-boundary violations";
+
+  const actionResults: Array<Record<string, unknown>> = [];
+  if (!dryRun && canApply) {
+    for (const action of actions) {
+      const result = await executeStackAction(action, {
+        executor: effectiveExecutor,
+        metadataFile: options.metadataFile,
+      });
+      actionResults.push(result);
+    }
+  } else {
+    for (const action of actions) {
+      actionResults.push({
+        id: action.id,
+        phase: action.phase,
+        status: action.approved && canApply ? "planned" : "skipped",
+        reason: !canApply ? blockedReason : action.approved ? "dry-run default; no executor side effects" : `approval gate not enabled: ${action.requiredGate}`,
+        command: action.displayCommand,
+        secretValuesPrinted: false,
+      });
+    }
+  }
+
+  let metadataWrite: Record<string, unknown> | undefined;
+  if (!dryRun && canApply) {
+    const record = stackDeploymentRecord(status, {
+      approvals,
+      requestedExecutor: executor,
+      effectiveExecutor,
+      dryRun,
+      actionCount: actions.length,
+      approvedActionCount: actions.filter((action) => action.approved).length,
+      executedActionCount: actionResults.filter((result) => result.status === "succeeded" || result.status === "mocked").length,
+      failedActionCount: actionResults.filter((result) => result.status === "failed").length,
+      now: options.now,
+      healthApproved: approvals.health,
+      repositories: collectResolvedRepoRefs(actionResults, status),
+    });
+    metadataWrite = await writeStackDeploymentMetadata(status, record, { executor: effectiveExecutor, metadataFile: options.metadataFile });
+  }
+
+  const failedActions = actionResults.filter((result) => result.status === "failed");
+  const summary = dryRun
+    ? "stack apply plan ready (dry run; pass --approve with an executor to run)"
+    : failedActions.length > 0 || metadataWrite?.ok === false
+      ? "stack apply attempted with failures; deployment metadata records the attempted status where possible"
+      : "stack apply completed through approved executor gates";
+  return {
+    ok: canApply && (dryRun || (failedActions.length === 0 && metadataWrite?.ok !== false)),
+    summary,
+    details: {
+      status,
+      plan,
+      executor: {
+        requested: executor,
+        effective: effectiveExecutor,
+        dryRun,
+        networkAccess: !dryRun && effectiveExecutor === "ssh",
+      },
+      approvalGates: stackApprovalGateDetails(approvals),
+      actions,
+      actionResults,
+      metadataWrite,
+      sideEffects: dryRun ? "none" : effectiveExecutor === "mock" ? "mock executor plus local/offline metadata write only" : "approved executor actions only",
+      secretValuesPrinted: false,
+      blockedReason,
+    },
+  };
+}
+
+async function resolveStackStatus(options: StackCommandOptions): Promise<StackStatusDetails> {
+  const repoRoot = path.resolve(options.repo ?? process.cwd());
+  const registryPath = path.resolve(options.registry ?? process.env.BRAIN_REPO_REGISTRY ?? DEFAULT_REPO_REGISTRY_INDEX);
+  const registry = await loadRepoRegistry(registryPath);
+  const setupContext = await readStackSetupContext(options.setupContext ? path.resolve(options.setupContext) : localSetupContextPath(repoRoot), options.workspace);
+  const codexChat = findRegistryRepo(registry.index, STACK_REQUIRED_ALIASES.codexChat, "codex-chat");
+  const assistantLogic = findRegistryRepo(registry.index, STACK_REQUIRED_ALIASES.assistantLogic, "assistant-agent-logic");
+  const assistantData = findRegistryRepo(registry.index, STACK_REQUIRED_ALIASES.assistantData, "assistant-agent-data");
+  const codexEnvironment = codexChat.repo ? registryAppEnvironment(codexChat.repo, "codex-chat", options.environment) : undefined;
+  const codexDeploy = asRecord(codexEnvironment?.environment?.deploy);
+  const codexSource = asRecord(codexEnvironment?.environment?.source);
+  const deployHost = asString(codexDeploy?.host) ?? asString(codexChat.repo?.deploy_host) ?? setupContext.context?.sshHost;
+  const deployPath = asString(codexDeploy?.path) ?? asString(codexChat.repo?.deploy_path) ?? asString(codexChat.repo?.path);
+  const runtimeUser = asString(codexDeploy?.runtime_user);
+  const sshIdentity = asString(codexDeploy?.ssh_identity) ?? sshIdentityFromHost(deployHost, runtimeUser) ?? sshIdentityFromSetupContext(setupContext.context);
+  const serviceName = asString(codexDeploy?.service);
+  const envFile = asString(codexDeploy?.env_file);
+  const configPath = asString(codexDeploy?.config_path) ?? asString(codexDeploy?.config);
+  const envVars = asStringArray(codexDeploy?.env_vars);
+  const expectedTelegramBot = readExpectedTelegramBot(codexDeploy, codexEnvironment?.environment);
+  const healthChecks = readStackHealthChecks(codexEnvironment?.environment);
+  const controlPlane = stackRepoFromLocalBrain(repoRoot);
+  const servantRuntime = {
+    ...stackRepoFromRegistry("servant-runtime" as const, codexChat, codexSource),
+    appEnvironment: codexEnvironment?.name ?? options.environment,
+    deploy: {
+      host: deployHost,
+      path: deployPath,
+      sshIdentity,
+      runtimeUser,
+      serviceName,
+      envFile,
+      configPath,
+      envVars,
+      expectedTelegramBot,
+      healthChecks,
+    },
+  };
+  const assistantLogicResolution = stackRepoWithEnvironmentOverride(
+    stackRepoFromRegistry("assistant-logic" as const, assistantLogic),
+    asRecord(codexEnvironment?.environment?.assistant_logic) ?? asRecord(codexDeploy?.assistant_logic),
+    "codex-chat environment assistant_logic",
+  );
+  const assistantDataOverride = asRecord(codexEnvironment?.environment?.assistant_data) ?? asRecord(codexDeploy?.assistant_data);
+  const assistantDataBase = stackRepoWithEnvironmentOverride(
+    stackRepoFromRegistry("assistant-data" as const, assistantData),
+    assistantDataOverride,
+    "codex-chat environment assistant_data",
+  );
+  const remoteWorkspaceHost = setupContext.context?.target === "remote" ? sshIdentityFromSetupContext(setupContext.context) : undefined;
+  const remoteWorkspaceRoot = setupContext.context?.target === "remote" ? setupContext.context.workspaceRoot : undefined;
+  const assistantDataPath = asString(assistantDataOverride?.path) ?? remoteWorkspaceRoot ?? assistantDataBase.path;
+  const assistantDataHost = asString(assistantDataOverride?.host) ?? remoteWorkspaceHost ?? assistantDataBase.host;
+  const assistantDataResolution = {
+    ...assistantDataBase,
+    host: assistantDataHost,
+    path: assistantDataPath,
+    workspacePath: assistantDataPath,
+    source: remoteWorkspaceRoot && !assistantDataOverride
+      ? `${assistantDataBase.source}; remote setup context workspaceRoot`
+      : assistantDataBase.source,
+    promptRequired: true,
+    migrationPlaceholder: "Prompt the operator to confirm/pull/init the assistant-agent-data workspace; do not auto-migrate private data in this phase.",
+  };
+  const servicePaths = {
+    deployHost,
+    sshIdentity,
+    deployPath,
+    serviceName,
+    envFile,
+    configPath,
+    setupContextConfigPath: setupContext.context?.configPath,
+  };
+  const secretMetadataChecks = stackSecretMetadataChecks(envVars, envFile, sshIdentity, expectedTelegramBot);
+  const deploymentMetadata = await readStackDeploymentMetadataStatus({
+    workspace: options.workspace,
+    setupContext,
+    metadataFile: options.metadataFile,
+  });
+  const repoBoundaries = analyzeStackRepoBoundaries([controlPlane, servantRuntime, assistantLogicResolution, assistantDataResolution]);
+  const missing = [
+    ...registry.issues,
+    ...(!codexChat.repo ? ["repo registry entry missing: codex-chat"] : []),
+    ...(!assistantLogic.repo ? ["repo registry entry missing: assistant-agent-logic (or assistant-claude alias)"] : []),
+    ...(!assistantData.repo ? ["repo registry entry missing: assistant-agent-data"] : []),
+    ...(!deployHost ? ["codex-chat deploy host missing from registry/setup context"] : []),
+    ...(!deployPath ? ["codex-chat deploy path missing from registry"] : []),
+    ...(!serviceName ? ["codex-chat service name missing from registry"] : []),
+    ...(!envFile ? ["codex-chat env file path missing from registry"] : []),
+    ...(!deploymentMetadata.read.validation.ok ? deploymentMetadata.read.validation.issues.map((issue) => `deployment metadata store invalid: ${issue}`) : []),
+    ...repoBoundaries.issues,
+  ];
+
+  return {
+    workspaceId: options.workspace,
+    role: "Brain control plane manages the codex-chat servant runtime stack; Brain's own runtime remains experimental/lab.",
+    dryRun: true,
+    networkAccess: false,
+    sideEffects: "none",
+    secretValuesPrinted: false,
+    registry: {
+      path: registry.path,
+      present: registry.present,
+      version: registry.index?.version,
+      controllerRoot: asString(registry.index?.controller_root),
+      issues: registry.issues,
+    },
+    setupContext,
+    controlPlane,
+    servantRuntime,
+    assistantLogic: assistantLogicResolution,
+    assistantData: assistantDataResolution,
+    servicePaths,
+    secretMetadataChecks,
+    deploymentMetadata,
+    repoBoundaries,
+    missing,
+  };
+}
+
+function normalizeStackExecutor(value: string | undefined): StackExecutorKind | undefined {
+  const normalized = (value ?? "dry-run").trim();
+  return normalized === "dry-run" || normalized === "mock" || normalized === "local" || normalized === "ssh" ? normalized : undefined;
+}
+
+function stackApprovals(options: StackApplyOptions): Record<StackApprovalGate, boolean> {
+  return {
+    apply: Boolean(options.approve),
+    data: Boolean(options.approve && options.approveData),
+    config: Boolean(options.approve && options.approveConfig),
+    service: Boolean(options.approve && options.approveService),
+    health: Boolean(options.approve && options.approveHealth),
+  };
+}
+
+function stackApprovalGateDetails(approvals: Record<StackApprovalGate, boolean>): Array<Record<string, unknown>> {
+  return [
+    { gate: "apply", approved: approvals.apply, unlocks: ["repo preflight", "git clone/update", "build", "deployment metadata write"], requiredFlag: "--approve" },
+    { gate: "data", approved: approvals.data, unlocks: ["assistant-agent-data clone/init/validation placeholders"], requiredFlag: "--approve --approve-data" },
+    { gate: "config", approved: approvals.config, unlocks: ["codex-chat config/env template writes without secret values"], requiredFlag: "--approve --approve-config" },
+    { gate: "service", approved: approvals.service, unlocks: ["systemd service install/enable/start"], requiredFlag: "--approve --approve-service" },
+    { gate: "health", approved: approvals.health, unlocks: ["live health verification commands"], requiredFlag: "--approve --approve-health" },
+  ];
+}
+
+async function readStackDeploymentMetadataStatus(input: {
+  workspace: string;
+  setupContext: Awaited<ReturnType<typeof readStackSetupContext>>;
+  metadataFile?: string;
+}): Promise<StackDeploymentMetadataStatus> {
+  const context = input.setupContext.context;
+  const workspaceRoot = context?.workspaceRoot ?? defaultWorkspaceRoot(input.workspace);
+  const canonicalPath = deploymentMetadataPath(workspaceRoot);
+  const canonicalSourceOfTruth = context?.target === "remote" ? "remote-brain-workspace" as const : "local-brain-workspace" as const;
+  const canonicalHost = context?.target === "remote" ? context.sshHost : undefined;
+  const canonicalSshIdentity = context?.target === "remote" ? sshIdentityFromSetupContext(context) : undefined;
+  const localPath = input.metadataFile ? path.resolve(input.metadataFile) : canonicalSourceOfTruth === "local-brain-workspace" ? path.resolve(canonicalPath) : undefined;
+  const plannedReadCommand = canonicalSourceOfTruth === "remote-brain-workspace"
+    ? remotePlanCommand(canonicalSshIdentity, `test -r ${shellPathArg(canonicalPath)} && python3 -m json.tool ${shellPathArg(canonicalPath)} >/dev/null`)
+    : `test -r ${shellPathArg(canonicalPath)} && python3 -m json.tool ${shellPathArg(canonicalPath)} >/dev/null`;
+  if (!localPath) {
+    return {
+      canonical: {
+        sourceOfTruth: canonicalSourceOfTruth,
+        host: canonicalHost,
+        sshIdentity: canonicalSshIdentity,
+        workspaceRoot,
+        path: canonicalPath,
+        relativePath: DEPLOYMENT_METADATA_RELATIVE_PATH,
+        schema: { kind: DEPLOYMENT_METADATA_KIND, version: DEPLOYMENT_METADATA_VERSION },
+        note: "Deployment metadata is canonical on the Brain/control-plane host under the private workspace state; repo-registry/local notes are secondary link maps.",
+      },
+      read: {
+        attempted: false,
+        present: false,
+        path: canonicalPath,
+        validation: { ok: true, issues: [] },
+        plannedReadCommand,
+      },
+      deployments: [],
+      secretValuesStored: false,
+      localProjectNotesAreSecondary: true,
+    };
+  }
+
+  const metadata = await fileMetadata(localPath);
+  if (!metadata.present) {
+    return {
+      canonical: {
+        sourceOfTruth: canonicalSourceOfTruth,
+        host: canonicalHost,
+        sshIdentity: canonicalSshIdentity,
+        workspaceRoot,
+        path: canonicalPath,
+        relativePath: DEPLOYMENT_METADATA_RELATIVE_PATH,
+        schema: { kind: DEPLOYMENT_METADATA_KIND, version: DEPLOYMENT_METADATA_VERSION },
+        note: "Deployment metadata is canonical on the Brain/control-plane host under the private workspace state; repo-registry/local notes are secondary link maps.",
+      },
+      localReadOverride: input.metadataFile ? localPath : undefined,
+      read: {
+        attempted: true,
+        present: false,
+        path: localPath,
+        metadata,
+        validation: { ok: true, issues: [] },
+        plannedReadCommand,
+      },
+      deployments: [],
+      secretValuesStored: false,
+      localProjectNotesAreSecondary: true,
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(await readFile(localPath, "utf8")) as unknown;
+    const validation = validateDeploymentMetadataStore(parsed);
+    const store = validation.ok ? parsed as DeploymentMetadataStore : undefined;
+    return {
+      canonical: {
+        sourceOfTruth: canonicalSourceOfTruth,
+        host: canonicalHost,
+        sshIdentity: canonicalSshIdentity,
+        workspaceRoot,
+        path: canonicalPath,
+        relativePath: DEPLOYMENT_METADATA_RELATIVE_PATH,
+        schema: { kind: DEPLOYMENT_METADATA_KIND, version: DEPLOYMENT_METADATA_VERSION },
+        note: "Deployment metadata is canonical on the Brain/control-plane host under the private workspace state; repo-registry/local notes are secondary link maps.",
+      },
+      localReadOverride: input.metadataFile ? localPath : undefined,
+      read: {
+        attempted: true,
+        present: true,
+        path: localPath,
+        metadata,
+        validation,
+        plannedReadCommand,
+      },
+      deployments: (store?.deployments ?? []).map((deployment) => ({
+        id: deployment.id,
+        stack: deployment.stack,
+        workspace: deployment.workspace,
+        environment: deployment.environment,
+        status: deployment.status,
+        updatedAt: deployment.updatedAt,
+        serviceName: deployment.servantRuntime.serviceName,
+        deployHost: deployment.servantRuntime.deployHost,
+      })),
+      secretValuesStored: false,
+      localProjectNotesAreSecondary: true,
+    };
+  } catch (error) {
+    return {
+      canonical: {
+        sourceOfTruth: canonicalSourceOfTruth,
+        host: canonicalHost,
+        sshIdentity: canonicalSshIdentity,
+        workspaceRoot,
+        path: canonicalPath,
+        relativePath: DEPLOYMENT_METADATA_RELATIVE_PATH,
+        schema: { kind: DEPLOYMENT_METADATA_KIND, version: DEPLOYMENT_METADATA_VERSION },
+        note: "Deployment metadata is canonical on the Brain/control-plane host under the private workspace state; repo-registry/local notes are secondary link maps.",
+      },
+      localReadOverride: input.metadataFile ? localPath : undefined,
+      read: {
+        attempted: true,
+        present: true,
+        path: localPath,
+        metadata,
+        validation: { ok: false, issues: [`could not parse deployment metadata JSON: ${errorMessage(error)}`] },
+        plannedReadCommand,
+      },
+      deployments: [],
+      secretValuesStored: false,
+      localProjectNotesAreSecondary: true,
+    };
+  }
+}
+
+function deploymentMetadataPath(workspaceRoot: string): string {
+  return path.posix.join(workspaceRoot.replaceAll("\\", "/"), DEPLOYMENT_METADATA_RELATIVE_PATH);
+}
+
+function validateDeploymentMetadataStore(value: unknown): DeploymentMetadataValidation {
+  const issues: string[] = [];
+  if (!isRecord(value)) return { ok: false, issues: ["store is not an object"] };
+  if (value.version !== DEPLOYMENT_METADATA_VERSION) issues.push(`version must be ${DEPLOYMENT_METADATA_VERSION}`);
+  if (value.kind !== DEPLOYMENT_METADATA_KIND) issues.push(`kind must be ${DEPLOYMENT_METADATA_KIND}`);
+  if (value.secretValuesStored !== false) issues.push("secretValuesStored must be false");
+  if (!isRecord(value.canonical)) issues.push("canonical must be an object");
+  if (!Array.isArray(value.deployments)) issues.push("deployments must be an array");
+  const seen = new Set<string>();
+  for (const [index, deployment] of (Array.isArray(value.deployments) ? value.deployments : []).entries()) {
+    if (!isRecord(deployment)) {
+      issues.push(`deployments[${index}] must be an object`);
+      continue;
+    }
+    const id = asString(deployment.id);
+    if (!id) issues.push(`deployments[${index}].id is required`);
+    else if (seen.has(id)) issues.push(`duplicate deployment id: ${id}`);
+    else seen.add(id);
+    if (deployment.stack !== "codex-chat") issues.push(`deployments[${index}].stack must be codex-chat`);
+    if (!["planned", "blocked", "partially_applied", "applied", "healthy", "failed"].includes(asString(deployment.status) ?? "")) {
+      issues.push(`deployments[${index}].status is unsupported`);
+    }
+    if (deployment.secretValuesStored !== false) issues.push(`deployments[${index}].secretValuesStored must be false`);
+    const config = asRecord(deployment.config);
+    const envVars = Array.isArray(config?.envVars) ? config.envVars : [];
+    for (const [envIndex, envVar] of envVars.entries()) {
+      const envRecord = asRecord(envVar);
+      if (envRecord?.value !== "redacted" || envRecord.metadataOnly !== true) {
+        issues.push(`deployments[${index}].config.envVars[${envIndex}] must be metadata-only/redacted`);
+      }
+    }
+  }
+  return { ok: issues.length === 0, issues };
+}
+
+async function loadRepoRegistry(registryPath: string): Promise<{ path: string; present: boolean; index?: RepoRegistryIndex; issues: string[] }> {
+  try {
+    const raw = await readFile(registryPath, "utf8");
+    const parsed = YAML.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { path: registryPath, present: true, issues: ["repo registry index is not an object"] };
+    }
+    const index = parsed as RepoRegistryIndex;
+    if (!index.repos || typeof index.repos !== "object" || Array.isArray(index.repos)) {
+      return { path: registryPath, present: true, index, issues: ["repo registry index has no repos map"] };
+    }
+    return { path: registryPath, present: true, index, issues: [] };
+  } catch (error) {
+    return { path: registryPath, present: false, issues: [`repo registry index could not be read: ${errorMessage(error)}`] };
+  }
+}
+
+async function readStackSetupContext(contextPath: string, workspace: string): Promise<{ present: boolean; path: string; context?: LocalSetupContext; warning?: string; note?: string; metadata?: Awaited<ReturnType<typeof fileMetadata>> }> {
+  const metadata = await fileMetadata(contextPath);
+  if (!metadata.present) return { present: false, path: contextPath, metadata, note: "no setup context found; registry deploy metadata remains authoritative" };
+  try {
+    const parsed = JSON.parse(await readFile(contextPath, "utf8")) as Partial<LocalSetupContext>;
+    if (parsed.version !== 1 || (parsed.target !== "local" && parsed.target !== "remote") || typeof parsed.workspaceRoot !== "string") {
+      return { present: true, path: contextPath, metadata, warning: "setup context is invalid or unsupported" };
+    }
+    if ((parsed.workspace ?? workspace) !== workspace) {
+      return { present: true, path: contextPath, metadata, warning: `setup context is for workspace ${parsed.workspace}, not ${workspace}` };
+    }
+    return {
+      present: true,
+      path: contextPath,
+      metadata,
+      context: {
+        version: 1,
+        target: parsed.target,
+        workspace,
+        workspaceRoot: parsed.workspaceRoot,
+        updatedAt: parsed.updatedAt,
+        sshHost: parsed.sshHost,
+        sshUser: parsed.sshUser,
+        serviceUser: parsed.serviceUser,
+        bootstrapSshUser: parsed.bootstrapSshUser,
+        repoPath: parsed.repoPath,
+        configPath: parsed.configPath,
+        secretValuesStored: false,
+      },
+    };
+  } catch (error) {
+    return { present: true, path: contextPath, metadata, warning: `could not parse setup context: ${errorMessage(error)}` };
+  }
+}
+
+function findRegistryRepo(index: RepoRegistryIndex | undefined, aliases: readonly string[], repoName: string): { key?: string; repo?: RepoRegistryRepo } {
+  const repos = index?.repos;
+  if (!repos) return {};
+  for (const alias of aliases) {
+    const repo = repos[alias];
+    if (repo) return { key: alias, repo };
+  }
+  for (const [key, repo] of Object.entries(repos)) {
+    if (asString(repo.repo_name) === repoName || aliases.includes(asString(repo.alias) ?? "")) return { key, repo };
+  }
+  return {};
+}
+
+function stackRepoFromLocalBrain(repoRoot: string): StackRepoResolution {
+  return {
+    role: "control-plane",
+    alias: "brain",
+    repoName: "brain",
+    host: "local",
+    path: repoRoot,
+    source: "current checkout",
+    present: true,
+  };
+}
+
+function stackRepoFromRegistry<R extends StackRepoResolution["role"]>(role: R, resolved: { key?: string; repo?: RepoRegistryRepo }, sourceOverride?: Record<string, unknown>): StackRepoResolution {
+  const repo = resolved.repo;
+  const opsSource = asRecord(asRecord(asRecord(repo?.ops)?.repository)?.source);
+  const host = asString(sourceOverride?.host) ?? asString(opsSource?.host) ?? asString(repo?.host) ?? "missing";
+  const repoPath = asString(sourceOverride?.path) ?? asString(opsSource?.path) ?? asString(repo?.path) ?? "missing";
+  const requestedRef = asString(sourceOverride?.ref) ?? asString(sourceOverride?.branch) ?? asString(opsSource?.ref) ?? asString(opsSource?.branch) ?? asString(repo?.current_branch) ?? asString(repo?.default_branch);
+  const branch = requestedRef;
+  const remoteUrl = redactRemoteUrl(asString(sourceOverride?.remote_url) ?? asString(opsSource?.remote_url) ?? asString(repo?.remote_url) ?? "");
+  return {
+    role,
+    alias: asString(repo?.alias) ?? resolved.key ?? "missing",
+    repoName: asString(repo?.repo_name) ?? resolved.key ?? "missing",
+    host,
+    path: repoPath,
+    branch,
+    requestedRef,
+    remoteUrl: remoteUrl || undefined,
+    source: resolved.repo ? "repo-registry" : "missing",
+    registryKey: resolved.key,
+    present: Boolean(resolved.repo),
+  };
+}
+
+function stackRepoWithEnvironmentOverride(repo: StackRepoResolution, override: Record<string, unknown> | undefined, source: string): StackRepoResolution {
+  if (!override) return repo;
+  const requestedRef = asString(override.ref) ?? asString(override.branch) ?? repo.requestedRef ?? repo.branch;
+  const remoteUrl = redactRemoteUrl(asString(override.remote_url) ?? repo.remoteUrl ?? "");
+  return {
+    ...repo,
+    host: asString(override.host) ?? repo.host,
+    path: asString(override.path) ?? repo.path,
+    branch: requestedRef,
+    requestedRef,
+    remoteUrl: remoteUrl || undefined,
+    source: `${repo.source}; ${source}`,
+  };
+}
+
+function registryAppEnvironment(repo: RepoRegistryRepo, appName: string, environment: string): { name: string; app?: Record<string, unknown>; environment?: Record<string, unknown> } | undefined {
+  const apps = asRecord(repo.apps);
+  const app = asRecord(apps?.[appName]) ?? Object.values(apps ?? {}).map(asRecord).find(Boolean);
+  const environments = asRecord(app?.environments);
+  const env = asRecord(environments?.[environment]) ?? Object.values(environments ?? {}).map(asRecord).find(Boolean);
+  const envName = asRecord(environments?.[environment]) ? environment : Object.keys(environments ?? {})[0] ?? environment;
+  return app || env ? { name: envName, app, environment: env } : undefined;
+}
+
+function readStackHealthChecks(environment: Record<string, unknown> | undefined): Array<{ kind: string; command: string }> {
+  const checks = Array.isArray(environment?.health_checks) ? environment.health_checks : [];
+  return checks.flatMap((check) => {
+    const record = asRecord(check);
+    const command = asString(record?.command);
+    if (!command) return [];
+    return [{ kind: asString(record?.kind) ?? "command", command }];
+  });
+}
+
+function readExpectedTelegramBot(deploy: Record<string, unknown> | undefined, environment: Record<string, unknown> | undefined): TelegramBotIdentity | undefined {
+  const candidate = asRecord(deploy?.expected_telegram_bot)
+    ?? asRecord(environment?.expected_telegram_bot)
+    ?? asRecord(deploy?.telegram_bot)
+    ?? asRecord(environment?.telegram_bot);
+  const idValue = candidate?.id;
+  const id = typeof idValue === "number" ? String(idValue) : asString(idValue);
+  const username = asString(candidate?.username)?.replace(/^@/, "");
+  return id || username ? { id, username } : undefined;
+}
+
+function stackSecretMetadataChecks(envVars: string[], envFile: string | undefined, sshIdentity: string | undefined, expectedTelegramBot?: TelegramBotIdentity): Array<Record<string, unknown>> {
+  if (!envFile && envVars.length === 0) return [];
+  return [
+    ...(envFile ? [{
+      source: "codex-chat.env_file",
+      kind: "file",
+      path: envFile,
+      metadataOnly: true,
+      value: "redacted",
+      plannedCheck: remotePlanCommand(sshIdentity, `test -r ${shellPathArg(envFile)} && stat -c '%a %U %s' ${shellPathArg(envFile)}`),
+    }] : []),
+    ...envVars.map((name) => ({
+      source: "codex-chat.env_vars",
+      kind: "env",
+      name,
+      metadataOnly: true,
+      value: "redacted",
+      plannedCheck: envFile
+        ? remotePlanCommand(sshIdentity, `grep -qE '^${escapeShellRegex(name)}=' ${shellPathArg(envFile)}`)
+        : "pending env file selection; check presence without printing values",
+    })),
+    ...(envFile && expectedTelegramBot ? [{
+      source: "codex-chat.telegram_bot_identity",
+      kind: "telegram-getMe",
+      envFile,
+      expected: expectedTelegramBot,
+      metadataOnly: true,
+      value: "redacted",
+      plannedCheck: remotePlanCommand(sshIdentity, renderTelegramBotIdentityGuardShell({ envFile, expected: expectedTelegramBot })),
+    }] : []),
+  ];
+}
+
+function renderCodexChatEnvPreview(status: StackStatusDetails): string {
+  const envVars = status.servantRuntime.deploy.envVars;
+  return [
+    "# codex-chat service environment template rendered by Brain.",
+    "# Fill secret values on the remote server only; Brain never stores or prints them.",
+    ...envVars.map((name) => `${name}=<redacted:set-on-server>`),
+    "",
+  ].join("\n");
+}
+
+function renderCodexChatConfigPreview(status: StackStatusDetails): string {
+  const codexChatRoot = status.servantRuntime.deploy.path ?? status.servantRuntime.path;
+  const workspaceRoot = codexChatWorkspaceRoot(status);
+  const controlPlaneRoot = status.setupContext.context?.repoPath ?? status.controlPlane.path;
+  const stateDir = path.posix.join(workspaceRoot, "state", "codex-chat");
+  const artifactDir = path.posix.join(workspaceRoot, "artifacts", "subagents");
+  const runDir = path.posix.join(workspaceRoot, "state", "run");
+  const addDirs = [
+    controlPlaneRoot,
+    codexChatRoot,
+    status.assistantLogic.path,
+    workspaceRoot,
+  ].filter((value, index, values) => value && values.indexOf(value) === index);
+  return [
+    "# codex-chat TOML rendered by Brain control plane.",
+    "# Secret values stay in the service environment or host secret store, never in deployment metadata.",
+    "version = 1",
+    "",
+    "[service]",
+    "name = \"codex-chat\"",
+    `workspace = ${tomlString(workspaceRoot)}`,
+    `stateDir = ${tomlString(stateDir)}`,
+    "logLevel = \"info\"",
+    "timezone = \"Etc/UTC\"",
+    `ipcSocket = ${tomlString(path.posix.join(runDir, "codex-chat.sock"))}`,
+    "",
+    "[codex]",
+    "binary = \"codex\"",
+    "transport = \"app-server\"",
+    "model = \"gpt-5.5\"",
+    "effort = \"medium\"",
+    "sandbox = \"danger-full-access\"",
+    "approvalPolicy = \"never\"",
+    "extraConfig = [\"model_reasoning_effort=\\\"medium\\\"\"]",
+    `addDirs = [${addDirs.map(tomlString).join(", ")}]`,
+    "",
+    "[telegram]",
+    "mode = \"polling\"",
+    "botTokenEnv = \"TELEGRAM_BOT_TOKEN\"",
+    "parseMode = \"plain\"",
+    "pairingEnabledOnEmptyAllowlist = true",
+    "downloadMaxBytes = 52428800",
+    "sendProgressUpdates = true",
+    "opsChatId = 0",
+    "",
+    "[telegram.allowlist]",
+    "userIds = []",
+    "chatIds = []",
+    "adminUserIds = []",
+    "",
+    "[behavior]",
+    `dir = ${tomlString(path.posix.join(codexChatRoot, "behavior"))}`,
+    "entrypoint = \"AGENTS.md\"",
+    "reloadOnSighup = true",
+    "",
+    "[subagents]",
+    "enabled = true",
+    "backend = \"codex_exec\"",
+    "maxConcurrent = 5",
+    "defaultEffort = \"medium\"",
+    "defaultTimeoutSec = 1800",
+    "maxTimeoutSec = 7200",
+    `artifactDir = ${tomlString(artifactDir)}`,
+    `childSocketDir = ${tomlString(path.posix.join(runDir, "subagents"))}`,
+    "cleanupArtifacts = true",
+    "",
+    "[employees]",
+    "enabled = false",
+    `rootDir = ${tomlString(path.posix.join(workspaceRoot, "data", "employees"))}`,
+    `socketDir = ${tomlString(path.posix.join(runDir, "employees"))}`,
+    "",
+    "[loops]",
+    "enabled = false",
+    `path = ${tomlString(path.posix.join(workspaceRoot, "config", "loops.json"))}`,
+    "namespace = \"codex-chat\"",
+    "runnerCommand = \"codex-chat loop run\"",
+    "",
+    "[monitors]",
+    "enabled = false",
+    `path = ${tomlString(path.posix.join(workspaceRoot, "config", "monitors.json"))}`,
+    "",
+    "[files]",
+    `dir = ${tomlString(path.posix.join(workspaceRoot, "documents", "files"))}`,
+    `artifactDir = ${tomlString(path.posix.join(workspaceRoot, "artifacts"))}`,
+    `allowedSendRoots = [${[workspaceRoot, path.posix.join(workspaceRoot, "artifacts"), codexChatRoot].map(tomlString).join(", ")}]`,
+    "",
+    "[transcription]",
+    "enabled = false",
+    "provider = \"openai\"",
+    "model = \"gpt-4o-mini-transcribe\"",
+    "apiKeyEnv = \"OPENAI_API_KEY\"",
+    "",
+    "[security]",
+    "redactSecretsInLogs = true",
+    "requireLocalFileForSend = true",
+    "allowShellActionsFromDirectives = false",
+  ].join("\n");
+}
+
+function codexChatWorkspaceRoot(status: StackStatusDetails): string {
+  return status.setupContext.context?.workspaceRoot ?? status.assistantData.workspacePath ?? status.assistantData.path;
+}
+
+function tomlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function renderSystemdServicePreview(status: StackStatusDetails): string {
+  const serviceName = status.servantRuntime.deploy.serviceName ?? "codex-chat.service";
+  const workingDirectory = status.servantRuntime.deploy.path ?? status.servantRuntime.path;
+  const runtimeUser = status.servantRuntime.deploy.runtimeUser ?? DEFAULT_SERVICE_USER;
+  const envFile = status.servantRuntime.deploy.envFile;
+  const configPath = status.servantRuntime.deploy.configPath ?? status.servicePaths.setupContextConfigPath ?? path.posix.join(workingDirectory, "config", "codex-chat.toml");
+  return [
+    "[Unit]",
+    "Description=codex-chat Telegram/Codex runtime (deployed by Brain control plane)",
+    "Conflicts=brain-personal.service",
+    "After=network-online.target",
+    "Wants=network-online.target",
+    "",
+    "[Service]",
+    `User=${runtimeUser}`,
+    `WorkingDirectory=${workingDirectory}`,
+    ...(envFile ? [`EnvironmentFile=${envFile}`] : []),
+    `ExecStart=/usr/bin/env node dist/main.js --config ${configPath} start`,
+    "Restart=on-failure",
+    "RestartSec=5s",
+    "",
+    "[Install]",
+    "WantedBy=multi-user.target",
+    "",
+  ].join("\n");
+}
+
+function renderStackExecutorActions(status: StackStatusDetails, approvals: Record<StackApprovalGate, boolean>): StackExecutorAction[] {
+  const servant = status.servantRuntime;
+  const logic = status.assistantLogic;
+  const data = status.assistantData;
+  const deploy = servant.deploy;
+  const deployPath = deploy.path ?? servant.path;
+  const sourceIdentity = sshIdentityFromHost(servant.host, undefined);
+  const deployIdentity = deploy.sshIdentity ?? sshIdentityFromHost(deploy.host, deploy.runtimeUser);
+  const logicIdentity = sshIdentityFromHost(logic.host, undefined);
+  const dataIdentity = sshIdentityFromHost(data.host, undefined);
+  const serviceName = deploy.serviceName ?? "codex-chat.service";
+  const envFile = deploy.envFile;
+  const configPath = deploy.configPath ?? status.servicePaths.setupContextConfigPath;
+  const workspaceRoot = codexChatWorkspaceRoot(status);
+  const configPreview = renderCodexChatConfigPreview(status);
+  const envPreview = renderCodexChatEnvPreview(status);
+  const systemdPreview = renderSystemdServicePreview(status);
+  const action = (input: Omit<StackExecutorAction, "approved" | "displayCommand" | "secretValuesPrinted">): StackExecutorAction => ({
+    ...input,
+    approved: approvals[input.requiredGate],
+    displayCommand: input.command ? remotePlanCommand(input.hostIdentity, input.command) : undefined,
+    secretValuesPrinted: false,
+  });
+  return [
+    action({
+      id: "repo-boundary-preflight",
+      title: "Validate repository boundaries before execution.",
+      phase: "preflight",
+      executor: "local",
+      requiredGate: "apply",
+      command: "true # repo-boundary preflight already resolved by brainctl stack status",
+      metadataOnly: true,
+      sideEffectsIfExecuted: "no filesystem/network changes",
+    }),
+    action({
+      id: "clone-update-codex-chat-source",
+      title: "Clone/update codex-chat source checkout and verify resolved SHA.",
+      phase: "git",
+      executor: sourceIdentity ? "ssh" : "local",
+      requiredGate: "apply",
+      hostIdentity: sourceIdentity,
+      command: renderGitCloneOrUpdateShell({ path: servant.path, remoteUrl: servant.remoteUrl, branch: servant.requestedRef ?? servant.branch, role: "servant-runtime" }),
+      repoUpdate: { role: "servant-runtime", repoName: servant.repoName, host: servant.host, path: servant.path, requestedRef: servant.requestedRef ?? servant.branch },
+      sideEffectsIfExecuted: "would clone/fetch/update codex-chat source checkout to the configured ref and print resolved SHA",
+    }),
+    ...(deployPath !== servant.path ? [action({
+      id: "clone-update-codex-chat-deploy",
+      title: "Clone/update codex-chat deploy checkout.",
+      phase: "git",
+      executor: deployIdentity ? "ssh" : "local",
+      requiredGate: "apply",
+      hostIdentity: deployIdentity,
+      command: renderGitCloneOrUpdateShell({ path: deployPath, remoteUrl: servant.remoteUrl, branch: servant.requestedRef ?? servant.branch, role: "servant-runtime" }),
+      repoUpdate: { role: "servant-runtime", repoName: servant.repoName, host: deploy.host ?? servant.host, path: deployPath, requestedRef: servant.requestedRef ?? servant.branch },
+      sideEffectsIfExecuted: "would clone/fetch/update codex-chat deploy checkout to the configured ref and print resolved SHA",
+    })] : []),
+    action({
+      id: "build-codex-chat",
+      title: "Install dependencies and build codex-chat.",
+      phase: "git",
+      executor: deployIdentity ? "ssh" : "local",
+      requiredGate: "apply",
+      hostIdentity: deployIdentity,
+      command: `cd ${shellPathArg(deployPath)} && pnpm install --frozen-lockfile && pnpm run build`,
+      sideEffectsIfExecuted: "would install dependencies and build codex-chat",
+    }),
+    action({
+      id: "clone-update-assistant-agent-logic",
+      title: "Clone/update assistant-agent-logic separately.",
+      phase: "git",
+      executor: logicIdentity ? "ssh" : "local",
+      requiredGate: "apply",
+      hostIdentity: logicIdentity,
+      command: renderGitCloneOrUpdateShell({ path: logic.path, remoteUrl: logic.remoteUrl, branch: logic.requestedRef ?? logic.branch, role: "assistant-logic" }),
+      repoUpdate: { role: "assistant-logic", repoName: logic.repoName, host: logic.host, path: logic.path, requestedRef: logic.requestedRef ?? logic.branch },
+      sideEffectsIfExecuted: "would clone/fetch/update assistant-agent-logic to the configured ref and print resolved SHA; never vendored into Brain or codex-chat",
+    }),
+    action({
+      id: "install-assistant-agent-logic-deps",
+      title: "Install assistant-agent-logic Node dependencies and verify Composio workflow modules.",
+      phase: "git",
+      executor: logicIdentity ? "ssh" : "local",
+      requiredGate: "apply",
+      hostIdentity: logicIdentity,
+      command: renderNodeDependencyInstallShell({ path: logic.path, role: "assistant-logic", verifyComposioWorkflows: true }),
+      sideEffectsIfExecuted: "would install assistant-agent-logic dependencies using the checkout lockfile/package manager and verify Composio workflow modules load",
+    }),
+    action({
+      id: "validate-assistant-agent-logic",
+      title: "Validate assistant-agent-logic checkout metadata.",
+      phase: "git",
+      executor: logicIdentity ? "ssh" : "local",
+      requiredGate: "apply",
+      hostIdentity: logicIdentity,
+      command: `test -d ${shellPathArg(`${logic.path}/.git`)} && git -C ${shellPathArg(logic.path)} status --short --branch`,
+      metadataOnly: true,
+      sideEffectsIfExecuted: "git metadata validation only",
+    }),
+    action({
+      id: "assistant-agent-data-prompt",
+      title: "Prompt/validate assistant-agent-data before private data use.",
+      phase: "assistant-data",
+      executor: "operator-prompt",
+      requiredGate: "data",
+      command: `printf '%s\\n' ${shellArg("Choose pull existing private repo, initialize new private repo, or validate current assistant-agent-data workspace; migration remains explicit/manual.")}`,
+      sideEffectsIfExecuted: "operator-approved private data decision only",
+    }),
+    action({
+      id: "assistant-agent-data-clone-or-init-placeholder",
+      title: "Clone/init assistant-agent-data placeholder.",
+      phase: "assistant-data",
+      executor: dataIdentity ? "ssh" : "local",
+      requiredGate: "data",
+      hostIdentity: dataIdentity,
+      command: data.remoteUrl
+        ? renderGitCloneOrUpdateShell({ path: data.path, remoteUrl: data.remoteUrl, branch: data.requestedRef ?? data.branch, role: "assistant-data" })
+        : `mkdir -p ${shellPathArg(data.path)} && test -d ${shellPathArg(`${data.path}/.git`)} || git -C ${shellPathArg(data.path)} init -b ${shellArg(data.branch ?? "main")}`,
+      sideEffectsIfExecuted: "would clone or initialize assistant-agent-data only after data approval; migration placeholder only",
+    }),
+    ...(configPath ? [action({
+      id: "render-codex-chat-config-env",
+      title: "Render codex-chat config and env template without secret values.",
+      phase: "config",
+      executor: deployIdentity ? "ssh" : "local",
+      requiredGate: "config",
+      hostIdentity: deployIdentity,
+      command: renderConfigEnvWriteShell({ configPath, configPreview, envFile, envPreview }),
+      sideEffectsIfExecuted: "would write codex-chat config and env template placeholders only; no secret values",
+    })] : []),
+    action({
+      id: "migrate-telegram-pairing-state",
+      title: "Migrate legacy Brain Telegram pairing/admin state into codex-chat state.",
+      phase: "state",
+      executor: deployIdentity ? "ssh" : "local",
+      requiredGate: "service",
+      hostIdentity: deployIdentity,
+      command: renderTelegramPairingMigrationShell({ workspaceRoot }),
+      sideEffectsIfExecuted: "would copy existing Telegram paired/admin identities into codex-chat state, back up previous state, remove stale bootstrap pairing codes, and print metadata only",
+    }),
+    action({
+      id: "install-codex-chat-systemd",
+      title: "Install/enable/restart codex-chat systemd service.",
+      phase: "systemd",
+      executor: deployIdentity ? "ssh" : "local",
+      requiredGate: "service",
+      hostIdentity: deployIdentity,
+      command: renderSystemdInstallShell({ serviceName, unit: systemdPreview, envFile, expectedTelegramBot: deploy.expectedTelegramBot }),
+      sideEffectsIfExecuted: deploy.expectedTelegramBot
+        ? "would verify Telegram bot identity from remote env file, stop/disable legacy brain-personal.service, then install service unit, reload systemd, enable and restart codex-chat"
+        : "would stop/disable legacy brain-personal.service, then install service unit, reload systemd, enable and restart codex-chat",
+    }),
+    ...((deploy.healthChecks.length > 0 ? deploy.healthChecks : [{ kind: "systemd", command: `systemctl status ${shellArg(serviceName)} --no-pager` }]).map((check, index) => action({
+      id: `health-check-${index + 1}`,
+      title: `Run health check: ${check.kind}`,
+      phase: "health",
+      executor: deployIdentity ? "ssh" : "local",
+      requiredGate: "health",
+      hostIdentity: deployIdentity,
+      command: check.command,
+      metadataOnly: true,
+      sideEffectsIfExecuted: "read-only health verification",
+    }))),
+    action({
+      id: "record-deployment-metadata",
+      title: "Record deployment metadata in canonical Brain workspace/control-plane state.",
+      phase: "metadata",
+      executor: "metadata-file",
+      requiredGate: "apply",
+      writesMetadata: true,
+      command: `merge deployment record into ${status.deploymentMetadata.canonical.path}`,
+      sideEffectsIfExecuted: "writes deployment metadata with redacted secret refs only",
+    }),
+  ];
+}
+
+function renderGitCloneOrUpdateShell(input: { path: string; remoteUrl?: string; branch?: string; role?: StackRepoResolution["role"] }): string {
+  const requestedRef = input.branch ?? "main";
+  const repoPath = shellPathArg(input.path);
+  const refArg = shellArg(requestedRef);
+  const role = input.role ?? "servant-runtime";
+  const marker = `BRAIN_REPO_SHA role=${role} path=${input.path} requestedRef=${requestedRef} resolvedSha=`;
+  if (!input.remoteUrl) {
+    return [
+      "set -euo pipefail",
+      `test -d ${repoPath}/.git`,
+      `git -C ${repoPath} fetch --all --tags --prune`,
+      `if git -C ${repoPath} rev-parse --verify --quiet ${shellArg(`origin/${requestedRef}^{commit}`)} >/dev/null; then git -C ${repoPath} checkout -B ${refArg} ${shellArg(`origin/${requestedRef}`)}; else git -C ${repoPath} checkout --detach ${refArg}; fi`,
+      `sha=$(git -C ${repoPath} rev-parse HEAD)`,
+      `printf '%s%s\\n' ${shellArg(marker)} "$sha"`,
+    ].join("\n");
+  }
+  return [
+    "set -euo pipefail",
+    `if [ -d ${repoPath}/.git ]; then`,
+    `  git -C ${repoPath} remote set-url origin ${shellArg(input.remoteUrl)}`,
+    "else",
+    `  mkdir -p ${shellPathArg(path.posix.dirname(input.path))}`,
+    `  git clone ${shellArg(input.remoteUrl)} ${repoPath}`,
+    "fi",
+    `git -C ${repoPath} fetch origin --tags --prune`,
+    `if git -C ${repoPath} rev-parse --verify --quiet ${shellArg(`origin/${requestedRef}^{commit}`)} >/dev/null; then`,
+    `  git -C ${repoPath} checkout -B ${refArg} ${shellArg(`origin/${requestedRef}`)}`,
+    "else",
+    `  git -C ${repoPath} checkout --detach ${refArg}`,
+    "fi",
+    `sha=$(git -C ${repoPath} rev-parse HEAD)`,
+    `printf '%s%s\\n' ${shellArg(marker)} "$sha"`,
+  ].join("\n");
+}
+
+function renderNodeDependencyInstallShell(input: { path: string; role: string; verifyComposioWorkflows?: boolean }): string {
+  const repoPath = shellPathArg(input.path);
+  const role = shellArg(input.role);
+  const marker = `BRAIN_NODE_DEPS role=${input.role} path=${input.path}`;
+  const commands = [
+    "set -euo pipefail",
+    `cd ${repoPath}`,
+    "installed=false",
+    "package_manager=none",
+    "if [ ! -f package.json ]; then",
+    `  printf '%s\\n' ${shellArg(`${marker} packageJson=missing installed=false skipped=true`)}`,
+    "else",
+    "  if [ -f pnpm-lock.yaml ]; then",
+    "    pnpm install --frozen-lockfile",
+    "    package_manager=pnpm",
+    "  elif [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then",
+    "    npm ci",
+    "    package_manager=npm",
+    "  elif [ -f yarn.lock ]; then",
+    "    yarn install --frozen-lockfile",
+    "    package_manager=yarn",
+    "  else",
+    "    npm install",
+    "    package_manager=npm-install",
+    "  fi",
+    "  installed=true",
+    "fi",
+  ];
+  if (input.verifyComposioWorkflows) {
+    commands.push(
+      "if [ \"$installed\" = true ] && { [ -f scripts/lib/config.js ] || [ -f scripts/lib/google-auth.js ] || [ -f scripts/gmail-recent.js ] || [ -f scripts/calendar-events.js ] || [ -f scripts/composio-connect.js ]; }; then",
+      "  test -f scripts/lib/config.js",
+      "  test -f scripts/lib/google-auth.js",
+      "  test -f scripts/gmail-recent.js",
+      "  test -f scripts/calendar-events.js",
+      "  test -f scripts/composio-connect.js",
+      "  node -e \"require('yaml'); require('./scripts/lib/config'); require('./scripts/lib/google-auth');\"",
+      `  printf '%s\\n' ${shellArg(`BRAIN_COMPOSIO_WORKFLOW_DEPS role=${input.role} ok=true secretsRead=false providerCalls=false`)}`,
+      "fi",
+    );
+  }
+  commands.push(`printf 'BRAIN_NODE_DEPS role=%s path=%s packageManager=%s installed=%s\\n' ${role} ${shellArg(input.path)} "$package_manager" "$installed"`);
+  return commands.join("\n");
+}
+
+function renderConfigEnvWriteShell(input: { configPath: string; configPreview: string; envFile?: string; envPreview: string }): string {
+  const configDir = path.posix.dirname(input.configPath);
+  const commands = [
+    "set -e",
+    `mkdir -p ${shellPathArg(configDir)}`,
+    `umask 077`,
+    `cat > ${shellPathArg(input.configPath)} <<'BRAIN_CODEX_CHAT_CONFIG'\n${input.configPreview}\nBRAIN_CODEX_CHAT_CONFIG`,
+  ];
+  if (input.envFile) {
+    commands.splice(1, 0, `mkdir -p ${shellPathArg(path.posix.dirname(input.envFile))}`);
+    commands.push(`if [ ! -f ${shellPathArg(input.envFile)} ]; then\n  umask 077\n  cat > ${shellPathArg(input.envFile)} <<'BRAIN_CODEX_CHAT_ENV'\n${input.envPreview}\nBRAIN_CODEX_CHAT_ENV\nfi`);
+  }
+  return commands.join("\n");
+}
+
+function renderTelegramBotIdentityGuardShell(input: { envFile: string; expected: TelegramBotIdentity }): string {
+  return [
+    "set -euo pipefail",
+    `BRAIN_CODEX_CHAT_ENV=${shellArg(input.envFile)} BRAIN_EXPECTED_BOT_ID=${shellArg(input.expected.id ?? "")} BRAIN_EXPECTED_BOT_USERNAME=${shellArg(input.expected.username ?? "")} node <<'BRAIN_TELEGRAM_BOT_GUARD'`,
+    "const fs = require('fs');",
+    "const envFile = process.env.BRAIN_CODEX_CHAT_ENV;",
+    "const expectedId = process.env.BRAIN_EXPECTED_BOT_ID || undefined;",
+    "const expectedUsername = (process.env.BRAIN_EXPECTED_BOT_USERNAME || '').replace(/^@/, '') || undefined;",
+    "const fail = (message) => { console.error(message); process.exit(1); };",
+    "const text = fs.readFileSync(envFile, 'utf8');",
+    "let token;",
+    "for (const rawLine of text.split(/\\r?\\n/)) {",
+    "  const line = rawLine.trim();",
+    "  if (!line || line.startsWith('#')) continue;",
+    "  const match = /^TELEGRAM_BOT_TOKEN\\s*=\\s*(.*)$/.exec(line);",
+    "  if (!match) continue;",
+    "  let value = match[1].trim();",
+    "  if ((value.startsWith(\"'\") && value.endsWith(\"'\")) || (value.startsWith('\"') && value.endsWith('\"'))) value = value.slice(1, -1);",
+    "  token = value;",
+    "}",
+    "if (!token || token.includes('<redacted')) fail('codex-chat env file is missing a real TELEGRAM_BOT_TOKEN');",
+    "if (typeof fetch !== 'function') fail('node fetch API is unavailable; cannot verify Telegram bot identity');",
+    "(async () => {",
+    "  const response = await fetch(`https://api.telegram.org/bot${token}/getMe`);",
+    "  const body = await response.json().catch(() => ({}));",
+    "  if (!response.ok || body.ok !== true) fail('Telegram getMe failed for codex-chat env token');",
+    "  const bot = body.result || {};",
+    "  const actualId = String(bot.id || '');",
+    "  const actualUsername = String(bot.username || '');",
+    "  if (expectedId && actualId !== expectedId) fail('Telegram bot id mismatch (raw ids redacted)');",
+    "  if (expectedUsername && actualUsername !== expectedUsername) fail(`Telegram bot username mismatch: expected ${expectedUsername}, got ${actualUsername || 'unknown'}`);",
+    "  console.error(`Verified Telegram bot identity: @${actualUsername} (id verified, raw id redacted)`);",
+    "})().catch((error) => fail(error && error.message ? error.message : String(error)));",
+    "BRAIN_TELEGRAM_BOT_GUARD",
+  ].join("\n");
+}
+
+function renderTelegramPairingMigrationShell(input: { workspaceRoot: string }): string {
+  const legacyStateDir = path.posix.join(input.workspaceRoot, "state", "telegram-pairing");
+  const codexStateDir = path.posix.join(input.workspaceRoot, "state", "codex-chat");
+  return [
+    "set -euo pipefail",
+    `BRAIN_LEGACY_TELEGRAM_PAIRING_STATE=${shellArg(legacyStateDir)} BRAIN_CODEX_CHAT_STATE=${shellArg(codexStateDir)} node <<'BRAIN_TELEGRAM_PAIRING_MIGRATION'`,
+    "const fs = require('fs');",
+    "const path = require('path');",
+    "const legacyDir = process.env.BRAIN_LEGACY_TELEGRAM_PAIRING_STATE;",
+    "const codexDir = process.env.BRAIN_CODEX_CHAT_STATE;",
+    "const now = new Date().toISOString();",
+    "const readJson = (file, fallback) => {",
+    "  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }",
+    "  catch { return fallback; }",
+    "};",
+    "const asId = (value) => {",
+    "  if (typeof value === 'number' && Number.isFinite(value)) return value;",
+    "  if (typeof value === 'string' && /^-?\\d+$/.test(value.trim())) return Number(value);",
+    "  return undefined;",
+    "};",
+    "const backup = () => {",
+    "  if (!fs.existsSync(codexDir)) return undefined;",
+    "  const backupDir = path.join(codexDir, 'migration-backups', `telegram-pairing-${now.replace(/[:.]/g, '-')}`);",
+    "  fs.mkdirSync(backupDir, { recursive: true, mode: 0o700 });",
+    "  for (const rel of ['telegram_users.json', 'telegram_chats.json', path.join('data', 'pairing_code.txt')]) {",
+    "    const src = path.join(codexDir, rel);",
+    "    if (!fs.existsSync(src)) continue;",
+    "    const dst = path.join(backupDir, rel.replace(/[\\\\/]/g, '__'));",
+    "    fs.copyFileSync(src, dst);",
+    "    fs.chmodSync(dst, 0o600);",
+    "  }",
+    "  return backupDir;",
+    "};",
+    "const mergeUsers = (target, records, source) => {",
+    "  let added = 0;",
+    "  for (const record of Array.isArray(records) ? records : []) {",
+    "    if (!record || typeof record !== 'object') continue;",
+    "    const userId = asId(record.userId);",
+    "    if (userId === undefined) continue;",
+    "    const key = String(userId);",
+    "    const existing = target.get(key);",
+    "    const next = { userId, isAdmin: record.isAdmin !== false, pairedAt: typeof record.pairedAt === 'string' ? record.pairedAt : now, source };",
+    "    if (existing) existing.isAdmin = existing.isAdmin || next.isAdmin;",
+    "    else { target.set(key, next); added += 1; }",
+    "  }",
+    "  return added;",
+    "};",
+    "const mergeChats = (target, records, source) => {",
+    "  let added = 0;",
+    "  for (const record of Array.isArray(records) ? records : []) {",
+    "    if (!record || typeof record !== 'object') continue;",
+    "    const chatId = asId(record.chatId);",
+    "    if (chatId === undefined) continue;",
+    "    const key = String(chatId);",
+    "    if (!target.has(key)) {",
+    "      target.set(key, { chatId, pairedAt: typeof record.pairedAt === 'string' ? record.pairedAt : now, source });",
+    "      added += 1;",
+    "    }",
+    "  }",
+    "  return added;",
+    "};",
+    "fs.mkdirSync(codexDir, { recursive: true, mode: 0o700 });",
+    "fs.mkdirSync(path.join(codexDir, 'data'), { recursive: true, mode: 0o700 });",
+    "const backupDir = backup();",
+    "const users = new Map();",
+    "const chats = new Map();",
+    "mergeUsers(users, readJson(path.join(codexDir, 'telegram_users.json'), []), 'codex-chat-existing');",
+    "mergeChats(chats, readJson(path.join(codexDir, 'telegram_chats.json'), []), 'codex-chat-existing');",
+    "const legacyUsers = readJson(path.join(legacyDir, 'telegram_users.json'), []);",
+    "const legacyChats = readJson(path.join(legacyDir, 'telegram_chats.json'), []);",
+    "const legacyAdmins = readJson(path.join(legacyDir, 'telegram_admins.json'), {});",
+    "const adminPairs = Array.isArray(legacyAdmins.admins) ? legacyAdmins.admins : [];",
+    "const addedUsers = mergeUsers(users, legacyUsers, 'brain-legacy-pairing') + mergeUsers(users, adminPairs, 'brain-legacy-admins');",
+    "const addedChats = mergeChats(chats, legacyChats, 'brain-legacy-pairing') + mergeChats(chats, adminPairs, 'brain-legacy-admins');",
+    "const writeJson = (rel, value) => {",
+    "  const file = path.join(codexDir, rel);",
+    "  const tmp = `${file}.tmp`;",
+    "  fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\\n`, { mode: 0o600 });",
+    "  fs.renameSync(tmp, file);",
+    "  fs.chmodSync(file, 0o600);",
+    "};",
+    "writeJson('telegram_users.json', Array.from(users.values()));",
+    "writeJson('telegram_chats.json', Array.from(chats.values()));",
+    "const pairingCode = path.join(codexDir, 'data', 'pairing_code.txt');",
+    "let pairingCodeRemoved = false;",
+    "if ((users.size > 0 || chats.size > 0) && fs.existsSync(pairingCode)) {",
+    "  fs.rmSync(pairingCode, { force: true });",
+    "  pairingCodeRemoved = true;",
+    "}",
+    "console.error(`BRAIN_PAIRING_MIGRATION legacyUsers=${Array.isArray(legacyUsers) ? legacyUsers.length : 0} legacyChats=${Array.isArray(legacyChats) ? legacyChats.length : 0} legacyAdminPairs=${adminPairs.length} addedUsers=${addedUsers} addedChats=${addedChats} finalUsers=${users.size} finalChats=${chats.size} pairingCodeRemoved=${pairingCodeRemoved} backup=${backupDir ? 'created' : 'not-needed'} rawIdentifiersPrinted=false`);",
+    "BRAIN_TELEGRAM_PAIRING_MIGRATION",
+  ].join("\n");
+}
+
+function renderSystemdInstallShell(input: { serviceName: string; unit: string; envFile?: string; expectedTelegramBot?: TelegramBotIdentity }): string {
+  return [
+    ...(input.envFile && input.expectedTelegramBot ? [renderTelegramBotIdentityGuardShell({ envFile: input.envFile, expected: input.expectedTelegramBot })] : []),
+    "sudo systemctl disable --now brain-personal.service >/dev/null 2>&1 || true",
+    "sudo systemctl reset-failed brain-personal.service >/dev/null 2>&1 || true",
+    `cat <<'BRAIN_CODEX_CHAT_SERVICE' | sudo tee ${shellPathArg(`/etc/systemd/system/${input.serviceName}`)} >/dev/null`,
+    input.unit.trimEnd(),
+    "BRAIN_CODEX_CHAT_SERVICE",
+    `sudo systemctl daemon-reload && sudo systemctl enable ${shellArg(input.serviceName)} && sudo systemctl restart ${shellArg(input.serviceName)}`,
+  ].join("\n");
+}
+
+function renderStackNoNetworkPlan(status: StackStatusDetails) {
+  const servant = status.servantRuntime;
+  const logic = status.assistantLogic;
+  const data = status.assistantData;
+  const deploy = servant.deploy;
+  const sourceIdentity = sshIdentityFromHost(servant.host, undefined);
+  const deployIdentity = deploy.sshIdentity;
+  const serviceName = deploy.serviceName ?? "codex-chat.service";
+  return {
+    goal: "Deploy/manage the codex-chat servant runtime stack from Brain as a control-plane orchestrator while keeping repositories separate.",
+    mode: "dry-run/no-network",
+    steps: [
+      {
+        id: "resolve-repo-registry",
+        title: "Resolve registry and setup context.",
+        status: status.missing.length === 0 ? "ready" : "needs-attention",
+        inputs: [status.registry.path, status.setupContext.path],
+        sideEffects: "none",
+        commandsExecuted: [],
+      },
+      {
+        id: "repo-boundary-preflight",
+        title: "Assert repo boundaries before any setup/deploy work.",
+        status: status.repoBoundaries.ok ? "ready" : "blocked",
+        policy: status.repoBoundaries.policy,
+        issues: status.repoBoundaries.issues,
+        sideEffects: "none",
+      },
+      {
+        id: "clone-update-codex-chat",
+        title: "Clone or fetch/update codex-chat servant runtime checkout, then verify the resolved SHA.",
+        target: { host: servant.host, path: servant.path, deployHost: deploy.host, deployPath: deploy.path, branch: servant.branch, requestedRef: servant.requestedRef, remoteUrl: servant.remoteUrl },
+        commands: [
+          renderGitCloneOrUpdateCommand({ hostIdentity: sourceIdentity, path: servant.path, remoteUrl: servant.remoteUrl, branch: servant.requestedRef ?? servant.branch, role: "servant-runtime" }),
+          deploy.path && deploy.path !== servant.path
+            ? renderGitCloneOrUpdateCommand({ hostIdentity: deployIdentity, path: deploy.path, remoteUrl: servant.remoteUrl, branch: servant.requestedRef ?? servant.branch, role: "servant-runtime" })
+            : undefined,
+        ].filter(isString),
+        sideEffectsIfExecuted: "would clone/fetch/update codex-chat to the configured latest ref and print resolved SHA; not executed by this command",
+      },
+      {
+        id: "clone-update-assistant-agent-logic",
+        title: "Clone or fetch/update assistant-agent-logic as a separate repository, then verify the resolved SHA.",
+        target: { host: logic.host, path: logic.path, branch: logic.branch, requestedRef: logic.requestedRef, remoteUrl: logic.remoteUrl },
+        commands: [
+          renderGitCloneOrUpdateCommand({ hostIdentity: sshIdentityFromHost(logic.host, undefined), path: logic.path, remoteUrl: logic.remoteUrl, branch: logic.requestedRef ?? logic.branch, role: "assistant-logic" }),
+        ],
+        boundary: "Do not vendor, copy, subtree, or merge assistant-agent-logic into Brain or codex-chat.",
+        sideEffectsIfExecuted: "would clone/fetch/update assistant-agent-logic to the configured latest ref and print resolved SHA; not executed by this command",
+      },
+      {
+        id: "install-assistant-agent-logic-deps",
+        title: "Install assistant-agent-logic dependencies and verify Composio workflow modules.",
+        target: { host: logic.host, path: logic.path },
+        commands: [
+          renderNodeDependencyInstallCommand({ hostIdentity: sshIdentityFromHost(logic.host, undefined), path: logic.path, role: "assistant-logic", verifyComposioWorkflows: true }),
+        ],
+        packageManagerPolicy: "Use pnpm install --frozen-lockfile for pnpm-lock.yaml, npm ci for package-lock.json/npm-shrinkwrap.json, yarn install --frozen-lockfile for yarn.lock, and npm install only when no lockfile exists.",
+        composioVerification: "Verifies yaml plus assistant-agent-logic Composio entrypoints (gmail-recent.js, calendar-events.js, composio-connect.js) load after install; it does not read Composio secrets or call provider APIs.",
+        sideEffectsIfExecuted: "would create/update node_modules in the separate assistant-agent-logic checkout only; not executed by this command",
+      },
+      {
+        id: "assistant-data-workspace",
+        title: "Prompt and validate assistant-agent-data/private workspace.",
+        target: { host: data.host, path: data.path, branch: data.branch, remoteUrl: data.remoteUrl },
+        prompts: [
+          "Confirm the assistant-agent-data repository/workspace path and remote before relying on private memory.",
+          "Choose pull existing private repo, initialize new private repo, or validate current workspace metadata.",
+          "If legacy private data exists elsewhere, create an explicit migration plan; this phase does not auto-migrate or print private filenames/values.",
+        ],
+        validationPlaceholders: [
+          "Check .git presence, branch, and remote metadata only.",
+          "Check expected workspace directories/stores by metadata only.",
+          "Check secret/env files by existence/mode/size only; never cat or echo values.",
+        ],
+        migrationPlaceholder: data.migrationPlaceholder,
+        sideEffectsIfExecuted: "operator-approved private data pull/init/validation only; not executed by this command",
+      },
+      {
+        id: "render-codex-chat-config-env",
+        title: "Render codex-chat service config/env from registry and setup context.",
+        target: { envFile: deploy.envFile, configPath: deploy.configPath ?? status.servicePaths.setupContextConfigPath },
+        envVars: deploy.envVars.map((name) => ({ name, value: "redacted", metadataOnly: true })),
+        expectedTelegramBot: deploy.expectedTelegramBot,
+        secretMetadataChecks: status.secretMetadataChecks,
+        renderedConfigPreview: renderCodexChatConfigPreview(status),
+        renderedEnvPreview: renderCodexChatEnvPreview(status),
+        templates: [
+          "codex-chat service env template with secret placeholders only",
+          "codex-chat runtime config template/path binding when configured",
+        ],
+        sideEffectsIfExecuted: "would write private env/config files only after explicit operator confirmation; not executed by this command",
+      },
+      {
+        id: "migrate-telegram-pairing-state",
+        title: "Preserve Telegram paired/admin identities when moving from brain-personal to codex-chat.",
+        target: {
+          host: deploy.host,
+          sshIdentity: deployIdentity,
+          legacyStateDir: path.posix.join(codexChatWorkspaceRoot(status), "state", "telegram-pairing"),
+          codexChatStateDir: path.posix.join(codexChatWorkspaceRoot(status), "state", "codex-chat"),
+        },
+        commands: [
+          remotePlanCommand(deployIdentity, "merge state/telegram-pairing users/chats/admins into state/codex-chat and remove stale pairing_code.txt when identities exist"),
+        ],
+        sideEffectsIfExecuted: "would preserve existing Telegram access metadata without printing raw user/chat IDs; not executed by this command",
+      },
+      {
+        id: "install-start-codex-chat-service",
+        title: "Install, enable, and restart the codex-chat servant service.",
+        target: { host: deploy.host, sshIdentity: deployIdentity, path: deploy.path, serviceName, runtimeUser: deploy.runtimeUser },
+        commands: [
+          remotePlanCommand(deployIdentity, `cd ${shellPathArg(deploy.path ?? servant.path)} && pnpm install --frozen-lockfile && pnpm run build`),
+          remotePlanCommand(deployIdentity, `sudo systemctl disable --now brain-personal.service >/dev/null 2>&1 || true`),
+          remotePlanCommand(deployIdentity, `sudo systemctl daemon-reload && sudo systemctl enable ${shellArg(serviceName)} && sudo systemctl restart ${shellArg(serviceName)}`),
+          remotePlanCommand(deployIdentity, `systemctl is-active ${shellArg(serviceName)} --quiet`),
+        ],
+        sideEffectsIfExecuted: "would install dependencies/build, stop legacy Brain polling if present, and restart systemd service; not executed by this command",
+      },
+      {
+        id: "record-deployment-metadata",
+        title: "Record/list deployment metadata on the Brain/control-plane host.",
+        target: status.deploymentMetadata.canonical,
+        schema: status.deploymentMetadata.canonical.schema,
+        deployments: status.deploymentMetadata.deployments,
+        plannedReadCommand: status.deploymentMetadata.read.plannedReadCommand,
+        sideEffectsIfExecuted: "would merge a redacted deployment record into the canonical remote metadata store only after explicit apply approval",
+      },
+      {
+        id: "health-check-codex-chat",
+        title: "Run codex-chat servant runtime health checks.",
+        target: { host: deploy.host, sshIdentity: deployIdentity, serviceName },
+        commands: deploy.healthChecks.length > 0
+          ? deploy.healthChecks.map((check) => remotePlanCommand(deployIdentity, check.command))
+          : [remotePlanCommand(deployIdentity, `systemctl status ${shellArg(serviceName)} --no-pager`)],
+        sideEffectsIfExecuted: "health/readiness checks only; not executed by this command",
+      },
+    ],
+    execution: {
+      dryRunDefault: true,
+      approvalRequired: true,
+      executors: ["dry-run", "mock", "local", "ssh"],
+      approvalGates: stackApprovalGateDetails({ apply: false, data: false, config: false, service: false, health: false }),
+      metadataStore: status.deploymentMetadata.canonical,
+      actions: renderStackExecutorActions(status, { apply: false, data: false, config: false, service: false, health: false }),
+    },
+    forbidden: [
+      "Do not deploy or mutate remote servers from stack status/plan.",
+      "Do not vendor or merge codex-chat, assistant-agent-logic, or assistant-agent-data into Brain.",
+      "Do not silently reuse stale local checkouts; stack apply must fetch/update configured refs and record resolved SHAs for codex-chat and assistant-agent-logic.",
+      "Do not print secret values; inspect env/secret files by metadata only.",
+    ],
+  };
+}
+
+async function executeStackAction(action: StackExecutorAction, input: { executor: StackExecutorKind; metadataFile?: string }): Promise<Record<string, unknown>> {
+  if (!action.approved) {
+    return {
+      id: action.id,
+      phase: action.phase,
+      status: "skipped",
+      reason: `approval gate not enabled: ${action.requiredGate}`,
+      command: action.displayCommand,
+      secretValuesPrinted: false,
+    };
+  }
+  if (action.writesMetadata) {
+    return {
+      id: action.id,
+      phase: action.phase,
+      status: "handled-by-metadata-writer",
+      command: action.command,
+      secretValuesPrinted: false,
+    };
+  }
+  if (input.executor === "mock") {
+    return {
+      id: action.id,
+      phase: action.phase,
+      status: "mocked",
+      executor: "mock",
+      command: action.displayCommand,
+      repoUpdate: action.repoUpdate ? { ...action.repoUpdate, verified: false, note: "mock executor did not resolve a SHA" } : undefined,
+      sideEffects: "none (mocked)",
+      secretValuesPrinted: false,
+    };
+  }
+  if (!action.command) {
+    return {
+      id: action.id,
+      phase: action.phase,
+      status: "succeeded",
+      executor: input.executor,
+      sideEffects: action.sideEffectsIfExecuted,
+      secretValuesPrinted: false,
+    };
+  }
+  if (action.executor === "ssh" && input.executor !== "ssh") {
+    return {
+      id: action.id,
+      phase: action.phase,
+      status: "failed",
+      reason: "remote action requires --executor ssh",
+      command: action.displayCommand,
+      secretValuesPrinted: false,
+    };
+  }
+  const result = action.executor === "ssh" && action.hostIdentity
+    ? spawnSync("ssh", [action.hostIdentity, action.command], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 })
+    : spawnSync("bash", ["-lc", action.command], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
+  const stdout = String(result.stdout ?? "");
+  const repoUpdate = action.repoUpdate ? repoUpdateFromActionStdout(action.repoUpdate, stdout) : undefined;
+  return {
+    id: action.id,
+    phase: action.phase,
+    status: (result.status ?? 1) === 0 ? "succeeded" : "failed",
+    exitCode: result.status,
+    command: action.displayCommand,
+    stdout: redactSecrets(stdout),
+    stderr: redactSecrets(String(result.stderr ?? "")),
+    repoUpdate,
+    secretValuesPrinted: false,
+  };
+}
+
+function repoUpdateFromActionStdout(input: NonNullable<StackExecutorAction["repoUpdate"]>, stdout: string): DeploymentRepoRef {
+  const line = stdout.split(/\r?\n/).find((candidate) => candidate.startsWith("BRAIN_REPO_SHA "));
+  const fields: Record<string, string> = {};
+  for (const part of (line ?? "").replace(/^BRAIN_REPO_SHA\s+/, "").split(/\s+/)) {
+    const index = part.indexOf("=");
+    if (index <= 0) continue;
+    fields[part.slice(0, index)] = part.slice(index + 1);
+  }
+  const resolvedSha = fields.resolvedSha;
+  return {
+    ...input,
+    resolvedSha: resolvedSha && /^[0-9a-f]{40}$/i.test(resolvedSha) ? resolvedSha : undefined,
+    verified: Boolean(resolvedSha && /^[0-9a-f]{40}$/i.test(resolvedSha)),
+  };
+}
+
+function collectResolvedRepoRefs(actionResults: Array<Record<string, unknown>>, status: StackStatusDetails): DeploymentRepoRef[] {
+  const fallback = (repo: StackRepoResolution, pathOverride?: string, hostOverride?: string): DeploymentRepoRef => ({
+    role: repo.role,
+    repoName: repo.repoName,
+    host: hostOverride ?? repo.host,
+    path: pathOverride ?? repo.path,
+    requestedRef: repo.requestedRef ?? repo.branch,
+    verified: false,
+  });
+  const refs: DeploymentRepoRef[] = actionResults
+    .map((result) => asRecord(result.repoUpdate))
+    .filter((repo): repo is Record<string, unknown> => Boolean(repo))
+    .map((repo) => ({
+      role: asString(repo.role) as StackRepoResolution["role"],
+      repoName: asString(repo.repoName) ?? "missing",
+      host: asString(repo.host) ?? "missing",
+      path: asString(repo.path) ?? "missing",
+      requestedRef: asString(repo.requestedRef),
+      resolvedSha: asString(repo.resolvedSha),
+      verified: repo.verified === true,
+    }));
+  const ensure = (candidate: DeploymentRepoRef) => refs.some((ref) => ref.role === candidate.role && ref.path === candidate.path)
+    ? refs
+    : refs.push(candidate);
+  ensure(fallback(status.servantRuntime));
+  const deployPath = status.servantRuntime.deploy.path;
+  if (deployPath && deployPath !== status.servantRuntime.path) ensure(fallback(status.servantRuntime, deployPath, status.servantRuntime.deploy.host));
+  ensure(fallback(status.assistantLogic));
+  return refs.sort((a, b) => `${a.role}:${a.path}`.localeCompare(`${b.role}:${b.path}`));
+}
+
+function stackDeploymentRecord(status: StackStatusDetails, input: {
+  approvals: Record<StackApprovalGate, boolean>;
+  requestedExecutor: StackExecutorKind;
+  effectiveExecutor: StackExecutorKind;
+  dryRun: boolean;
+  actionCount: number;
+  approvedActionCount: number;
+  executedActionCount: number;
+  failedActionCount: number;
+  now?: string;
+  healthApproved: boolean;
+  repositories: DeploymentRepoRef[];
+}): DeploymentMetadataRecord {
+  const updatedAt = input.now ?? new Date().toISOString();
+  const stackStatus: DeploymentMetadataRecord["status"] = input.failedActionCount > 0
+    ? "failed"
+    : input.dryRun
+      ? "planned"
+      : input.approvals.health
+        ? "healthy"
+        : input.approvals.service
+          ? "applied"
+          : "partially_applied";
+  return {
+    id: deploymentRecordId(status),
+    stack: "codex-chat",
+    workspace: status.workspaceId,
+    environment: status.servantRuntime.appEnvironment,
+    status: stackStatus,
+    updatedAt,
+    source: "brainctl stack apply",
+    controlPlane: {
+      host: status.setupContext.context?.target === "remote"
+        ? sshIdentityFromSetupContext(status.setupContext.context) ?? status.setupContext.context.sshHost ?? status.controlPlane.host
+        : status.controlPlane.host,
+      path: status.setupContext.context?.repoPath ?? status.controlPlane.path,
+      repoName: status.controlPlane.repoName,
+    },
+    servantRuntime: {
+      repoName: status.servantRuntime.repoName,
+      sourceHost: status.servantRuntime.host,
+      sourcePath: status.servantRuntime.path,
+      deployHost: status.servantRuntime.deploy.host,
+      deployPath: status.servantRuntime.deploy.path,
+      branch: status.servantRuntime.branch,
+      requestedRef: status.servantRuntime.requestedRef ?? status.servantRuntime.branch,
+      resolvedSha: input.repositories.find((repo) => repo.role === "servant-runtime" && repo.path === status.servantRuntime.path)?.resolvedSha,
+      deployResolvedSha: input.repositories.find((repo) => repo.role === "servant-runtime" && repo.path === status.servantRuntime.deploy.path)?.resolvedSha,
+      remoteUrl: status.servantRuntime.remoteUrl,
+      serviceName: status.servantRuntime.deploy.serviceName,
+      runtimeUser: status.servantRuntime.deploy.runtimeUser,
+    },
+    assistantLogic: {
+      host: status.assistantLogic.host,
+      path: status.assistantLogic.path,
+      repoName: status.assistantLogic.repoName,
+      branch: status.assistantLogic.branch,
+      requestedRef: status.assistantLogic.requestedRef ?? status.assistantLogic.branch,
+      resolvedSha: input.repositories.find((repo) => repo.role === "assistant-logic")?.resolvedSha,
+      remoteUrl: status.assistantLogic.remoteUrl,
+    },
+    assistantData: {
+      host: status.assistantData.host,
+      path: status.assistantData.path,
+      repoName: status.assistantData.repoName,
+      branch: status.assistantData.branch,
+      remoteUrl: status.assistantData.remoteUrl,
+      promptRequired: status.assistantData.promptRequired,
+      migrationStatus: "placeholder",
+    },
+    config: {
+      configPath: status.servantRuntime.deploy.configPath ?? status.servicePaths.setupContextConfigPath,
+      envFile: status.servantRuntime.deploy.envFile,
+      envVars: status.servantRuntime.deploy.envVars.map((name) => ({ name, value: "redacted", metadataOnly: true })),
+      renderedConfigPreview: renderCodexChatConfigPreview(status),
+      renderedEnvPreview: renderCodexChatEnvPreview(status),
+    },
+    health: {
+      status: input.failedActionCount > 0 ? "failed" : input.healthApproved && !input.dryRun ? "passed" : input.healthApproved ? "planned" : "not_run",
+      checks: status.servantRuntime.deploy.healthChecks,
+    },
+    approvals: input.approvals,
+    executor: {
+      requested: input.requestedExecutor,
+      effective: input.effectiveExecutor,
+      dryRun: input.dryRun,
+      networkAccess: !input.dryRun && input.effectiveExecutor === "ssh",
+    },
+    lastPlan: {
+      actionCount: input.actionCount,
+      approvedActionCount: input.approvedActionCount,
+      executedActionCount: input.executedActionCount,
+      failedActionCount: input.failedActionCount,
+    },
+    repositories: input.repositories,
+    secretValuesStored: false,
+  };
+}
+
+function deploymentRecordId(status: StackStatusDetails): string {
+  return `${status.workspaceId}:${status.servantRuntime.appEnvironment}:codex-chat`;
+}
+
+async function writeStackDeploymentMetadata(status: StackStatusDetails, record: DeploymentMetadataRecord, input: { executor: StackExecutorKind; metadataFile?: string }): Promise<Record<string, unknown>> {
+  const canonical = status.deploymentMetadata.canonical;
+  if (input.executor === "mock" || input.executor === "local") {
+    const localPath = input.metadataFile
+      ? path.resolve(input.metadataFile)
+      : canonical.sourceOfTruth === "local-brain-workspace"
+        ? path.resolve(canonical.path)
+        : undefined;
+    if (!localPath) {
+      return {
+        ok: false,
+        path: canonical.path,
+        error: "local/mock metadata writes for a remote canonical store require --metadata-file",
+        secretValuesStored: false,
+      };
+    }
+    const store = await mergeDeploymentMetadataStore(localPath, canonical, record);
+    return {
+      ok: store.validation.ok,
+      executor: input.executor,
+      path: localPath,
+      canonicalPath: canonical.path,
+      deployments: store.store?.deployments.map((deployment) => ({ id: deployment.id, status: deployment.status, updatedAt: deployment.updatedAt })) ?? [],
+      validation: store.validation,
+      secretValuesStored: false,
+    };
+  }
+
+  if (input.executor === "ssh") {
+    const command = renderRemoteMetadataMergeShell(canonical.path, canonical, record);
+    const result = canonical.sshIdentity
+      ? spawnSync("ssh", [canonical.sshIdentity, command], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 })
+      : spawnSync("bash", ["-lc", command], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
+    return {
+      ok: (result.status ?? 1) === 0,
+      executor: input.executor,
+      path: canonical.path,
+      command: remotePlanCommand(canonical.sshIdentity, command),
+      exitCode: result.status,
+      stdout: redactSecrets(String(result.stdout ?? "")),
+      stderr: redactSecrets(String(result.stderr ?? "")),
+      secretValuesStored: false,
+    };
+  }
+
+  return { ok: false, error: "metadata writer was called in dry-run mode", secretValuesStored: false };
+}
+
+async function mergeDeploymentMetadataStore(filePath: string, canonical: StackDeploymentMetadataStatus["canonical"], record: DeploymentMetadataRecord): Promise<{ store?: DeploymentMetadataStore; validation: DeploymentMetadataValidation }> {
+  await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  let store: DeploymentMetadataStore = {
+    version: DEPLOYMENT_METADATA_VERSION,
+    kind: DEPLOYMENT_METADATA_KIND,
+    updatedAt: record.updatedAt,
+    canonical: {
+      sourceOfTruth: canonical.sourceOfTruth,
+      workspaceRoot: canonical.workspaceRoot,
+      path: canonical.path,
+      relativePath: canonical.relativePath,
+    },
+    deployments: [],
+    secretValuesStored: false,
+  };
+  const existing = await fileMetadata(filePath);
+  if (existing.present) {
+    try {
+      const parsed = JSON.parse(await readFile(filePath, "utf8")) as unknown;
+      const validation = validateDeploymentMetadataStore(parsed);
+      if (!validation.ok) return { validation };
+      store = parsed as DeploymentMetadataStore;
+    } catch (error) {
+      return { validation: { ok: false, issues: [`could not parse existing deployment metadata: ${errorMessage(error)}`] } };
+    }
+  }
+  store.updatedAt = record.updatedAt;
+  store.canonical = {
+    sourceOfTruth: canonical.sourceOfTruth,
+    workspaceRoot: canonical.workspaceRoot,
+    path: canonical.path,
+    relativePath: canonical.relativePath,
+  };
+  store.secretValuesStored = false;
+  store.deployments = [...store.deployments.filter((deployment) => deployment.id !== record.id), record]
+    .sort((a, b) => a.id.localeCompare(b.id));
+  const validation = validateDeploymentMetadataStore(store);
+  if (!validation.ok) return { store, validation };
+  await writeFile(filePath, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+  await chmod(filePath, 0o600);
+  return { store, validation };
+}
+
+function renderRemoteMetadataMergeShell(metadataPath: string, canonical: StackDeploymentMetadataStatus["canonical"], record: DeploymentMetadataRecord): string {
+  const script = [
+    "import json, pathlib",
+    `p = pathlib.Path(${JSON.stringify(metadataPath)})`,
+    "p.parent.mkdir(parents=True, exist_ok=True)",
+    `incoming = json.loads(${JSON.stringify(JSON.stringify(record))})`,
+    `canonical = json.loads(${JSON.stringify(JSON.stringify({
+      sourceOfTruth: canonical.sourceOfTruth,
+      workspaceRoot: canonical.workspaceRoot,
+      path: canonical.path,
+      relativePath: canonical.relativePath,
+    }))})`,
+    `base = {"version": ${DEPLOYMENT_METADATA_VERSION}, "kind": ${JSON.stringify(DEPLOYMENT_METADATA_KIND)}, "updatedAt": incoming["updatedAt"], "canonical": canonical, "deployments": [], "secretValuesStored": False}`,
+    "try:",
+    "    current = json.loads(p.read_text()) if p.exists() else base",
+    "except Exception:",
+    "    current = base",
+    "deployments = [d for d in current.get('deployments', []) if isinstance(d, dict) and d.get('id') != incoming['id']]",
+    "deployments.append(incoming)",
+    "deployments.sort(key=lambda d: d.get('id', ''))",
+    "current.update(base)",
+    "current['deployments'] = deployments",
+    "p.write_text(json.dumps(current, indent=2, sort_keys=False) + '\\n')",
+    "p.chmod(0o600)",
+    `print(json.dumps({"ok": True, "path": ${JSON.stringify(metadataPath)}, "deployment": incoming["id"]}))`,
+  ].join("\n");
+  return `umask 077 && python3 - <<'BRAIN_DEPLOYMENT_METADATA'\n${script}\nBRAIN_DEPLOYMENT_METADATA`;
+}
+
+function analyzeStackRepoBoundaries(repos: Array<Pick<StackRepoResolution, "role" | "host" | "path" | "present">>) {
+  const issues: string[] = [];
+  const present = repos.filter((repo) => repo.present);
+  for (let i = 0; i < present.length; i += 1) {
+    for (let j = i + 1; j < present.length; j += 1) {
+      const a = present[i]!;
+      const b = present[j]!;
+      if (!sameRegistryHost(a.host, b.host)) continue;
+      const relation = registryPathRelation(a.path, b.path);
+      if (relation === "same") {
+        issues.push(`${a.role} and ${b.role} resolve to the same checkout path on ${a.host}: ${a.path}`);
+      } else if (relation === "a-in-b") {
+        issues.push(`${a.role} path is nested inside ${b.role} on ${a.host}: ${a.path}`);
+      } else if (relation === "b-in-a") {
+        issues.push(`${b.role} path is nested inside ${a.role} on ${a.host}: ${b.path}`);
+      }
+    }
+  }
+  return {
+    ok: issues.length === 0,
+    issues,
+    policy: [
+      "Brain is the control-plane/setup orchestrator.",
+      "codex-chat is the servant runtime checkout.",
+      "assistant-agent-logic remains a separate logic repository.",
+      "assistant-agent-data/workspace remains a separate private data repository/workspace.",
+      "Registry links/metadata are references, not vendored source.",
+      "Deployment/update fetches configured refs for codex-chat and assistant-agent-logic and records requested refs plus resolved SHAs.",
+    ],
+  };
+}
+
+function registryPathRelation(aPath: string, bPath: string): "same" | "a-in-b" | "b-in-a" | "separate" {
+  const a = normalizeRegistryPath(aPath);
+  const b = normalizeRegistryPath(bPath);
+  if (!a || !b || a === "missing" || b === "missing") return "separate";
+  if (a === b) return "same";
+  const aInB = a.startsWith(`${b.endsWith("/") ? b : `${b}/`}`);
+  const bInA = b.startsWith(`${a.endsWith("/") ? a : `${a}/`}`);
+  if (aInB) return "a-in-b";
+  if (bInA) return "b-in-a";
+  return "separate";
+}
+
+function normalizeRegistryPath(value: string): string {
+  if (!value) return "";
+  const normalized = value.startsWith("~/") ? `/~/${value.slice(2)}` : value;
+  return path.posix.normalize(normalized.replaceAll("\\", "/"));
+}
+
+function sameRegistryHost(a: string, b: string): boolean {
+  return normalizeRegistryHost(a) === normalizeRegistryHost(b);
+}
+
+function normalizeRegistryHost(value: string): string {
+  return !value || value === "local" ? "local" : value;
+}
+
+function renderGitCloneOrUpdateCommand(input: { hostIdentity?: string; path: string; remoteUrl?: string; branch?: string; role?: StackRepoResolution["role"] }): string {
+  return remotePlanCommand(input.hostIdentity, renderGitCloneOrUpdateShell(input));
+}
+
+function renderNodeDependencyInstallCommand(input: { hostIdentity?: string; path: string; role: string; verifyComposioWorkflows?: boolean }): string {
+  return remotePlanCommand(input.hostIdentity, renderNodeDependencyInstallShell(input));
+}
+
+function remotePlanCommand(identity: string | undefined, command: string): string {
+  return identity ? `ssh ${shellArg(identity)} ${shellArg(command)}` : command;
+}
+
+function shellPathArg(value: string): string {
+  if (value === "~") return "\"$HOME\"";
+  if (value.startsWith("~/")) return `"$HOME/${value.slice(2).replace(/["\\`]/g, "\\$&")}"`;
+  return shellArg(value);
+}
+
+function sshIdentityFromHost(host: string | undefined, runtimeUser: string | undefined): string | undefined {
+  if (!host || host === "local" || host === "missing") return undefined;
+  if (host.includes("@")) return host;
+  return runtimeUser ? `${runtimeUser}@${host}` : host;
+}
+
+function sshIdentityFromSetupContext(context: LocalSetupContext | undefined): string | undefined {
+  if (!context?.sshHost) return undefined;
+  return remoteSshDestination(context.sshHost, context.sshUser ?? context.serviceUser);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter(isString) : [];
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function escapeShellRegex(value: string): string {
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
 }
 
 async function webValidateCommand(options: { dir: string }): Promise<CliResult> {
@@ -938,10 +3046,12 @@ async function backupCommand(action: "plan" | "init" | "check" | "status", optio
 async function composioSetupStatusCommand(options: { config: string; workspace: string; apiKeyRef?: string; connectedAccountRef?: string }, mode: "setup" | "status"): Promise<CliResult> {
   const config = await loadValidConfig(options.config);
   const workspace = config.config?.workspaces[options.workspace];
+  const workspaceRoot = path.resolve(workspace?.workspacePath ?? defaultWorkspaceRoot(options.workspace));
+  const envSources = config.config ? await workspaceEnvSources(config.config, { workspaceId: options.workspace, workspaceRoot }) : undefined;
   const status = await setupComposioStatus(workspace, {
     apiKeyRef: options.apiKeyRef,
     connectedAccountRef: options.connectedAccountRef,
-  });
+  }, { workspaceId: options.workspace, workspaceRoot, envSources });
   return {
     ok: true,
     summary: mode === "setup" ? "Composio setup prompts rendered without using credentials" : "Composio status inspected without printing credentials",
@@ -950,8 +3060,8 @@ async function composioSetupStatusCommand(options: { config: string; workspace: 
       config: config.ok ? { path: path.resolve(options.config), valid: true } : config,
       ...status,
       prompts: [
+        "Do you want optional Gmail access through Composio?",
         "Do you want optional Google Calendar access through Composio?",
-        "Do you want optional chat data-source access through Composio?",
         "Where should the Composio API key be referenced (env:NAME or file:/path) without storing the value in git?",
         "Where should connected account metadata refs live in the private workspace?",
       ],
@@ -1076,14 +3186,14 @@ async function workspaceScaffoldCommand(options: { workspace: string; path?: str
   return {
     ok: options.dryRun ? true : status.ready,
     summary: options.dryRun
-      ? "assistant workspace scaffold plan ready (dry run)"
-      : "assistant workspace scaffold reconciled without overwriting stores or secrets",
+      ? "legacy/lab assistant workspace scaffold plan ready (dry run)"
+      : "legacy/lab assistant workspace scaffold reconciled without overwriting stores or secrets",
     details: {
       workspace: options.workspace,
       workspaceRoot,
       scaffold,
       status,
-      sideEffects: options.dryRun ? "none" : "created missing assistant JSON workspace directories/files only; existing stores were not overwritten",
+      sideEffects: options.dryRun ? "none" : "created missing legacy/lab assistant JSON workspace directories/files only; existing stores were not overwritten",
     },
   };
 }
@@ -1094,9 +3204,9 @@ async function workspaceStatusCommand(options: { workspace: string; path?: strin
   return {
     ok: status.ready,
     summary: status.ready
-      ? "assistant-logic workspace parity paths and vendored commands are ready"
-      : "assistant-logic workspace parity paths or vendored commands are missing or invalid",
-    details: { workspace: options.workspace, workspaceRoot, status, sideEffects: "none" },
+      ? "legacy/lab assistant-logic workspace parity paths and vendored commands are ready"
+      : "legacy/lab assistant-logic workspace parity paths or vendored commands are missing or invalid",
+    details: { workspace: options.workspace, workspaceRoot, status, productionAuthority: "assistant-agent-logic checkout plus assistant-agent-data/workspace, not Brain lab stores", sideEffects: "none" },
   };
 }
 
@@ -1107,12 +3217,13 @@ async function workspaceCommandsCommand(options: { workspace: string; path?: str
   const scriptMetadata = await assistantCommandScriptMetadata(assistantLogicRoot, commands.flatMap((group) => group.scripts));
   return {
     ok: scriptMetadata.every((item) => item.present),
-    summary: "assistant-logic workspace command catalog rendered",
+    summary: "legacy/lab assistant-logic workspace command catalog rendered",
     details: {
       workspace: options.workspace,
       workspaceRoot,
       assistantLogicRoot,
-      assistantLogicSource: "in-repo:@brain/assistant-logic",
+      assistantLogicSource: "legacy-lab-in-repo:@brain/assistant-logic",
+      productionAuthority: "separate assistant-agent-logic checkout resolved by stack/repo-registry",
       deprecatedAssistantRepoIgnored: Boolean(options.assistantRepo),
       env: assistantWorkspaceEnv(workspaceRoot),
       commands,
@@ -1152,13 +3263,14 @@ async function workspaceRunCommand(script: string, scriptArgs: string[], options
   return {
     ok: (result.status ?? 1) === 0,
     summary: (result.status ?? 1) === 0
-      ? `${resolved.kind} assistant-logic command completed: ${resolved.script}`
-      : `${resolved.kind} assistant-logic command failed: ${resolved.script}`,
+      ? `legacy/lab ${resolved.kind} assistant-logic command completed: ${resolved.script}`
+      : `legacy/lab ${resolved.kind} assistant-logic command failed: ${resolved.script}`,
     details: {
       workspace: options.workspace,
       workspaceRoot,
       assistantLogicRoot,
-      assistantLogicSource: "in-repo:@brain/assistant-logic",
+      assistantLogicSource: "legacy-lab-in-repo:@brain/assistant-logic",
+      productionAuthority: "separate assistant-agent-logic checkout resolved by stack/repo-registry",
       commandKind: resolved.kind,
       deprecatedAssistantRepoIgnored: Boolean(options.assistantRepo),
       script: resolved.script,
@@ -1170,8 +3282,24 @@ async function workspaceRunCommand(script: string, scriptArgs: string[], options
       userFacingText,
       stderr: String(redactSecrets(stderr)),
       sideEffects: resolved.kind === "native"
-        ? "native assistant-logic CLI controlled the JSON workspace state"
-        : "vendored assistant-agent-logic script controlled workspace state or live integrations using private configuration",
+        ? "legacy/lab native assistant-logic CLI controlled the JSON workspace state"
+        : "legacy/lab assistant-agent-logic snapshot script controlled workspace state or account integrations using private configuration",
+    },
+  };
+}
+
+function createCliAssistantCommandPort(workspace: string, workspaceRoot: string): AssistantWorkspaceCommandPort {
+  return {
+    async run(script: string, args: string[] = []) {
+      const result = await workspaceRunCommand(script, args, { workspace, path: workspaceRoot });
+      const details = isRecord(result.details) ? result.details : {};
+      return {
+        ok: result.ok,
+        userFacingText: typeof details.userFacingText === "string" ? details.userFacingText : undefined,
+        error: result.ok ? undefined : result.summary,
+        stderr: typeof details.stderr === "string" ? details.stderr : undefined,
+        stdout: details.stdout,
+      };
     },
   };
 }
@@ -1184,6 +3312,10 @@ function parseJsonOrString(text: string): unknown {
   } catch {
     return trimmed;
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function assistantWorkspaceScaffoldPlan(workspaceRoot: string) {
@@ -1564,7 +3696,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "betting",
-      integration: "vendored-assistant-agent-logic",
+      integration: "legacy-lab-assistant-agent-logic-snapshot",
       state: path.join(workspaceRoot, "data", "bets.json"),
       scripts: ["bet-add.js", "bet-list.js", "bet-result.js", "bet-summary.js", "bet-delete.js"],
       examples: [
@@ -1574,7 +3706,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "gmail-email",
-      integration: "vendored-live-composio-gmail",
+      integration: "legacy-lab-composio-gmail-snapshot",
       state: [path.join(workspaceRoot, "data", "seen-emails.json"), path.join(workspaceRoot, "data", "dismissed-emails.json"), path.join(workspaceRoot, "data", "urgent-emails.json")],
       privateConfig: [path.join(workspaceRoot, ".env"), path.join(workspaceRoot, "composio.yaml")],
       scripts: ["gmail-recent.js", "gmail-search.js", "gmail-send.js", "gmail-actionable.js", "email-actionable.js", "urgent-email.js", "dismiss-email.js"],
@@ -1585,7 +3717,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "google-calendar",
-      integration: "vendored-live-composio-google-calendar",
+      integration: "legacy-lab-composio-google-calendar-snapshot",
       state: [path.join(workspaceRoot, "data", "calendar-allowlist.json"), path.join(workspaceRoot, "data", "seen-invites.json"), path.join(workspaceRoot, "data", "declined-invites-log.json"), path.join(workspaceRoot, "data", "flagged-events.json")],
       privateConfig: [path.join(workspaceRoot, ".env"), path.join(workspaceRoot, "composio.yaml")],
       scripts: ["calendar-events.js", "calendar-search.js", "calendar-create-event.js", "update-calendar-event.js", "calendar-add-guest.js", "calendar-check-invites.js", "calendar-allowlist.js", "flag-event.js", "fix-football-events.js"],
@@ -1596,7 +3728,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "composio",
-      integration: "vendored-live-composio-connection",
+      integration: "legacy-lab-composio-connection-snapshot",
       state: path.join(workspaceRoot, "composio.yaml"),
       privateConfig: [path.join(workspaceRoot, ".env"), path.join(workspaceRoot, "composio.yaml")],
       scripts: ["composio-connect.js"],
@@ -1607,7 +3739,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "protonmail",
-      integration: "vendored-live-protonmail-bridge",
+      integration: "legacy-lab-protonmail-bridge-snapshot",
       state: [path.join(workspaceRoot, "data", "protonmail-drafts.json"), path.join(workspaceRoot, "data", "protonmail-audit.jsonl")],
       privateConfig: [path.join(workspaceRoot, "protonmail.yaml")],
       scripts: ["protonmail-recent.js", "protonmail-search.js", "protonmail-send.js", "protonmail-actionable.js"],
@@ -1618,7 +3750,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "finance-mercury-plaid",
-      integration: "vendored-live-finance",
+      integration: "legacy-lab-finance-snapshot",
       state: [path.join(workspaceRoot, "data"), path.join(workspaceRoot, ".env")],
       privateConfig: [path.join(workspaceRoot, ".env")],
       scripts: ["finance-source.js", "finance-accounts.js", "finance-balances.js", "finance-transactions.js", "mercury-accounts.js", "mercury-balances.js", "mercury-transactions.js", "plaid-link.js"],
@@ -1629,7 +3761,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "whoop",
-      integration: "vendored-live-whoop",
+      integration: "legacy-lab-whoop-snapshot",
       state: path.join(workspaceRoot, ".env"),
       privateConfig: [path.join(workspaceRoot, ".env")],
       scripts: ["whoop-connect.js", "whoop-profile.js", "whoop-cycle.js", "whoop-recovery.js", "whoop-sleep.js", "whoop-workout.js"],
@@ -1640,7 +3772,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "telegram-user-client-and-messaging",
-      integration: "vendored-live-telegram-mtproto",
+      integration: "legacy-lab-telegram-mtproto-snapshot",
       state: [path.join(workspaceRoot, "data", "dismissed-messages.json"), path.join(workspaceRoot, "data", "urgent-messages.json")],
       privateConfig: [path.join(workspaceRoot, "messaging.yaml")],
       scripts: ["telegram-login.js", "telegram-history.js", "telegram-unread.js", "messages-unread.js", "urgent-message.js", "dismiss-message.js"],
@@ -1651,7 +3783,7 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "utility-live-support",
-      integration: "vendored-assistant-agent-logic-utilities",
+      integration: "legacy-lab-assistant-agent-logic-utilities",
       state: [path.join(workspaceRoot, "tasks"), path.join(workspaceRoot, "data")],
       scripts: ["dictionary-deploy.js", "transcribe-voice.js", "register-loops.sh", "dispatch-claude-sdk.mjs", "validate-repo.js"],
       examples: [
@@ -1667,12 +3799,12 @@ function renderInstructionsReadme(): string {
     "# Workspace Instruction Overlays",
     "",
     "These files are the workspace-owned layer for user-specific preferences.",
-    "They are additive overlays on top of Brain's in-repo `packages/assistant-logic/config/skills/*.md` and `packages/assistant-logic/config/prompts/*.md` resources.",
+    "These are legacy/lab overlays only. Production assistant guidance belongs in the external assistant-agent-logic checkout and private assistant workspace.",
     "",
     "Do not use overlays to redefine commands, storage paths, JSON formats, approval requirements, or safety rules.",
     "",
-    "Brain ships native TypeScript commands for todo, projects, CRM, reminders, and file-save.",
-    "Brain also vendors the assistant-agent-logic live-integration command set for Composio/Gmail/Calendar, ProtonMail, finance/Mercury/Plaid, Whoop, Telegram user-client messaging, betting, dictionary, generated web pages, and loop utilities.",
+    "Brain ships legacy/lab native TypeScript commands for todo, projects, CRM, reminders, and file-save smoke checks.",
+    "Brain also includes a legacy/lab snapshot of assistant-agent-logic integration commands for Composio/Gmail/Calendar, ProtonMail, finance/Mercury/Plaid, Whoop, Telegram user-client messaging, betting, dictionary, generated web pages, and loop utilities; production uses the separate assistant-agent-logic checkout.",
     "Keep personal account IDs, OAuth/API tokens, Telegram sessions, ProtonMail Bridge credentials, and finance/Whoop secrets in this private workspace, not in the Brain repo.",
     "See `docs/assistant-logic-integration-audit.md` and `docs/migration.md` for the integrated/status table and private data migration guidance.",
     "",
@@ -1683,8 +3815,8 @@ function renderSkillOverlayPlaceholder(skill: string): string {
   return [
     `# Workspace Overlay: ${titleCase(skill)}`,
     "",
-    "Add only user-specific preferences here.",
-    `This file is layered on top of Brain's in-repo \`packages/assistant-logic/config/skills/${skill === "repo-registry" ? "repo-registry/SKILL" : skill}.md\` resource.`,
+    "Add only user-specific lab preferences here.",
+    "Production assistant skills belong in the external assistant-agent-logic checkout, not Brain.",
     "",
     "Do not restate or override shared commands, storage paths, JSON formats, approval requirements, or safety rules.",
     "",
@@ -1695,8 +3827,8 @@ function renderPromptOverlayPlaceholder(prompt: string): string {
   return [
     `# Workspace Overlay: ${titleCase(prompt)}`,
     "",
-    "Add only user-specific prompt preferences here.",
-    `This file is layered on top of Brain's in-repo \`packages/assistant-logic/config/prompts/${prompt}.md\` resource.`,
+    "Add only user-specific lab prompt preferences here.",
+    "Production assistant prompts belong in the external assistant-agent-logic checkout, not Brain.",
     "",
   ].join("\n");
 }
@@ -1722,7 +3854,7 @@ function renderRepoRegistryReadme(): string {
   return [
     "# Repo Registry State",
     "",
-    "This directory may hold user-specific repo-registry controller state compatible with Brain's assistant-logic resources.",
+    "This directory may hold user-specific repo-registry controller state for the Brain control plane and external assistant-agent-logic checkout.",
     "Back up selected state files only; do not commit private hosts, paths, credentials, or runtime caches to a public source checkout.",
     "",
   ].join("\n");
@@ -1758,40 +3890,139 @@ function setupWebPublishingStatus(workspace: WorkspaceConfig | undefined) {
   };
 }
 
-async function setupComposioStatus(workspace: WorkspaceConfig | undefined, overrides: { apiKeyRef?: string; connectedAccountRef?: string } = {}) {
+async function setupComposioStatus(
+  workspace: WorkspaceConfig | undefined,
+  overrides: { apiKeyRef?: string; connectedAccountRef?: string } = {},
+  context: { workspaceId?: string; workspaceRoot?: string; envSources?: Map<string, EnvSecretSource[]> } = {},
+) {
   const config = workspace?.integrations?.composio;
+  const workspaceId = context.workspaceId ?? "workspace";
+  const workspaceRoot = path.resolve(context.workspaceRoot ?? workspace?.workspacePath ?? defaultWorkspaceRoot(workspaceId));
   const apiKeyRef = overrides.apiKeyRef ?? config?.apiKeyRef;
   const connectedAccountRef = overrides.connectedAccountRef ?? config?.connectedAccountRef;
   const googleCalendar = config?.dataSources?.googleCalendar;
-  const chat = config?.dataSources?.chat;
+  const gmail = config?.dataSources?.gmail ?? config?.dataSources?.chat;
+  const legacyChat = config?.dataSources?.chat;
   const refs: ConfigRef[] = [
-    ...maybeRef(apiKeyRef, "integrations.composio.apiKeyRef", workspace ? "workspace" : "cli"),
-    ...maybeRef(connectedAccountRef, "integrations.composio.connectedAccountRef", workspace ? "workspace" : "cli"),
-    ...maybeRef(config?.metadataRef, "integrations.composio.metadataRef"),
-    ...maybeRef(googleCalendar?.connectedAccountRef, "integrations.composio.dataSources.googleCalendar.connectedAccountRef"),
-    ...maybeRef(googleCalendar?.metadataRef, "integrations.composio.dataSources.googleCalendar.metadataRef"),
-    ...(googleCalendar?.requiredEnvRefs ?? []).map((ref) => ({ workspaceId: "workspace", ref: asSecretRef(ref), source: "integrations.composio.dataSources.googleCalendar.requiredEnvRefs" })),
-    ...maybeRef(chat?.connectedAccountRef, "integrations.composio.dataSources.chat.connectedAccountRef"),
-    ...maybeRef(chat?.metadataRef, "integrations.composio.dataSources.chat.metadataRef"),
-    ...(chat?.requiredEnvRefs ?? []).map((ref) => ({ workspaceId: "workspace", ref: asSecretRef(ref), source: "integrations.composio.dataSources.chat.requiredEnvRefs" })),
+    ...maybeRef(apiKeyRef, "integrations.composio.apiKeyRef", workspace ? workspaceId : "cli"),
+    ...maybeRef(connectedAccountRef, "integrations.composio.connectedAccountRef", workspace ? workspaceId : "cli"),
+    ...maybeRef(config?.metadataRef, "integrations.composio.metadataRef", workspaceId),
+    ...maybeRef(googleCalendar?.connectedAccountRef, "integrations.composio.dataSources.googleCalendar.connectedAccountRef", workspaceId),
+    ...maybeRef(googleCalendar?.metadataRef, "integrations.composio.dataSources.googleCalendar.metadataRef", workspaceId),
+    ...(googleCalendar?.requiredEnvRefs ?? []).map((ref) => ({ workspaceId, ref: asSecretRef(ref), source: "integrations.composio.dataSources.googleCalendar.requiredEnvRefs" })),
+    ...maybeRef(gmail?.connectedAccountRef, "integrations.composio.dataSources.gmail.connectedAccountRef", workspaceId),
+    ...maybeRef(gmail?.metadataRef, "integrations.composio.dataSources.gmail.metadataRef", workspaceId),
+    ...(gmail?.requiredEnvRefs ?? []).map((ref) => ({ workspaceId, ref: asSecretRef(ref), source: "integrations.composio.dataSources.gmail.requiredEnvRefs" })),
   ];
-  const refMetadata = await secretRefMetadata(refs);
+  const envSources = context.envSources ?? new Map([[workspaceId, await Promise.all([
+    readEnvSecretSource(path.join(workspaceRoot, ".env")),
+    readEnvSecretSource(path.join(workspaceRoot, "config", `brain-${workspaceId}.env`)),
+    readEnvSecretSource(path.join(workspaceRoot, "secrets", "secrets.env")),
+  ])]]);
+  const refMetadata = await secretRefMetadata(refs, { envSources });
+  const privateConfig = await composioPrivateConfigMetadata(workspaceRoot);
+  const refPresent = (source: string) => refMetadata.some((ref) => ref.source === source && ref.present === true);
+  const apiKeyPresent = Boolean(apiKeyRef && refPresent("integrations.composio.apiKeyRef")) || privateConfig.workspaceEnv.keys.includes("COMPOSIO_API_KEY");
+  const googleCalendarReady = privateConfig.composioYaml.googleCalendarAccounts > 0 || refPresent("integrations.composio.dataSources.googleCalendar.connectedAccountRef") || refPresent("integrations.composio.connectedAccountRef");
+  const gmailReady = privateConfig.composioYaml.gmailAccounts > 0 || refPresent("integrations.composio.dataSources.gmail.connectedAccountRef") || refPresent("integrations.composio.connectedAccountRef");
   const missing = [];
   const enabled = config?.enabled ?? Boolean(overrides.apiKeyRef || overrides.connectedAccountRef);
-  if (enabled && !apiKeyRef) missing.push("Composio API key ref");
-  if (enabled && !connectedAccountRef) missing.push("Composio connected account metadata ref");
-  if (googleCalendar?.enabled && !(googleCalendar.connectedAccountRef ?? connectedAccountRef)) missing.push("Google Calendar connected account ref");
-  if (chat?.enabled && !(chat.connectedAccountRef ?? connectedAccountRef)) missing.push("chat connected account ref");
+  if (enabled && !apiKeyPresent) missing.push("Composio API key");
+  if (enabled && !connectedAccountRef && !privateConfig.composioYaml.present) missing.push("Composio connected account metadata ref");
+  if (googleCalendar?.enabled && !googleCalendarReady) missing.push("Google Calendar connected account");
+  if (gmail?.enabled && !gmailReady) missing.push("Gmail connected account");
+  const nextMissing = [
+    ...(!apiKeyPresent ? ["Composio API key"] : []),
+    ...(!googleCalendarReady ? ["Google Calendar connected account"] : []),
+    ...(!gmailReady ? ["Gmail connected account"] : []),
+  ];
+  const ready = nextMissing.length === 0;
   return {
     enabled,
+    ready,
     apiKeyRefPresent: Boolean(apiKeyRef),
+    apiKeyPresent,
     connectedAccountRefPresent: Boolean(connectedAccountRef),
     dataSources: {
-      googleCalendar: { enabled: googleCalendar?.enabled ?? false, connectedAccountRefPresent: Boolean(googleCalendar?.connectedAccountRef ?? connectedAccountRef), metadataRefPresent: Boolean(googleCalendar?.metadataRef) },
-      chat: { enabled: chat?.enabled ?? false, connectedAccountRefPresent: Boolean(chat?.connectedAccountRef ?? connectedAccountRef), metadataRefPresent: Boolean(chat?.metadataRef) },
+      googleCalendar: { enabled: googleCalendar?.enabled ?? false, ready: googleCalendarReady, connectedAccountRefPresent: Boolean(googleCalendar?.connectedAccountRef ?? connectedAccountRef), metadataRefPresent: Boolean(googleCalendar?.metadataRef) },
+      gmail: { enabled: gmail?.enabled ?? false, ready: gmailReady, connectedAccountRefPresent: Boolean(gmail?.connectedAccountRef ?? connectedAccountRef), metadataRefPresent: Boolean(gmail?.metadataRef) },
+      legacyChat: legacyChat ? { enabled: legacyChat.enabled, mapsTo: "gmail" } : undefined,
     },
+    privateConfig,
     refs: refMetadata,
     missing,
+    nextDataSourceFlow: {
+      status: ready ? "ready" : "needs-user-input",
+      missing: nextMissing,
+      urls: [
+        { label: "Composio API keys", url: "https://app.composio.dev/settings" },
+        { label: "Composio connected accounts", url: "https://app.composio.dev/connected_accounts" },
+      ],
+      accountInfoNeeded: [
+        "Composio API key (enter only through the one-use helper; do not paste it into chat/logs).",
+        "Google Calendar OAuth connection for Tim; after OAuth, record the returned connected account id plus a non-secret email label.",
+        "Gmail OAuth connection for each Gmail inbox Tim wants Brain to read/send; after OAuth, record each returned connected account id plus a non-secret email label.",
+      ],
+      commands: {
+        generateApiKeyHelper: `pnpm run brainctl setup composio-api-key-script --workspace ${shellArg(workspaceId)} --path ${shellArg(workspaceRoot)}`,
+        checkStatus: `pnpm run brainctl composio status --workspace ${shellArg(workspaceId)} --config ${shellArg(path.join(workspaceRoot, "config", "runtime.yaml"))}`,
+        generateGoogleCalendarOauth: `pnpm run brainctl workspace run --path ${shellArg(workspaceRoot)} composio-connect.js -- --generate --app google_calendar --user-id <tim-email-or-label>`,
+        generateGmailOauth: `pnpm run brainctl workspace run --path ${shellArg(workspaceRoot)} composio-connect.js -- --generate --app gmail --user-id <tim-email-or-label>`,
+      },
+      assistantLogic: {
+        source: "in-repo:@brain/assistant-logic",
+        setupSkill: "packages/assistant-logic/config/skills/setup-composio-connect.md",
+        accountConfigPath: path.join(workspaceRoot, "composio.yaml"),
+        apiKeyEnvPath: path.join(workspaceRoot, ".env"),
+        valuesPrinted: false,
+      },
+    },
+  };
+}
+
+async function composioPrivateConfigMetadata(workspaceRoot: string) {
+  const workspaceEnvPath = path.join(workspaceRoot, ".env");
+  const composioPath = path.join(workspaceRoot, "composio.yaml");
+  const workspaceEnvSource = await readEnvSecretSource(workspaceEnvPath);
+  const composioMetadata = await fileMetadata(composioPath);
+  let googleCalendarAccounts = 0;
+  let gmailAccounts = 0;
+  let calendarAliases = 0;
+  let parseError: string | undefined;
+  if (composioMetadata.present) {
+    try {
+      const parsed = YAML.parse(await readFile(composioPath, "utf8")) as unknown;
+      const accounts = asRecord(asRecord(parsed)?.accounts);
+      const calendar = asRecord(accounts?.google_calendar);
+      const calendarId = asString(calendar?.id);
+      googleCalendarAccounts = calendarId && /^ca_/.test(calendarId) && calendarId !== "ca_XXXX" ? 1 : 0;
+      const gmail = Array.isArray(accounts?.gmail) ? accounts.gmail : [];
+      gmailAccounts = gmail.filter((entry) => {
+        const id = asString(asRecord(entry)?.id);
+        return id && /^ca_/.test(id) && id !== "ca_XXXX";
+      }).length;
+      calendarAliases = Object.keys(asRecord(asRecord(parsed)?.calendars) ?? {}).length;
+    } catch (error) {
+      parseError = errorMessage(error);
+    }
+  }
+  return {
+    workspaceEnv: {
+      path: workspaceEnvPath,
+      metadata: workspaceEnvSource.metadata,
+      keys: [...workspaceEnvSource.keys].sort(),
+      valuesPrinted: false,
+    },
+    composioYaml: {
+      ...composioMetadata,
+      path: composioPath,
+      googleCalendarAccounts,
+      gmailAccounts,
+      calendarAliases,
+      accountIdsPrinted: false,
+      accountEmailsPrinted: false,
+      parseError,
+    },
   };
 }
 
@@ -1820,6 +4051,9 @@ async function liveValidateCommand(options: {
   const setupStateUpdate = options.runSafe && ok
     ? await updateSetupProgressFromLiveValidation(config.config.workspaces[options.workspace]?.workspacePath ?? defaultWorkspaceRoot(options.workspace), options, safeResults)
     : undefined;
+  const ledgerReconciliation = options.runSafe && ok
+    ? await reconcileDeploymentLedgerAfterValidation(config.config, options, safeResults, setupStateUpdate)
+    : undefined;
   const wizard = liveValidationWizard(options, plan, safeResults, ok, setupStateUpdate);
   return {
     ok,
@@ -1830,9 +4064,10 @@ async function liveValidateCommand(options: {
       nextStep: wizard.nextStep,
       guidedSequence: wizard.guidedSequence,
       setupStateUpdate,
+      ledgerReconciliation,
       plan,
       results: safeResults,
-      sideEffects: options.runSafe ? "safe local checks and private setup progress metadata update when workspace state exists" : "none",
+      sideEffects: options.runSafe ? "safe local checks, private setup progress metadata update, and stale deployment-ledger blocker reconciliation when current health clears it" : "none",
     },
   };
 }
@@ -1907,11 +4142,12 @@ function liveValidationWizard(
     },
     {
       step: "composio-accounts",
-      title: "Connect Composio accounts.",
-      prompt: "Connect Google Calendar/chat accounts only if this workspace should use them.",
+      title: "Connect Gmail and Google Calendar through Composio.",
+      prompt: "After the base Telegram/Codex service is ready, connect Gmail and Google Calendar through Composio if this workspace should use those data sources.",
       actions: [
-        "Store Composio API keys and connected-account metadata as private secret refs.",
-        "Skip this step for a minimal Telegram + Codex setup and return later.",
+        `Generate the one-use API key helper with: pnpm run brainctl setup composio-api-key-script --workspace ${shellArg(options.workspace)} --path <workspace>`,
+        "Tim gets the key from https://app.composio.dev/settings and enters it only into the helper TTY prompt.",
+        "Then generate short-lived OAuth links with composio-connect.js for `google_calendar` and `gmail`; store only connected-account metadata in private workspace files.",
       ],
     },
     {
@@ -1928,8 +4164,8 @@ function liveValidationWizard(
       title: "Verify Codex auth before service start.",
       actions: [
         "Confirm the selected Codex transport and auth path for this machine or server.",
-        `Generate a guarded helper with: pnpm run brainctl setup codex-auth-script --config ${shellArg(options.config)} --workspace ${shellArg(options.workspace)} --repo <repo-root> --service-user <brain-service-user>`,
-        "Run the returned command as the same OS user that will run Brain; for systemd this is usually the non-root service user.",
+        `Generate a guarded helper with: pnpm run brainctl setup codex-auth-script --config ${shellArg(options.config)} --workspace ${shellArg(options.workspace)} --repo <repo-root> --service-user <codex-chat-service-user>`,
+        "Run the returned command as the same OS user that will run codex-chat; for systemd this is usually the non-root service user.",
         "If a credential is needed, store it only in a private server env file or secret store, then verify by metadata/health check without printing the value.",
         `Run a guarded provider check for the chosen transport before accepting live user traffic.`,
       ],
@@ -1937,11 +4173,11 @@ function liveValidationWizard(
     },
     {
       step: "install-start-service",
-      title: "Install and start the Brain service.",
+      title: "Install and start the codex-chat service.",
       actions: [
-        `Review the service plan with: pnpm run brainctl operations systemd --config ${shellArg(options.config)} --workspace ${shellArg(options.workspace)}`,
-        "Install/enable systemd only after the user confirms the unit path, service user, working directory, and private env file.",
-        "Start the service only after Telegram token storage, private data setup, and Codex auth are verified.",
+        `Review the servant stack plan with: pnpm run brainctl stack plan --workspace ${shellArg(options.workspace)}`,
+        "Install/enable systemd only after the user confirms codex-chat.service, the codex-chat checkout, assistant-agent-logic checkout, assistant-agent-data workspace, and private env/config refs.",
+        "Start codex-chat only after Telegram token storage, private data setup, and Codex auth are verified for the service user.",
       ],
       requiresConfirmation: "Privileged systemd installation, enablement, and service start require explicit user confirmation.",
     },
@@ -1949,16 +4185,25 @@ function liveValidationWizard(
       step: "first-user-pairing",
       title: "Optional follow-up: first-user pairing.",
       actions: [
-        "After the service is running with the private Telegram token, send the bot its first Telegram message.",
-        "That first user/chat becomes paired admin state by default and is persisted only in private Brain state.",
+        "After the service is running with the private Telegram token, send the bot messages from the intended admin chat(s).",
+        "By default up to two distinct user/chat pairs become paired admin state and are persisted only in private Brain state.",
+        "Use --telegram-max-admin-pairs 1 when deliberately preserving a single-admin deployment.",
         "If a token was ever pasted into a repo, chat, or log, revoke it in @BotFather with /revoke before starting live polling.",
+      ],
+    },
+    {
+      step: "openai-transcription",
+      title: "Optional: confirm OpenAI voice/audio transcription.",
+      actions: [
+        "Ask whether Telegram voice/audio transcription should be enabled for this workspace.",
+        "If yes, store OPENAI_API_KEY only in the private codex-chat service env/secret store, set transcription.enabled=true with apiKeyEnv=OPENAI_API_KEY, and verify only redacted metadata.",
+        "If no, keep transcription disabled and make the disabled voice-message behavior explicit.",
       ],
     },
     {
       step: "optional-follow-ups",
       title: "Optional follow-ups.",
       actions: [
-        "Enable OpenAI voice/audio transcription only after the base Telegram path is working.",
         "Enable web publishing only when a publish root/base URL is chosen.",
         "Tune backup strategy, include/exclude policy, and remotes after the initial private repo is initialized or pulled.",
       ],
@@ -2006,7 +4251,7 @@ function botFatherSteps(): string[] {
     "Send /newbot.",
     "Choose a bot display name.",
     "Choose a unique username ending in bot, such as my_brain_bot.",
-    "Store the returned token only through a one-use private temp script that prompts for hidden input and writes to Brain's private server secret file or configured env/secret store.",
+    "Store the returned token only through a one-use private temp script that prompts for hidden input and writes to the private codex-chat service env file or configured env/secret store.",
   ];
 }
 
@@ -2018,7 +4263,7 @@ function telegramTokenStorageGuidance(options: { telegramTokenEnv?: string; tele
       : "a private env var such as TELEGRAM_BOT_TOKEN or a private file referenced by --telegram-token-file";
   return [
     `Use ${target}; never paste the token into the repo, setup chat, shell history, command output, or logs.`,
-    "Prefer generating the secret-entry helper with: pnpm run brainctl setup telegram-token-script --path <workspace>; then run the returned bash /.../store-brain-telegram-token.sh command.",
+    "Prefer generating the secret-entry helper with: pnpm run brainctl setup telegram-token-script --path <workspace> --codex-chat-env <codex-chat-env-file>; then run the returned bash /.../store-brain-telegram-token.sh command on the target host.",
     "If you provide a copy-paste command for secret entry, make it run that generated private temporary script, which is syntax-checked and reads the secret with hidden input.",
     "The temporary script directory must be outside version control, the script must not contain the secret value, and the script should delete itself after a successful write.",
     "Keep the secret file owner-readable only where practical and outside the source checkout.",
@@ -2099,8 +4344,10 @@ function createCliProvider(selection: ResolvedSupervisorRuntime, options: Superv
   if (provider === "echo") return new EchoProviderAdapter();
   if (provider === "codex") return createCodexProvider({
     transport: (options.transport as CodexTransportKind | undefined) ?? "stub",
+    model: DEFAULT_MAIN_LOOP_MODEL,
+    effort: DEFAULT_MAIN_LOOP_EFFORT,
     binary: options.binary,
-    cwd: options.cwd ?? selection.workspace.workspacePath ?? process.cwd(),
+    cwd: providerCwdForWorkspace(selection.workspace, options.cwd),
     tmpDir: path.join(selection.workspace.workspacePath, "tmp"),
     sandbox: "danger-full-access",
     approvalPolicy: "never",
@@ -2178,6 +4425,7 @@ async function createCliEntrypoint(selection: ResolvedSupervisorRuntime, options
     pairing: {
       enabled: true,
       mode: options.telegramPairing ? "code" : "first-user",
+      maxAdminPairs: telegramMaxAdminPairsOption(options),
       store: new FileTelegramPairingStore(pairingState),
     },
     attachmentHandling: needsTelegramAttachmentParity || needsTelegramDownloads || transcriber ? {
@@ -2187,6 +4435,11 @@ async function createCliEntrypoint(selection: ResolvedSupervisorRuntime, options
       transcriptionFailureMode: "codex-chat",
     } : undefined,
   });
+}
+
+function telegramMaxAdminPairsOption(options: Pick<SupervisorRunCommandOptions, "telegramMaxAdminPairs">): number {
+  const max = options.telegramMaxAdminPairs ?? 2;
+  return Number.isSafeInteger(max) && max > 0 ? max : 1;
 }
 
 function telegramAllowedSendRoots(selection: ResolvedSupervisorRuntime, paths: { stateRoot: string; artifactRoot: string }, downloadDir: string): string[] {
@@ -2348,7 +4601,8 @@ function redactSecrets(value: unknown): unknown {
 
 function redactString(value: string): string {
   return value.replace(/\b\d{5,}:[A-Za-z0-9_-]{16,}\b/g, "[redacted-telegram-token]")
-    .replace(/\b(sk-[A-Za-z0-9_-]{16,})\b/g, "[redacted-api-key]");
+    .replace(/\b(sk-[A-Za-z0-9_-]{16,})\b/g, "[redacted-api-key]")
+    .replace(/\b(comp_[A-Za-z0-9_-]{12,})\b/g, "[redacted-composio-api-key]");
 }
 
 function errorMessage(error: unknown): string {
@@ -2414,12 +4668,24 @@ const LOCAL_SETUP_CONTEXT_RELATIVE_PATH = path.join("private", "setup-context.js
 const PRIVATE_WORKSPACE_GITIGNORE = [
   "# Brain private workspace backup safety defaults",
   "# Keep secret-bearing, noisy, and local-cache paths out of private Git backups.",
+  ".env",
+  ".env.*",
+  "!.env.example",
+  "*.env",
+  "*.env.*",
+  "!*.env.example",
+  "config/*.env",
+  "config/*.env.*",
   "secrets/**",
   "logs/**",
   "tmp/**",
   "cache/**",
   "caches/**",
   "state/setup-progress.json",
+  "state/telegram-offset.json",
+  "state/telegram-pairing/**",
+  "state/jobs/**",
+  "state/events/**",
   "**/.cache/**",
   "**/node_modules/**",
   "**/*.log",
@@ -2428,8 +4694,8 @@ const PRIVATE_WORKSPACE_GITIGNORE = [
   "private/documents/files/**",
   "",
   "# Keep generated runtime scratch data local unless deliberately included.",
-  "artifacts/tmp/**",
-  "artifacts/generated/**",
+  "artifacts/**",
+  "!artifacts/metadata/**",
   "",
 ].join("\n");
 
@@ -2454,6 +4720,8 @@ interface LocalSetupContext {
   updatedAt?: string;
   sshHost?: string;
   sshUser?: string;
+  serviceUser?: string;
+  bootstrapSshUser?: string;
   repoPath?: string;
   configPath?: string;
   secretValuesStored?: false;
@@ -2464,7 +4732,9 @@ interface RemoteSetupDefaults {
   serviceHome: string;
   sshHost?: string;
   sshUser: string;
+  bootstrapSshUser?: string;
   workspaceRoot: string;
+  workspaceParent: string;
   repoPath: string;
   configPath: string;
 }
@@ -2505,9 +4775,19 @@ interface SetupDefaultsOptions {
   repo?: string;
   dryRun?: boolean;
   verbose?: boolean;
+  sshAlias?: string;
+  sshConfig?: string;
 }
 
-interface SetupTelegramTokenScriptOptions {
+interface SetupRemoteBootstrapOptions extends SetupDefaultsOptions {
+  sshHost?: string;
+  sshUser?: string;
+  serviceUser?: string;
+  sshAlias?: string;
+  sshConfig?: string;
+}
+
+interface SetupSecretScriptOptions {
   workspace: string;
   path?: string;
   config?: string;
@@ -2519,7 +4799,9 @@ interface SetupTelegramTokenScriptOptions {
   tokenFile?: string;
   adapterConfig?: string;
   serviceEnv?: string;
+  codexChatEnv?: string;
   secretsEnv?: string;
+  composioEnv?: string;
   binary?: string;
 }
 
@@ -2536,17 +4818,19 @@ async function setupDefaultsCommand(options: SetupDefaultsOptions): Promise<CliR
   if (!target) return { ok: false, summary: "setup defaults target must be local or remote", details: { supported: ["local", "remote"] } };
   const remoteDefaults = target === "remote" ? remoteSetupDefaults(options) : undefined;
   const sshUser = remoteDefaults?.sshUser;
+  const bootstrapSshUser = remoteDefaults?.bootstrapSshUser;
   const sshHost = target === "remote" ? (remoteDefaults?.sshHost ?? "ask: server IP or DNS name") : undefined;
   const serviceUser = options.serviceUser || DEFAULT_SERVICE_USER;
   const serviceHome = target === "remote" ? serviceUserHome(serviceUser) : "~";
   const workspaceRoot = remoteDefaults?.workspaceRoot ?? (options.path ?? defaultWorkspaceRootDisplay(options.workspace, serviceHome));
   const repoCheckout = remoteDefaults?.repoPath ?? "<this checkout>";
-  const serviceName = `brain-${options.workspace}`;
+  const serviceName = "codex-chat.service";
   const decisions = [
     { decision: "Setup mode", default: target === "remote" ? "Remote Ubuntu server over SSH" : "Local private workspace" },
     ...(target === "remote" ? [
       { decision: "Remote SSH host", default: sshHost },
-      { decision: "Remote SSH user", default: sshUser },
+      { decision: "Initial remote SSH user", default: bootstrapSshUser ?? sshUser },
+      { decision: "Future remote SSH user", default: sshUser },
     ] : []),
     { decision: "Source checkout", default: repoCheckout },
     { decision: "Private workspace", default: workspaceRoot },
@@ -2581,7 +4865,7 @@ async function setupDefaultsCommand(options: SetupDefaultsOptions): Promise<CliR
   if (options.verbose) {
     details.advanced = {
       target,
-      ssh: target === "remote" ? { host: sshHost, user: sshUser } : undefined,
+      ssh: target === "remote" ? { host: sshHost, user: sshUser, bootstrapUser: bootstrapSshUser } : undefined,
       serviceUser: target === "remote" ? serviceUser : undefined,
       serviceName: target === "remote" ? serviceName : undefined,
       paths: {
@@ -2593,8 +4877,9 @@ async function setupDefaultsCommand(options: SetupDefaultsOptions): Promise<CliR
         logs: `${workspaceRoot}/logs`,
       },
       nextCommands: [
+        ...(target === "remote" && bootstrapSshUser ? [`pnpm run brainctl setup remote-bootstrap --workspace ${options.workspace} --ssh-host ${sshHost ?? "<host>"} --ssh-user ${bootstrapSshUser} --service-user ${serviceUser}`] : []),
         `pnpm run brainctl setup --workspace ${options.workspace} --path ${workspaceRoot}`,
-        `pnpm run brainctl setup status --config ${workspaceRoot}/config/runtime.yaml --workspace ${options.workspace}`,
+        `pnpm run brainctl stack status --workspace ${options.workspace}`,
       ],
     };
   }
@@ -2608,12 +4893,225 @@ async function setupDefaultsCommand(options: SetupDefaultsOptions): Promise<CliR
   };
 }
 
+async function setupRemoteBootstrapCommand(options: SetupRemoteBootstrapOptions): Promise<CliResult> {
+  if (!options.sshHost) {
+    return { ok: false, summary: "remote bootstrap needs --ssh-host", details: { workspace: options.workspace, missing: ["ssh-host"], sideEffects: "none" } };
+  }
+  const defaults = remoteSetupDefaults(options);
+  const initialSshUser = options.sshUser || defaults.bootstrapSshUser || defaults.sshUser;
+  const initialDestination = remoteSshDestination(options.sshHost, initialSshUser);
+  const futureDestination = remoteSshDestination(options.sshHost, defaults.sshUser);
+  const bootstrapScript = renderRemoteBootstrapScript({ serviceUser: defaults.serviceUser, serviceHome: defaults.serviceHome, repoPath: defaults.repoPath, workspaceParent: defaults.workspaceParent, workspaceRoot: defaults.workspaceRoot });
+  const bootstrapCommand = `ssh ${shellArg(initialDestination)} 'bash -s'`;
+  const serviceValidationCommand = `ssh ${shellArg(futureDestination)} ${shellArg(remoteServiceUserValidationCommand(defaults))}`;
+  const context = remoteLocalSetupContext(options, defaults);
+
+  if (options.dryRun) {
+    return {
+      ok: true,
+      summary: "remote bootstrap plan ready (dry run)",
+      details: {
+        workspace: options.workspace,
+        initialSsh: { host: options.sshHost, user: initialSshUser, destination: initialDestination },
+        futureSsh: { host: options.sshHost, user: defaults.sshUser, destination: futureDestination },
+        serviceUser: defaults.serviceUser,
+        repoPath: defaults.repoPath,
+        workspaceParent: defaults.workspaceParent,
+        workspaceRoot: defaults.workspaceRoot,
+        bootstrapCommand,
+        serviceValidationCommand,
+        localSetupContext: { context },
+        sshConfig: sshConfigPlan(options, defaults),
+        sideEffects: "none",
+      },
+    };
+  }
+
+  const bootstrap = spawnSync("ssh", [initialDestination, "bash -s"], { input: bootstrapScript, encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
+  if ((bootstrap.status ?? 0) !== 0) {
+    return {
+      ok: false,
+      summary: "remote bootstrap failed before local resume context was rewritten",
+      details: {
+        workspace: options.workspace,
+        initialSsh: { host: options.sshHost, user: initialSshUser, destination: initialDestination },
+        futureSsh: { host: options.sshHost, user: defaults.sshUser, destination: futureDestination },
+        bootstrapCommand,
+        exitCode: bootstrap.status,
+        stdout: redactSecrets(String(bootstrap.stdout ?? "")),
+        stderr: redactSecrets(String(bootstrap.stderr ?? "")),
+        sideEffects: "remote bootstrap may have partially run; local setup context was not rewritten",
+      },
+    };
+  }
+
+  const validation = spawnSync("ssh", [futureDestination, remoteServiceUserValidationCommand(defaults)], { encoding: "utf8", maxBuffer: 1024 * 1024 });
+  if ((validation.status ?? 0) !== 0) {
+    return {
+      ok: false,
+      summary: "remote bootstrap ran, but service-user SSH validation failed",
+      details: {
+        workspace: options.workspace,
+        initialSsh: { host: options.sshHost, user: initialSshUser, destination: initialDestination },
+        futureSsh: { host: options.sshHost, user: defaults.sshUser, destination: futureDestination },
+        bootstrapCommand,
+        serviceValidationCommand,
+        exitCode: validation.status,
+        stdout: redactSecrets(String(validation.stdout ?? "")),
+        stderr: redactSecrets(String(validation.stderr ?? "")),
+        sideEffects: "remote bootstrap ran; local setup context was not rewritten because future service-user SSH failed",
+      },
+    };
+  }
+
+  const contextWrite = await writeLocalSetupContext(options.repo, context);
+  const sshConfigWrite = await writeGeneratedSshConfig(options, defaults);
+  const ok = contextWrite.wrote && (sshConfigWrite?.wrote ?? true);
+  return {
+    ok,
+    summary: ok ? "remote bootstrap complete; future setup commands will use the service user" : "remote bootstrap complete, but local future-SSH metadata was not fully persisted",
+    details: {
+      workspace: options.workspace,
+      initialSsh: { host: options.sshHost, user: initialSshUser, destination: initialDestination, scope: "one-time-bootstrap" },
+      futureSsh: { host: options.sshHost, user: defaults.sshUser, destination: futureDestination },
+      serviceUser: defaults.serviceUser,
+      repoPath: defaults.repoPath,
+      workspaceParent: defaults.workspaceParent,
+      workspaceRoot: defaults.workspaceRoot,
+      bootstrapCommand,
+      serviceValidationCommand,
+      bootstrap: { exitCode: bootstrap.status, stdout: redactSecrets(String(bootstrap.stdout ?? "")), stderr: redactSecrets(String(bootstrap.stderr ?? "")) },
+      validation: { exitCode: validation.status, stdout: redactSecrets(String(validation.stdout ?? "")), stderr: redactSecrets(String(validation.stderr ?? "")) },
+      localSetupContext: setupContextWriteSummary(contextWrite, true),
+      sshConfig: sshConfigWrite,
+      sideEffects: [
+        "created/validated remote service user, sudo access, authorized_keys, checkout/workspace parent/workspace ownership",
+        contextWrite.wrote ? "updated ignored local private/setup-context.json to future service-user SSH" : "local setup context was not updated",
+        sshConfigWrite?.wrote ? "updated generated SSH config alias to future service-user SSH" : undefined,
+      ].filter(Boolean).join("; "),
+      secretValuesPrinted: false,
+    },
+  };
+}
+
+function renderRemoteBootstrapScript(input: { serviceUser: string; serviceHome: string; repoPath: string; workspaceParent: string; workspaceRoot: string }): string {
+  return `#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+service_user=${shellLiteral(input.serviceUser)}
+service_home=${shellLiteral(input.serviceHome)}
+repo_path=${shellLiteral(input.repoPath)}
+workspace_parent=${shellLiteral(input.workspaceParent)}
+workspace_root=${shellLiteral(input.workspaceRoot)}
+
+run_root() {
+  if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi
+}
+
+validate_as_service_user() {
+  local label="$1"
+  shift
+  if ! sudo -iu "$service_user" "$@"; then
+    echo "Brain remote bootstrap validation failed: service user '$service_user' cannot $label. Check ownership/mode for repo_path=$repo_path workspace_parent=$workspace_parent workspace_root=$workspace_root." >&2
+    exit 1
+  fi
+}
+
+if [ "$service_user" = root ]; then service_home=/root; fi
+if ! id "$service_user" >/dev/null 2>&1; then
+  run_root useradd --create-home --home-dir "$service_home" --shell /bin/bash "$service_user"
+fi
+
+service_group="$(id -gn "$service_user")"
+run_root install -d -o "$service_user" -g "$service_group" -m 700 "$service_home/.ssh"
+authorized_keys="$service_home/.ssh/authorized_keys"
+if [ ! -s "$authorized_keys" ]; then
+  source_keys=""
+  if [ -s /root/.ssh/authorized_keys ]; then
+    source_keys=/root/.ssh/authorized_keys
+  elif [ -n "\${SUDO_USER:-}" ] && [ -s "$(getent passwd "$SUDO_USER" | cut -d: -f6)/.ssh/authorized_keys" ]; then
+    source_keys="$(getent passwd "$SUDO_USER" | cut -d: -f6)/.ssh/authorized_keys"
+  fi
+  if [ -z "$source_keys" ]; then
+    echo "No existing authorized_keys found to grant service-user SSH access." >&2
+    exit 1
+  fi
+  run_root install -o "$service_user" -g "$service_group" -m 600 "$source_keys" "$authorized_keys"
+fi
+run_root chown "$service_user:$service_group" "$authorized_keys"
+run_root chmod 600 "$authorized_keys"
+
+sudoers_file="/etc/sudoers.d/brain-\${service_user}"
+tmp_sudoers="$(mktemp)"
+printf "%s ALL=(ALL) NOPASSWD:ALL\\n" "$service_user" > "$tmp_sudoers"
+run_root install -o root -g root -m 440 "$tmp_sudoers" "$sudoers_file"
+rm -f "$tmp_sudoers"
+run_root visudo -cf "$sudoers_file" >/dev/null
+
+run_root install -d -o "$service_user" -g "$service_group" -m 755 "$repo_path"
+run_root install -d -o "$service_user" -g "$service_group" -m 700 "$workspace_parent"
+run_root install -d -o "$service_user" -g "$service_group" -m 700 "$workspace_root"
+for dir in config secrets state logs tmp artifacts cache private private/documents private/documents/files; do
+  mode=700
+  case "$dir" in config) mode=755 ;; esac
+  run_root install -d -o "$service_user" -g "$service_group" -m "$mode" "$workspace_root/$dir"
+done
+run_root chown "$service_user:$service_group" "$workspace_parent" "$workspace_root"
+run_root chown -R "$service_user:$service_group" "$repo_path" "$workspace_root"
+
+validate_as_service_user "read SSH authorized_keys at $authorized_keys" test -r "$authorized_keys"
+validate_as_service_user "access checkout directory $repo_path" test -d "$repo_path"
+validate_as_service_user "write workspace parent $workspace_parent" test -w "$workspace_parent"
+validate_as_service_user "write workspace root $workspace_root" test -w "$workspace_root"
+echo "Brain remote bootstrap validated for $service_user."
+`;
+}
+
+function remoteServiceUserValidationCommand(defaults: RemoteSetupDefaults): string {
+  const validationScript = [
+    "set -euo pipefail",
+    "fail() { echo \"Brain service-user SSH validation failed: $1\" >&2; exit 1; }",
+    `[ "$(id -un)" = ${shellArg(defaults.sshUser)} ] || fail "expected SSH user ${defaults.sshUser}, got $(id -un)"`,
+    `[ -r ${shellArg(`${defaults.serviceHome}/.ssh/authorized_keys`)} ] || fail "cannot read service-user authorized_keys at ${defaults.serviceHome}/.ssh/authorized_keys"`,
+    `[ -d ${shellArg(defaults.repoPath)} ] || fail "checkout directory is missing or inaccessible: ${defaults.repoPath}"`,
+    `[ -w ${shellArg(defaults.workspaceParent)} ] || fail "workspace parent is not writable by ${defaults.sshUser}: ${defaults.workspaceParent}"`,
+    `[ -w ${shellArg(defaults.workspaceRoot)} ] || fail "workspace root is not writable by ${defaults.sshUser}: ${defaults.workspaceRoot}"`,
+  ].join("\n");
+  return `bash -lc ${shellArg(validationScript)}`;
+}
+
+function sshConfigPlan(options: SetupRemoteBootstrapOptions, defaults: RemoteSetupDefaults) {
+  if (!options.sshAlias && !options.sshConfig) return undefined;
+  return { path: options.sshConfig ? path.resolve(options.sshConfig) : path.join(os.homedir(), ".ssh", "config"), alias: options.sshAlias ?? options.sshHost, hostName: options.sshHost, user: defaults.sshUser };
+}
+
+async function writeGeneratedSshConfig(options: SetupRemoteBootstrapOptions, defaults: RemoteSetupDefaults): Promise<{ wrote: boolean; path?: string; alias?: string; skipped?: string } | undefined> {
+  const plan = sshConfigPlan(options, defaults);
+  if (!plan) return undefined;
+  if (!plan.alias || !plan.hostName) return { wrote: false, path: plan.path, alias: plan.alias, skipped: "ssh alias and ssh host are required to update SSH config" };
+  const begin = `# BEGIN Brain generated host ${plan.alias}`;
+  const end = `# END Brain generated host ${plan.alias}`;
+  const block = [begin, `Host ${plan.alias}`, `    HostName ${plan.hostName}`, `    User ${defaults.sshUser}`, end, ""].join("\n");
+  await mkdir(path.dirname(plan.path), { recursive: true, mode: 0o700 });
+  const current = await readFile(plan.path, "utf8").catch(() => "");
+  const pattern = new RegExp(`${escapeRegExp(begin)}[\\s\\S]*?${escapeRegExp(end)}\\n?`, "m");
+  const next = pattern.test(current) ? current.replace(pattern, block) : `${current}${current && !current.endsWith("\n") ? "\n" : ""}${block}`;
+  await writeFile(plan.path, next, { mode: 0o600 });
+  await chmod(plan.path, 0o600).catch(() => undefined);
+  return { wrote: true, path: plan.path, alias: plan.alias };
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function conciseSetupFlow() {
   return {
     coreSteps: [
       {
         step: "essential-runtime-choices",
-        prompt: "Confirm workspace, provider, entrypoint, and service target.",
+        prompt: "Confirm codex-chat checkout, assistant-agent-logic checkout, assistant-agent-data workspace, provider, entrypoint, and service target.",
       },
       {
         step: "configure-verify-codex-auth",
@@ -2625,23 +5123,28 @@ function conciseSetupFlow() {
       },
       {
         step: "personal-workspace",
-        prompt: "Create the JSON-backed assistant workspace for todos, projects, CRM, reminders, file-save metadata, overlays, tasks, and repo-registry state.",
+        prompt: "Create or validate the assistant-agent-data workspace; Brain records paths/metadata only and does not own assistant domain state.",
       },
       {
         step: "private-data-repo",
-        prompt: "Pull or initialize the private data/backup repo before relying on project memory.",
+        prompt: "Pull or initialize the private assistant-agent-data/backup repo before relying on project memory.",
+      },
+      {
+        step: "openai-transcription",
+        prompt: "Optionally confirm whether Telegram voice/audio transcription should use OpenAI; if yes, store only a private OPENAI_API_KEY ref before enabling it.",
       },
       {
         step: "composio-accounts",
-        prompt: "Connect Composio accounts if this workspace needs them.",
+        prompt: "After the base workspace/service are healthy, connect Gmail and Google Calendar through Composio with a one-use API-key helper and OAuth links.",
       },
     ],
     orderingNotes: [
       "Codex auth is an explicit step whenever the provider is Codex.",
       "Verify Codex auth before starting the service or accepting live Telegram traffic.",
-      "Create JSON-backed assistant workspace paths before the first live provider turn so todos/projects/CRM/reminders and document metadata have an inspectable source.",
-      "Keep markdown notes as supporting project resources only; do not migrate or convert JSON state to markdown.",
-      "Keep OpenAI transcription, web publishing, backup tuning, and first-user pairing as follow-up steps unless explicitly requested now.",
+      "Validate assistant-agent-data workspace paths before the first live provider turn; domain state remains owned by assistant-agent-logic/data, not Brain.",
+      "Keep markdown notes and JSON stores in assistant-agent-data as private state; do not migrate them into Brain.",
+      "Prompt the user to optionally confirm OpenAI voice/audio transcription during setup; enable it only after a private OpenAI key ref is present.",
+      "Keep web publishing, backup tuning, and first-user pairing as follow-up steps unless explicitly requested now.",
     ],
   };
 }
@@ -2659,13 +5162,18 @@ function remoteSetupDefaults(options: Pick<SetupDefaultsOptions, "workspace" | "
   const serviceUser = options.serviceUser || DEFAULT_SERVICE_USER;
   const serviceHome = serviceUserHome(serviceUser);
   const workspaceRoot = normalizeRemoteDisplayPath(options.path ?? defaultWorkspaceRootDisplay(options.workspace, serviceHome), serviceHome);
+  const workspaceParent = path.posix.dirname(workspaceRoot);
   const repoPath = `${serviceHome}/brain`;
+  const initialSshUser = options.sshUser || "root";
+  const usesRootBootstrap = initialSshUser === "root" && serviceUser !== "root";
   return {
     serviceUser,
     serviceHome,
     sshHost: nonPromptValue(options.sshHost),
-    sshUser: options.sshUser || "root",
+    sshUser: usesRootBootstrap ? serviceUser : initialSshUser,
+    bootstrapSshUser: usesRootBootstrap ? initialSshUser : undefined,
     workspaceRoot,
+    workspaceParent,
     repoPath,
     configPath: `${workspaceRoot}/config/runtime.yaml`,
   };
@@ -2680,6 +5188,8 @@ function remoteLocalSetupContext(options: Pick<SetupDefaultsOptions, "workspace"
     updatedAt: new Date().toISOString(),
     sshHost: defaults.sshHost,
     sshUser: defaults.sshUser,
+    serviceUser: defaults.serviceUser,
+    bootstrapSshUser: defaults.bootstrapSshUser,
     repoPath: defaults.repoPath,
     configPath: defaults.configPath,
     secretValuesStored: false,
@@ -2757,9 +5267,6 @@ async function setupCommand(options: SetupInspectOptions & { dryRun?: boolean; f
   }
   const workspaceRoot = preflight.workspaceRoot;
   const dirs = WORKSPACE_DIRS.map((dir) => path.join(workspaceRoot, dir));
-  const scaffold = options.dryRun
-    ? assistantWorkspaceScaffoldPlan(workspaceRoot)
-    : await ensureAssistantWorkspaceScaffold(workspaceRoot);
   if (!options.dryRun) {
     await mkdir(workspaceRoot, { recursive: true, mode: 0o700 });
     for (const dir of dirs) await mkdir(dir, { recursive: true, mode: workspaceDirectoryMode(path.relative(workspaceRoot, dir)) });
@@ -2783,11 +5290,15 @@ async function setupCommand(options: SetupInspectOptions & { dryRun?: boolean; f
         replaceRequested: Boolean(options.replace),
       },
       plan: after.plan,
-      assistantWorkspaceScaffold: scaffold,
+      assistantWorkspaceScaffold: {
+        deprecatedLabOnly: true,
+        skipped: "production setup does not scaffold Brain's legacy assistant-domain JSON stores; deploy codex-chat with the separate assistant-agent-logic checkout and assistant-agent-data/private workspace",
+        command: `pnpm run brainctl workspace scaffold --path ${shellArg(workspaceRoot)} # lab compatibility only`,
+      },
       setupWizard,
       setupState,
       inspection: after,
-      sideEffects: options.dryRun ? "none" : "created missing directories, reconciled JSON-backed assistant workspace files, and updated private setup progress state",
+      sideEffects: options.dryRun ? "none" : "created missing generic private workspace directories and updated private setup progress state; did not create Brain legacy assistant-domain stores",
     },
   };
 }
@@ -2840,15 +5351,16 @@ async function setupResetCommand(options: SetupResetOptions): Promise<CliResult>
   };
 }
 
-async function setupTelegramTokenScriptCommand(options: SetupTelegramTokenScriptOptions): Promise<CliResult> {
+async function setupTelegramTokenScriptCommand(options: SetupSecretScriptOptions): Promise<CliResult> {
   const workspaceRoot = path.resolve(options.path ?? defaultWorkspaceRoot(options.workspace));
   const scriptDir = options.output ? path.dirname(path.resolve(options.output)) : await mkdtemp(path.join(os.tmpdir(), "brain-token-"));
   const scriptPath = path.resolve(options.output ?? path.join(scriptDir, "store-brain-telegram-token.sh"));
   const tokenFile = path.resolve(options.tokenFile ?? path.join(workspaceRoot, "secrets", "telegram-bot-token"));
   const adapterConfig = path.resolve(options.adapterConfig ?? path.join(workspaceRoot, "secrets", "telegram-main.json"));
   const serviceEnv = path.resolve(options.serviceEnv ?? path.join(workspaceRoot, "config", `brain-${options.workspace}.env`));
+  const codexChatEnv = path.resolve(options.codexChatEnv ?? path.join(workspaceRoot, "config", "codex-chat.env"));
   const secretsEnv = path.resolve(options.secretsEnv ?? path.join(workspaceRoot, "secrets", "secrets.env"));
-  const script = renderTelegramTokenStorageScript({ workspaceRoot, tokenFile, adapterConfig, serviceEnv, secretsEnv });
+  const script = renderTelegramTokenStorageScript({ workspaceRoot, tokenFile, adapterConfig, serviceEnv, codexChatEnv, secretsEnv });
 
   await mkdir(scriptDir, { recursive: true, mode: 0o700 });
   await chmod(scriptDir, 0o700).catch(() => undefined);
@@ -2879,6 +5391,7 @@ async function setupTelegramTokenScriptCommand(options: SetupTelegramTokenScript
         tokenFile,
         adapterConfig,
         serviceEnv,
+        codexChatEnv,
         secretsEnv,
       },
       validation: "bash -n passed",
@@ -2888,7 +5401,68 @@ async function setupTelegramTokenScriptCommand(options: SetupTelegramTokenScript
   };
 }
 
-async function setupCodexAuthScriptCommand(options: SetupTelegramTokenScriptOptions): Promise<CliResult> {
+async function setupComposioApiKeyScriptCommand(options: SetupSecretScriptOptions): Promise<CliResult> {
+  const workspaceRoot = path.resolve(options.path ?? defaultWorkspaceRoot(options.workspace));
+  const defaultScriptParent = path.join(workspaceRoot, "tmp");
+  if (!options.output) {
+    await mkdir(defaultScriptParent, { recursive: true, mode: 0o700 });
+    await chmod(defaultScriptParent, 0o700).catch(() => undefined);
+  }
+  const scriptDir = options.output ? path.dirname(path.resolve(options.output)) : await mkdtemp(path.join(defaultScriptParent, "brain-composio-key-"));
+  const scriptPath = path.resolve(options.output ?? path.join(scriptDir, "store-brain-composio-api-key.sh"));
+  const workspaceEnv = path.resolve(options.composioEnv ?? path.join(workspaceRoot, ".env"));
+  const script = renderComposioApiKeyStorageScript({ workspaceRoot, workspaceEnv });
+  const sshRunCommand = remoteOneUseScriptSshCommand({
+    scriptPath,
+    sshHost: options.sshHost,
+    sshUser: options.sshUser,
+    serviceUser: options.serviceUser,
+    label: "brain-composio-key",
+  });
+
+  await mkdir(scriptDir, { recursive: true, mode: 0o700 });
+  await chmod(scriptDir, 0o700).catch(() => undefined);
+  await writeFile(scriptPath, script, { mode: 0o700 });
+  await chmod(scriptPath, 0o700);
+  const syntax = spawnSync("bash", ["-n", scriptPath], { encoding: "utf8" });
+  if ((syntax.status ?? 0) !== 0) {
+    return {
+      ok: false,
+      summary: "Composio API key script was written but failed bash syntax validation",
+      details: {
+        scriptPath,
+        stderr: redactSecrets(String(syntax.stderr ?? "")),
+        sideEffects: "wrote script only; no API key value read or stored",
+        secretValuesPrinted: false,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    summary: "Composio API key storage script written and syntax checked",
+    details: {
+      scriptPath,
+      runCommand: `bash ${shellArg(scriptPath)}`,
+      sshRunCommand,
+      workspaceRoot,
+      writes: {
+        workspaceEnv,
+        envKey: "COMPOSIO_API_KEY",
+      },
+      validation: "bash -n passed",
+      sideEffects: "wrote one-use private temporary script only; no API key value read or stored",
+      secretValuesPrinted: false,
+      nextCommands: {
+        verifyMetadata: `pnpm run brainctl composio status --workspace ${shellArg(options.workspace)} --config ${shellArg(path.join(workspaceRoot, "config", "runtime.yaml"))}`,
+        generateGoogleCalendarOauth: `pnpm run brainctl workspace run --path ${shellArg(workspaceRoot)} composio-connect.js -- --generate --app google_calendar --user-id <tim-email-or-label>`,
+        generateGmailOauth: `pnpm run brainctl workspace run --path ${shellArg(workspaceRoot)} composio-connect.js -- --generate --app gmail --user-id <tim-email-or-label>`,
+      },
+    },
+  };
+}
+
+async function setupCodexAuthScriptCommand(options: SetupSecretScriptOptions): Promise<CliResult> {
   const workspaceRoot = path.resolve(options.path ?? defaultWorkspaceRoot(options.workspace));
   const repoRoot = path.resolve(options.repo ?? process.cwd());
   const configPath = path.resolve(options.config ?? path.join(workspaceRoot, "config", "runtime.yaml"));
@@ -2988,7 +5562,18 @@ function remoteCodexLoginSshCommand(input: { sshHost?: string; sshUser?: string;
   return `ssh -t ${shellArg(destination)} ${shellArg(remoteCommand)}`;
 }
 
-function renderTelegramTokenStorageScript(input: { workspaceRoot: string; tokenFile: string; adapterConfig: string; serviceEnv: string; secretsEnv: string }): string {
+function remoteOneUseScriptSshCommand(input: { scriptPath: string; sshHost?: string; sshUser?: string; serviceUser?: string; label: string }): string | undefined {
+  if (!input.sshHost) return undefined;
+  const destination = remoteSshDestination(input.sshHost, input.sshUser);
+  const sameUser = !input.serviceUser || !input.sshUser || input.serviceUser === input.sshUser;
+  const serviceUser = input.serviceUser ?? input.sshUser ?? "";
+  const remoteCommand = sameUser
+    ? `bash ${shellArg(input.scriptPath)}`
+    : `home=$(getent passwd ${shellArg(serviceUser)} | cut -d: -f6) && tmp=$(mktemp "$home/${input.label}.XXXXXX.sh") && install -o ${shellArg(serviceUser)} -g ${shellArg(serviceUser)} -m 700 ${shellArg(input.scriptPath)} "$tmp"; rc=$?; if [ "$rc" -eq 0 ]; then sudo -iu ${shellArg(serviceUser)} bash "$tmp"; rc=$?; fi; rm -f "$tmp"; exit "$rc"`;
+  return `ssh -t ${shellArg(destination)} ${shellArg(remoteCommand)}`;
+}
+
+function renderTelegramTokenStorageScript(input: { workspaceRoot: string; tokenFile: string; adapterConfig: string; serviceEnv: string; codexChatEnv?: string; secretsEnv: string }): string {
   return `#!/usr/bin/env bash
 set -euo pipefail
 umask 077
@@ -2998,6 +5583,7 @@ workspace=${shellLiteral(input.workspaceRoot)}
 token_file=${shellLiteral(input.tokenFile)}
 adapter_config=${shellLiteral(input.adapterConfig)}
 service_env=${shellLiteral(input.serviceEnv)}
+codex_chat_env=${shellLiteral(input.codexChatEnv ?? "")}
 secrets_env=${shellLiteral(input.secretsEnv)}
 
 restore_tty() {
@@ -3039,7 +5625,8 @@ cat > "$adapter_config" <<JSON
   "tokenRef": "file:$token_file",
   "pollingState": "$workspace/state/telegram-offset.json",
   "pairingState": "$workspace/state/telegram-pairing",
-  "adminBootstrap": "first-user"
+  "adminBootstrap": "first-user",
+  "maxAdminPairs": 2
 }
 JSON
 chmod 600 "$adapter_config"
@@ -3067,9 +5654,85 @@ update_env_file "$service_env" TELEGRAM_MAIN_CONFIG "$adapter_config"
 update_env_file "$service_env" TELEGRAM_BOT_TOKEN_FILE "$token_file"
 update_env_file "$secrets_env" TELEGRAM_MAIN_CONFIG "$adapter_config"
 update_env_file "$secrets_env" TELEGRAM_BOT_TOKEN_FILE "$token_file"
+if [ -n "$codex_chat_env" ]; then
+  update_env_file "$codex_chat_env" TELEGRAM_BOT_TOKEN "$token"
+fi
 
 unset token
-printf "Stored Telegram token in private Brain secret files. Token value was not printed.\\n" >&2
+printf "Stored Telegram token in private service secret/env files. Token value was not printed.\\n" >&2
+`;
+}
+
+function renderComposioApiKeyStorageScript(input: { workspaceRoot: string; workspaceEnv: string }): string {
+  return `#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+script_path="\${BASH_SOURCE[0]:-$0}"
+workspace=${shellLiteral(input.workspaceRoot)}
+workspace_env=${shellLiteral(input.workspaceEnv)}
+
+restore_tty() {
+  if [ -t 0 ]; then stty echo 2>/dev/null || true; fi
+}
+
+cleanup() {
+  status="$?"
+  restore_tty
+  if [ "$status" -eq 0 ]; then rm -f -- "$script_path"; fi
+}
+trap cleanup EXIT
+
+mkdir -p "$workspace" "$workspace/tmp" "$(dirname "$workspace_env")"
+chmod 700 "$workspace" "$workspace/tmp"
+
+printf "Composio API key: " >&2
+if [ -t 0 ]; then stty -echo; fi
+IFS= read -r api_key
+restore_tty
+printf "\\n" >&2
+
+if [ -z "$api_key" ]; then
+  printf "No API key entered; nothing was written.\\n" >&2
+  exit 1
+fi
+if ! printf "%s" "$api_key" | grep -Eq "^[^[:space:]]{12,}$"; then
+  printf "API key format was not accepted; nothing was written.\\n" >&2
+  exit 1
+fi
+
+dotenv_quote() {
+  printf "'"
+  printf "%s" "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+update_env_file() {
+  file="$1"
+  key="$2"
+  value="$3"
+  mkdir -p "$(dirname "$file")"
+  tmp="$(mktemp "$file.tmp.XXXXXX")"
+  if [ -f "$file" ]; then
+    while IFS= read -r line; do
+      case "$line" in
+        "$key="*|"export $key="*) ;;
+        *) printf "%s\\n" "$line" ;;
+      esac
+    done < "$file" > "$tmp"
+  fi
+  printf "%s=%s\\n" "$key" "$value" >> "$tmp"
+  install -m 600 "$tmp" "$file"
+  rm -f "$tmp"
+}
+
+quoted_key="$(dotenv_quote "$api_key")"
+update_env_file "$workspace_env" COMPOSIO_API_KEY "$quoted_key"
+chmod 600 "$workspace_env"
+
+unset api_key quoted_key
+printf "Stored Composio API key in the private assistant workspace .env. Key value was not printed.\\n" >&2
+printf "Next: run metadata-only Composio status, then use assistant-agent-logic OAuth helpers if needed.\\n" >&2
 `;
 }
 
@@ -3105,7 +5768,7 @@ HELP
     cat >&2 <<'HELP'
 
 Run this exact command from your local terminal to start Codex device auth on
-the server as the same user that will run Brain:
+the server as the same user that will run codex-chat:
 HELP
     printf "  %s\\n" "$ssh_device_login_command" >&2
     if [ -n "$ssh_interactive_login_command" ]; then
@@ -3118,7 +5781,7 @@ HELP
   else
     cat >&2 <<HELP
 
-Run one of these on the target host as the same user that will run Brain:
+Run one of these on the target host as the same user that will run codex-chat:
   $local_device_login_command
   $local_interactive_login_command
 HELP
@@ -3211,10 +5874,10 @@ async function setupInspectDetails(options: SetupInspectOptions) {
   const repo = await gitMetadata(repoRoot);
   const backup = setupBackupStatus(workspace, workspaceRoot);
   const webPublishing = setupWebPublishingStatus(workspace);
-  const composio = await setupComposioStatus(workspace);
+  const composio = await setupComposioStatus(workspace, {}, { workspaceId: options.workspace, workspaceRoot, envSources });
   const transcription = setupTranscriptionStatus(workspace);
   const assistantWorkspace = await assistantWorkspaceParityStatus({ workspaceRoot, workspaceId: options.workspace });
-  const serviceName = options.serviceName ?? `brain-${options.workspace}`;
+  const serviceName = normalizeSystemdServiceName(options.serviceName ?? "codex-chat.service");
   const service = setupServiceStatus(serviceName, workspaceRoot);
   const plan = buildSetupPlan({
     config,
@@ -3296,6 +5959,8 @@ async function readLocalSetupContext(repoRoot: string, workspace: string): Promi
         updatedAt: parsed.updatedAt,
         sshHost: parsed.sshHost,
         sshUser: parsed.sshUser,
+        serviceUser: parsed.serviceUser,
+        bootstrapSshUser: parsed.bootstrapSshUser,
         repoPath: parsed.repoPath,
         configPath: parsed.configPath,
         secretValuesStored: false,
@@ -3422,6 +6087,7 @@ function buildSetupResumeProbe(
       progressPath,
       sshHost: context.sshHost ?? "<ssh-host>",
       sshUser: context.sshUser,
+      bootstrapSshUser: context.bootstrapSshUser,
       command: sshDestination ? `ssh ${shellArg(sshDestination)} ${shellArg(remoteStatusCommand)}` : `ssh <ssh-host> ${shellArg(remoteStatusCommand)}`,
       note: "Prior setup context points at a remote workspace. Ask only for permission or a missing SSH host, then run this remote metadata check before restarting the setup wizard.",
     };
@@ -3471,25 +6137,11 @@ function buildSetupPlan(input: {
     else missing_required.push(`workspace ${dir}/ missing`);
   }
 
-  if (input.assistantWorkspace.assistantRepoMetadata.present && input.assistantWorkspace.scripts.every((script) => script.present)) {
-    configured.push("assistant-logic native and vendored commands available for full workspace parity");
+  if (input.assistantWorkspace.ready) {
+    configured.push("legacy/lab Brain assistant workspace scaffold present (not production authority)");
   } else {
-    missing_required.push("assistant-logic package/native/vendored commands missing for workspace parity");
+    missing_optional.push("legacy/lab Brain assistant workspace scaffold absent; production uses assistant-agent-logic plus assistant-agent-data/workspace");
   }
-
-  for (const store of input.assistantWorkspace.stateStores) {
-    if (store.present && store.valid) configured.push(`assistant JSON store ready: ${store.key}`);
-    else missing_required.push(`assistant JSON store missing or invalid: ${store.relativePath}`);
-  }
-
-  if (input.assistantWorkspace.instructions.ready) configured.push("workspace instruction/skill overlays scaffolded");
-  else missing_required.push("workspace instruction/skill overlay scaffold missing");
-
-  if (input.assistantWorkspace.tasks.ready) configured.push("workspace tasks scaffolded");
-  else missing_required.push("workspace tasks scaffold missing");
-
-  if (input.assistantWorkspace.fileSave.ready) configured.push("file-save private document metadata scaffolded");
-  else missing_required.push("file-save private document metadata scaffold missing");
 
   if (input.assistantWorkspace.repoRegistry.ready) configured.push("selected repo-registry state path scaffolded");
   else missing_optional.push("selected repo-registry state path not scaffolded");
@@ -3510,8 +6162,8 @@ function buildSetupPlan(input: {
   if (!input.webPublishing.enabled) missing_optional.push("web publishing not configured/enabled");
   else configured.push("web publishing config present");
 
-  if (!input.composio.enabled) missing_optional.push("Composio Google Calendar/chat not configured/enabled");
-  else configured.push("Composio integration config present");
+  if (input.composio.ready) configured.push("Composio Gmail/Google Calendar data sources ready by metadata");
+  else missing_optional.push(`Composio Gmail/Google Calendar setup incomplete: ${input.composio.nextDataSourceFlow.missing.join(", ") || "not enabled"}`);
 
   if (!input.transcription.enabled) missing_optional.push("voice/audio transcription not configured/enabled");
   else if (!input.transcription.apiKeyRefPresent) missing_required.push("OpenAI transcription API key ref missing");
@@ -3539,19 +6191,21 @@ function setupResumeWizard(details: {
   setupState?: Awaited<ReturnType<typeof readSetupProgress>>;
 }) {
   const workspaceReady = details.workspaceDirectory.present && WORKSPACE_DIRS.every((dir) => details.directories[dir]?.present);
-  const personalWorkspaceReady = Boolean(details.assistantWorkspace?.ready)
+  const privateWorkspaceReady = workspaceReady;
+  const legacyLabWorkspaceReady = Boolean(details.assistantWorkspace?.ready)
     && ["projects", "notes", "documents", path.join("documents", "metadata")].every((dir) => details.directories[dir]?.present);
   const runtimeConfigReady = details.config.present && details.config.valid && details.provider !== "missing" && details.primaryEntrypointId !== "missing";
   const telegramEntrypoint = details.entrypoints.find((entrypoint) => entrypoint.kind === "telegram" && entrypoint.enabled);
   const telegramSecretRefPresent = Boolean(telegramEntrypoint?.configRefPresent && details.secretRefs.some((ref) => ref.source === "entrypoint.configRef" && ref.present === true));
   const backupConfigured = Boolean(details.backup && details.backup.strategy !== "none");
-  const composioConnected = Boolean(details.composio?.enabled && details.composio.missing.length === 0);
+  const composioReady = Boolean(details.composio?.ready);
   const state = details.setupState?.state;
   const codexAuthUser = state?.statuses.codexAuth.runAsUser;
   const codexAuthVerifiedByState = codexAuthMatchesServiceUser(state?.statuses.codexAuth, details.serviceUser);
   const serviceActiveForWorkspace = details.service?.active === true && details.service.workspaceMatched !== false;
   const serviceStarted = serviceActiveForWorkspace || state?.statuses.service.started === true;
   const serviceInstalled = details.service?.installed === true || state?.statuses.service.installed === true || serviceStarted;
+  const baseRuntimeReadyForDataSources = privateWorkspaceReady && backupConfigured && telegramSecretRefPresent && runtimeConfigReady && codexAuthVerifiedByState && serviceStarted;
   const steps = [
     {
       step: "telegram-connection",
@@ -3565,12 +6219,13 @@ function setupResumeWizard(details: {
     },
     {
       step: "personal-workspace",
-      title: "Create personal workspace memory.",
-      complete: personalWorkspaceReady,
-      evidence: personalWorkspaceReady
-        ? [`Assistant JSON stores, instruction overlays, task metadata, file-save metadata, and markdown resource directories exist under ${details.workspaceRoot}.`]
-        : ["Assistant JSON stores, instruction overlays, task metadata, file-save metadata, repo-registry state path, or markdown resource directories are missing; create them before the first live provider turn."],
-      resumePrompt: "Create the private JSON-backed assistant workspace scaffold, then ask whether the user wants to initialize a private Git backup for workspace state.",
+      title: "Validate private assistant-data/workspace root.",
+      complete: privateWorkspaceReady,
+      evidence: privateWorkspaceReady
+        ? [`Generic private workspace directories exist under ${details.workspaceRoot}; assistant-agent-data/domain state remains separate from Brain source.`]
+        : ["Generic private workspace directories are missing; create them before configuring codex-chat state/artifacts."],
+      legacyLabWorkspace: { present: legacyLabWorkspaceReady, authority: "lab-only; not production domain source" },
+      resumePrompt: "Validate the assistant-agent-data/private workspace path and initialize or pull private data only through the stack data gate or explicit user approval.",
     },
     {
       step: "private-data-repo",
@@ -3583,14 +6238,21 @@ function setupResumeWizard(details: {
     },
     {
       step: "composio-accounts",
-      title: "Connect Composio accounts.",
-      complete: composioConnected || details.composio?.enabled === false,
-      evidence: composioConnected
-        ? ["Composio API and connected-account refs are present by metadata only."]
-        : details.composio?.enabled === false
-          ? ["Composio is disabled for this workspace; skip unless the user wants calendar/chat data sources."]
-          : [`Composio refs missing: ${details.composio?.missing.join(", ") || "account metadata"}.`],
-      resumePrompt: "Connect Composio only if this workspace needs Google Calendar or chat data-source access.",
+      title: "Connect Gmail and Google Calendar through Composio.",
+      complete: composioReady || (!baseRuntimeReadyForDataSources && details.composio?.enabled === false),
+      evidence: composioReady
+        ? ["Composio API key plus Gmail and Google Calendar connected-account metadata are present by metadata only; values were not printed."]
+        : baseRuntimeReadyForDataSources
+          ? [`Base workspace/service are ready; next data-source inputs needed: ${details.composio?.nextDataSourceFlow.missing.join(", ") || "Composio account metadata"}.`]
+          : details.composio?.enabled === false
+            ? ["Composio is disabled for this workspace; skip until the base Telegram/Codex service is ready or the user asks for Gmail/Calendar."]
+            : [`Composio refs missing: ${details.composio?.missing.join(", ") || "account metadata"}.`],
+      actions: [
+        details.composio?.nextDataSourceFlow.commands.generateApiKeyHelper ?? "Generate the Composio API key helper with brainctl setup composio-api-key-script.",
+        details.composio?.nextDataSourceFlow.commands.generateGoogleCalendarOauth ?? "Generate a Google Calendar OAuth link with composio-connect.js.",
+        details.composio?.nextDataSourceFlow.commands.generateGmailOauth ?? "Generate a Gmail OAuth link with composio-connect.js.",
+      ],
+      resumePrompt: "Prompt Tim for only the Composio API key via the one-use helper, then use Composio OAuth links for Google Calendar and Gmail connected accounts.",
     },
     {
       step: "essential-runtime-choices",
@@ -3625,33 +6287,46 @@ function setupResumeWizard(details: {
               : "Codex is selected; credential/session verification needs an explicit private check as the service user and is not inferred from repo files."]
           : [`Selected provider is ${String(details.provider)}; verify provider auth before service start.`],
       actions: [
-        "Generate a guarded helper on the target host with: pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root> --service-user <brain-service-user>",
-        "Run the returned command as the same OS user that will run Brain; for systemd this is usually the non-root service user.",
+        "Generate a guarded helper on the target host with: pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root> --service-user <codex-chat-service-user>",
+        "Run the returned command as the same OS user that will run codex-chat; for systemd this is usually the non-root service user.",
         "If login is missing, the helper prints `codex login --device-auth` / `codex login` instructions and exits without marking auth verified.",
       ],
       resumePrompt: "If you already verified Codex auth in the previous session, confirm or recheck it and continue to service install/start.",
     },
     {
       step: "install-start-service",
-      title: "Install and start the Brain service.",
+      title: "Install and start the codex-chat service.",
       complete: serviceStarted,
       evidence: serviceStarted
-        ? [`Service ${details.service?.serviceName ?? "Brain"} is active by systemd metadata.`]
+        ? [`Service ${details.service?.serviceName ?? "codex-chat"} is active by systemd metadata.`]
         : serviceInstalled
-          ? [`Service ${details.service?.serviceName ?? "Brain"} is installed but not active; start it after Codex auth and token metadata are verified.`]
-        : ["Service installation/start is never assumed by setup status; verify Codex auth first, then review the systemd plan and require explicit confirmation."],
+          ? [`Service ${details.service?.serviceName ?? "codex-chat"} is installed but not active; start it after Codex auth and token metadata are verified.`]
+        : ["codex-chat service installation/start is never assumed by setup status; verify Codex auth first, then review the stack/systemd plan and require explicit confirmation."],
       resumePrompt: "If the service is already installed and running, confirm with health/status output before accepting Telegram traffic.",
+    },
+    {
+      step: "openai-transcription",
+      title: "Optional: confirm OpenAI voice/audio transcription.",
+      complete: Boolean(details.transcription?.enabled && details.transcription?.apiKeyRefPresent),
+      evidence: [
+        details.transcription?.enabled ? "OpenAI transcription is configured." : "OpenAI transcription is disabled until the user opts in.",
+        details.transcription?.apiKeyRefPresent ? "OpenAI transcription API key ref is present; value remains private." : "OpenAI transcription API key ref is missing or not selected.",
+      ],
+      actions: [
+        "Ask whether voice/audio transcription should be enabled for Telegram.",
+        "If enabled, store OPENAI_API_KEY only in the private codex-chat service env/secret store and verify redacted metadata before restarting codex-chat.",
+      ],
+      resumePrompt: "Ask the user to opt in or out of OpenAI transcription; do not silently enable it without a private key ref.",
     },
     {
       step: "optional-follow-ups",
       title: "Optional follow-ups.",
       complete: false,
       evidence: [
-        details.transcription?.enabled ? "OpenAI transcription is configured." : "OpenAI transcription can be enabled after the base Telegram flow works.",
         details.webPublishing?.enabled ? "Web publishing is configured." : "Web publishing can be configured after the service path is stable.",
-        "First-user pairing happens after the service starts with the Telegram token; raw user/chat IDs stay private.",
+        "First-user pairing happens after the service starts with the Telegram token; up to two raw user/chat pairs stay private and pairing closes after the cap.",
       ],
-      resumePrompt: "Handle first-user pairing, OpenAI transcription, web publishing, or backup tuning only when requested or when the base setup is ready.",
+      resumePrompt: "Handle first-user pairing, web publishing, or backup tuning only when requested or when the base setup is ready.",
     },
   ];
   const completedSteps = steps.filter((step) => step.complete).map((step) => ({ step: step.step, title: step.title, evidence: step.evidence }));
@@ -3685,22 +6360,23 @@ function setupServiceStatus(serviceName: string, workspaceRoot?: string): {
   workspaceMatched?: boolean;
 } {
   const runSystemctl = (args: string[]) => spawnSync("systemctl", args, { encoding: "utf8" });
-  const show = runSystemctl(["show", `${serviceName}.service`, "--property=LoadState", "--value"]);
+  const unitName = normalizeSystemdServiceName(serviceName);
+  const show = runSystemctl(["show", unitName, "--property=LoadState", "--value"]);
   if (show.error || (show.status ?? 1) !== 0) {
-    return { serviceName, inspected: false, installed: false, enabled: false, active: false, source: "systemctl-unavailable" };
+    return { serviceName: unitName, inspected: false, installed: false, enabled: false, active: false, source: "systemctl-unavailable" };
   }
   const loadState = String(show.stdout ?? "").trim();
-  const execStart = runSystemctl(["show", `${serviceName}.service`, "--property=ExecStart", "--value"]);
+  const execStart = runSystemctl(["show", unitName, "--property=ExecStart", "--value"]);
   const execStartText = (execStart.status ?? 1) === 0 ? String(execStart.stdout ?? "").trim() : "";
   const workspaceMatched = workspaceRoot && execStartText.includes(workspaceRoot)
     ? true
     : workspaceRoot && /(?:^|\s)(?:ExecStart=|\{|\w+=|\/)/.test(execStartText)
       ? false
       : undefined;
-  const enabled = runSystemctl(["is-enabled", `${serviceName}.service`]);
-  const active = runSystemctl(["is-active", `${serviceName}.service`]);
+  const enabled = runSystemctl(["is-enabled", unitName]);
+  const active = runSystemctl(["is-active", unitName]);
   return {
-    serviceName,
+    serviceName: unitName,
     inspected: true,
     installed: loadState === "loaded",
     enabled: (enabled.status ?? 1) === 0,
@@ -3708,6 +6384,10 @@ function setupServiceStatus(serviceName: string, workspaceRoot?: string): {
     source: "systemctl",
     workspaceMatched,
   };
+}
+
+function normalizeSystemdServiceName(serviceName: string): string {
+  return serviceName.endsWith(".service") ? serviceName : `${serviceName}.service`;
 }
 
 interface SetupProgressState {
@@ -3834,6 +6514,122 @@ async function updateSetupProgressFromLiveValidation(
   await writeFile(progressPath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
   await chmod(progressPath, 0o600);
   return { present: true, path: progressPath, metadata: await fileMetadata(progressPath), state: redactSetupProgress(state), wrote: true };
+}
+
+async function reconcileDeploymentLedgerAfterValidation(
+  config: BrainConfig,
+  options: { workspace: string },
+  results: SafeValidationResult[],
+  setupStateUpdate: Awaited<ReturnType<typeof updateSetupProgressFromLiveValidation>> | undefined,
+): Promise<Record<string, unknown>> {
+  const workspace = config.workspaces[options.workspace];
+  const workspaceRoot = path.resolve(workspace?.workspacePath ?? defaultWorkspaceRoot(options.workspace));
+  const ledgerPath = deploymentMetadataPath(workspaceRoot);
+  const metadata = await fileMetadata(ledgerPath);
+  if (!metadata.present) {
+    return { inspected: true, path: ledgerPath, present: false, wrote: false, skipped: "deployment ledger missing", secretValuesPrinted: false };
+  }
+
+  const resultOk = (id: string) => results.find((result) => result.id === id)?.ok === true;
+  const state = setupStateUpdate?.state;
+  const service = setupServiceStatus(`brain-${options.workspace}`, workspaceRoot);
+  const configHealthy = resultOk("config");
+  const secretsHealthy = resultOk("secrets");
+  const runtimeHealthy = resultOk("runtime-smoke");
+  const authHealthy = state?.statuses.codexAuth.status === "verified" || resultOk("codex-provider");
+  const telegramHealthy = state?.statuses.telegramToken.configured === true || telegramTokenPresent(results.find((result) => result.id === "telegram-entrypoint"));
+  const serviceHealthy = service.active === true && service.workspaceMatched !== false;
+  const blockersCleared = configHealthy && secretsHealthy && runtimeHealthy && authHealthy && telegramHealthy && serviceHealthy;
+
+  let store: Record<string, unknown>;
+  try {
+    store = JSON.parse(await readFile(ledgerPath, "utf8")) as Record<string, unknown>;
+  } catch (error) {
+    return { inspected: true, path: ledgerPath, present: true, wrote: false, error: `could not parse deployment ledger: ${errorMessage(error)}`, secretValuesPrinted: false };
+  }
+
+  const deployments = Array.isArray(store.deployments) ? store.deployments.filter(isRecord) : [];
+  const stale = deployments.filter(deploymentHasAuthSecretBlocker);
+  if (stale.length === 0) {
+    return { inspected: true, path: ledgerPath, present: true, wrote: false, staleBlockersFound: 0, blockersCleared, service, secretValuesPrinted: false };
+  }
+  if (!blockersCleared) {
+    return {
+      inspected: true,
+      path: ledgerPath,
+      present: true,
+      wrote: false,
+      staleBlockersFound: stale.length,
+      skipped: "current config/secrets/auth/telegram/service health has not cleared the stale blocker",
+      health: { configHealthy, secretsHealthy, runtimeHealthy, authHealthy, telegramHealthy, serviceHealthy },
+      service,
+      secretValuesPrinted: false,
+    };
+  }
+
+  const now = new Date().toISOString();
+  const updatedIds: string[] = [];
+  for (const deployment of stale) {
+    const id = asString(deployment.id);
+    if (id) updatedIds.push(id);
+    deployment.status = "healthy";
+    deployment.updatedAt = now;
+    deployment.secretValuesStored = false;
+    deployment.health = {
+      ...(asRecord(deployment.health) ?? {}),
+      status: "passed",
+      reconciledAt: now,
+      source: "brainctl validate live",
+    };
+    removeAuthSecretBlockerFields(deployment);
+  }
+  store.version = DEPLOYMENT_METADATA_VERSION;
+  store.kind = DEPLOYMENT_METADATA_KIND;
+  store.updatedAt = now;
+  store.secretValuesStored = false;
+  store.deployments = deployments;
+  await writeFile(ledgerPath, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+  await chmod(ledgerPath, 0o600);
+  return {
+    inspected: true,
+    path: ledgerPath,
+    present: true,
+    wrote: true,
+    staleBlockersFound: stale.length,
+    updatedDeployments: updatedIds,
+    removedBlocker: "blocked_on_user_auth_or_secret",
+    status: "healthy",
+    service,
+    metadata: await fileMetadata(ledgerPath),
+    secretValuesPrinted: false,
+  };
+}
+
+function deploymentHasAuthSecretBlocker(deployment: Record<string, unknown>): boolean {
+  const needle = "blocked_on_user_auth_or_secret";
+  const values = [
+    deployment.status,
+    deployment.blocker,
+    deployment.blockedReason,
+    deployment.blockerReason,
+    deployment.reason,
+    deployment.nextAction,
+    deployment.nextRecommendedStep,
+    ...(Array.isArray(deployment.blockers) ? deployment.blockers : []),
+  ];
+  return values.some((value) => typeof value === "string" && value.includes(needle));
+}
+
+function removeAuthSecretBlockerFields(deployment: Record<string, unknown>): void {
+  const needle = "blocked_on_user_auth_or_secret";
+  for (const key of ["blocker", "blockedReason", "blockerReason", "reason", "nextAction", "nextRecommendedStep"]) {
+    if (typeof deployment[key] === "string" && deployment[key].includes(needle)) delete deployment[key];
+  }
+  if (Array.isArray(deployment.blockers)) {
+    const remaining = deployment.blockers.filter((value) => !(typeof value === "string" && value.includes(needle)));
+    if (remaining.length > 0) deployment.blockers = remaining;
+    else delete deployment.blockers;
+  }
 }
 
 function telegramTokenPresent(result: SafeValidationResult | undefined): boolean {
@@ -3965,7 +6761,11 @@ async function configuredCodexContext(options: { config?: string; workspace: str
   if (!workspace) {
       return { ok: false, result: { ok: false, summary: `workspace not found: ${options.workspace}`, details: { available: Object.keys(loaded.config.workspaces) } } };
   }
-  return { ok: true, transcriptionApiKeyRef: workspace.transcription?.apiKeyRef, cwd: options.cwd ?? workspace.workspacePath ?? process.cwd(), tmpDir: path.join(workspace.workspacePath, "tmp") };
+  return { ok: true, transcriptionApiKeyRef: workspace.transcription?.apiKeyRef, cwd: providerCwdForWorkspace(workspace, options.cwd), tmpDir: path.join(workspace.workspacePath, "tmp") };
+}
+
+function providerCwdForWorkspace(workspace: WorkspaceConfig, override?: string): string {
+  return path.resolve(override ?? workspace.runtimeContext?.controlPlaneRoot ?? workspace.workspacePath ?? process.cwd());
 }
 
 async function providerCheckCommand(providerId: string, options: { config?: string; workspace: string; transport?: string; binary?: string; cwd?: string; appServerUrl?: string; timeoutMs?: number }): Promise<CliResult> {
@@ -4085,9 +6885,10 @@ async function entrypointCheckCommand(entrypointId: string, options: { workspace
 
 async function telegramPairingStateMetadata(stateDir: string): Promise<Record<string, unknown>> {
   const store = new FileTelegramPairingStore(stateDir);
-  const [users, chats, code] = await Promise.all([store.listUsers(), store.listChats(), store.readPairingCode()]);
+  const [users, chats, identities, code] = await Promise.all([store.listUsers(), store.listChats(), store.listIdentities(), store.readPairingCode()]);
   return {
     stateDir,
+    adminPairs: identities.filter((identity) => identity.isAdmin !== false).length,
     users: users.length,
     chats: chats.length,
     codePresent: Boolean(code),
@@ -4316,6 +7117,10 @@ function collectConfigRefs(config: BrainConfig): ConfigRef[] {
     if (calendar?.connectedAccountRef) refs.push({ workspaceId, ref: calendar.connectedAccountRef, source: "integrations.composio.dataSources.googleCalendar.connectedAccountRef" });
     if (calendar?.metadataRef) refs.push({ workspaceId, ref: calendar.metadataRef, source: "integrations.composio.dataSources.googleCalendar.metadataRef", optional: true });
     for (const ref of calendar?.requiredEnvRefs ?? []) refs.push({ workspaceId, ref: asSecretRef(ref), source: "integrations.composio.dataSources.googleCalendar.requiredEnvRefs" });
+    const gmail = composio?.dataSources?.gmail;
+    if (gmail?.connectedAccountRef) refs.push({ workspaceId, ref: gmail.connectedAccountRef, source: "integrations.composio.dataSources.gmail.connectedAccountRef" });
+    if (gmail?.metadataRef) refs.push({ workspaceId, ref: gmail.metadataRef, source: "integrations.composio.dataSources.gmail.metadataRef", optional: true });
+    for (const ref of gmail?.requiredEnvRefs ?? []) refs.push({ workspaceId, ref: asSecretRef(ref), source: "integrations.composio.dataSources.gmail.requiredEnvRefs" });
     const chat = composio?.dataSources?.chat;
     if (chat?.connectedAccountRef) refs.push({ workspaceId, ref: chat.connectedAccountRef, source: "integrations.composio.dataSources.chat.connectedAccountRef" });
     if (chat?.metadataRef) refs.push({ workspaceId, ref: chat.metadataRef, source: "integrations.composio.dataSources.chat.metadataRef", optional: true });
@@ -4336,6 +7141,7 @@ async function workspaceEnvSources(config: BrainConfig, override?: { workspaceId
   await Promise.all(Object.entries(config.workspaces).map(async ([workspaceId, workspace]) => {
     const workspaceRoot = path.resolve(override?.workspaceId === workspaceId ? override.workspaceRoot : workspace.workspacePath ?? defaultWorkspaceRoot(workspaceId));
     const candidates = [
+      path.join(workspaceRoot, ".env"),
       path.join(workspaceRoot, "config", `brain-${workspaceId}.env`),
       path.join(workspaceRoot, "secrets", "secrets.env"),
     ];

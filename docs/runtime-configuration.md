@@ -1,6 +1,12 @@
 # Runtime configuration
 
-Status: schemas and validation exist in `@brain/workspace-schema`; `brainctl doctor` also runs a temporary runtime-core store/subagent lifecycle self-test. `brainctl run` and `brainctl start --foreground` resolve the provider and primary entrypoint from runtime config by default. Use `--fake` or explicit `--provider fake --entrypoint fake` for test/dev smoke, and use explicit Telegram polling/token flags for live polling.
+Status: schemas and validation exist in `@brain/workspace-schema`; `brainctl
+doctor` also runs a temporary runtime-core store/subagent lifecycle self-test.
+`brainctl run` and `brainctl start --foreground` are lab-only compatibility
+surfaces that resolve the provider and primary entrypoint from runtime config by
+default. Use them with `--fake` or explicit fake provider/entrypoint for
+test/dev smoke only. Production live polling belongs to the real
+`codex-chat.service` deployment.
 
 Brain runtime configuration must make active entrypoints explicit so prompt packs and provider adapters do not accidentally depend on Telegram-specific behavior.
 
@@ -46,6 +52,14 @@ workspaces:
     promptContext:
       includeActiveEntrypointMetadata: true
       exposeChannelSecrets: false
+    runtimeContext:
+      controlPlaneRoot: /home/brain/brain
+      codexChatRoot: /home/brain/pkg/tim/codex-chat
+      assistantLogicRoot: /home/brain/pkg/tim/assistant-agent-logic
+      assistantDataRoot: /home/brain/.brain/workspace
+      repoRegistryPath: /home/brain/.brain/workspace/.claude/repo-registry/index.yaml
+      setupContextPath: /home/brain/brain/private/setup-context.json
+      assistantPackRoot: /home/brain/brain/assistant-packs/core
     backup:
       strategy: private-git # none | local-snapshot | private-git
       privateGit:
@@ -53,7 +67,7 @@ workspaces:
         remote: git@github.com:example/private-brain-backup.git
         branch: main
         include: [config/**, state/**, projects/**, notes/**, documents/metadata/**, artifacts/metadata/**]
-        exclude: [secrets/**, logs/**, tmp/**, cache/**, caches/**, "**/.cache/**", "**/node_modules/**", "**/*.log"]
+        exclude: [.env, ".env.*", "*.env", "*.env.*", config/*.env, config/*.env.*, secrets/**, logs/**, tmp/**, cache/**, caches/**, state/setup-progress.json, state/telegram-offset.json, state/telegram-pairing/**, state/jobs/**, state/events/**, private/documents/files/**, artifacts/**, "!artifacts/metadata/**", "**/.cache/**", "**/node_modules/**", "**/*.log"]
     webPublishing:
       enabled: false
       mode: disabled # disabled | domain | ip
@@ -81,9 +95,9 @@ workspaces:
             enabled: false
             connectedAccountRef: file:/home/brain/.brain/workspace/config/google-calendar-connected-account.json
             requiredEnvRefs: [env:COMPOSIO_API_KEY]
-          chat:
+          gmail:
             enabled: false
-            connectedAccountRef: file:/home/brain/.brain/workspace/config/chat-connected-account.json
+            connectedAccountRef: file:/home/brain/.brain/workspace/config/gmail-connected-account.json
             requiredEnvRefs: [env:COMPOSIO_API_KEY]
 ```
 
@@ -161,13 +175,19 @@ connectedAccountRef = "file:/home/brain/.brain/workspace/config/composio-connect
 These sections are optional and are reported by `brainctl setup inspect/status`
 as missing optional pieces when absent or disabled:
 
+- `runtimeContext`: explicit roots passed into provider turns so Codex can load
+  Brain AGENTS, assistant-pack prompt fragments, `codex-chat` behavior context,
+  `assistant-agent-logic` skill docs, and assistant-data/repo-registry state
+  without inferring them from the private workspace cwd. When roots are omitted,
+  Brain can resolve local paths from `repoRegistryPath` and `setupContextPath`
+  metadata if those files are present.
 - `backup`: `none`, `local-snapshot`, or `private-git`. `private-git` records a
   private repo path/remote/branch plus include/exclude policy. Safe defaults
   exclude secrets, logs, tmp, caches, `node_modules`, and `*.log`.
 - `webPublishing`: domain or direct-IP publishing metadata. `domain` mode needs
   operator-managed DNS; `ip` mode does not. Brain records base URL, publish
   root, manifest path, and Caddy/reverse-proxy notes but never changes DNS.
-- `integrations.composio`: optional Composio refs for Google Calendar and chat
+- `integrations.composio`: optional Composio refs for Gmail and Google Calendar
   data sources. Store real API keys and connected-account metadata in env/file
   refs outside git; status commands print only metadata.
 - `transcription`: optional voice/audio attachment transcription. The initial
@@ -239,10 +259,13 @@ Current `codex-chat` behavior should migrate as a single-primary workspace confi
   (for example under workspace `state/telegram-offset.json`). Do not build a
   separate durable turn replay or idempotency store.
 - Telegram first-user pairing is the default adapter-owned bootstrap: when no
-  explicit allowlist or paired identity exists, the first Telegram user/chat to
-  message the bot is persisted as paired/admin state under the configured
-  private state directory. Explicit allowlists and optional one-time
-  `/pair <code>` remain advanced paths. Checks and docs report only
+  explicit allowlist exists and fewer than the configured maximum admin pairs
+  are present, a distinct Telegram user/chat pair that messages the bot is
+  persisted as paired/admin state under the configured private state directory.
+  The default maximum is two exact user/chat pairs; set the max to one for a
+  deployment that should remain single-admin after the first pair. Pairing is
+  not pending after the maximum is reached. Explicit allowlists and optional
+  one-time `/pair <code>` remain advanced paths. Checks and docs report only
   presence/count metadata, not raw IDs or code values.
 - Telegram ingress sends an immediate best-effort `👀` reaction for authorized
   user-originated messages before attachment download/transcription or provider
@@ -253,3 +276,9 @@ Current `codex-chat` behavior should migrate as a single-primary workspace confi
 - Telegram attachment download is explicit runtime configuration. Downloaded files belong under private workspace artifacts/state, and voice/audio transcription can be configured through workspace `transcription` (OpenAI) or through the CLI command seam for private deployments. Brain stores successful transcript text on the inbound event/attachment metadata but does not copy transcription tokens or private prompts into the repo. For codex-chat parity at the Telegram edge, disabled/unavailable voice transcription replies `Voice transcription is not enabled.` and does not enter the provider queue, disabled audio remains an attachment-only event, and configured voice/audio transcription errors are suppressed before provider dispatch.
 - Loop and monitor definitions are validated in-process. The default runtime/CLI behavior does not install crontabs, filesystem watchers, or shell monitors; explicit future operator commands should be required for host-level scheduling.
 - Do not enable web or iOS in the migrated workspace until multi-entrypoint routing, identity, permissions, notifications, and conflict handling have explicit config and tests.
+
+## OpenRouter subagent settings
+
+Brain admin exposes an **OpenRouter** section for the local codex-chat target. The form writes `OPENROUTER_API_KEY` to the codex-chat env file as a write-only secret, writes non-secret subagent defaults/allowlists to codex-chat env/config, and creates a user-level `$CODEX_HOME/openrouter.config.toml` Codex profile that references `env_key = "OPENROUTER_API_KEY"`.
+
+After writing settings, use **Deploy / Restart** in Brain: run a fresh plan, then explicitly restart `codex-chat.service`. Then ask codex-chat to dispatch a test subagent with `codexProfile="openrouter"`, `modelProvider="openrouter"`, the chosen OpenRouter model slug, and `serviceTierMode="omit"`.

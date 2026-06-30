@@ -28,6 +28,14 @@ workspaces:
     promptContext:
       includeActiveEntrypointMetadata: true
       exposeChannelSecrets: false
+    runtimeContext:
+      controlPlaneRoot: /home/brain/brain
+      codexChatRoot: /home/brain/pkg/tim/codex-chat
+      assistantLogicRoot: /home/brain/pkg/tim/assistant-agent-logic
+      assistantDataRoot: /home/brain/.brain/workspace
+      repoRegistryPath: /home/brain/.brain/workspace/.claude/repo-registry/index.yaml
+      setupContextPath: /home/brain/brain/private/setup-context.json
+      assistantPackRoot: /home/brain/brain/assistant-packs/core
     backup:
       strategy: private-git
       privateGit:
@@ -52,13 +60,25 @@ workspaces:
           - .claude/repo-registry/repos/**/guidance.json
           - .claude/repo-registry/repos/**/notes.md
         exclude:
+          - .env
+          - .env.*
+          - "*.env"
+          - "*.env.*"
+          - config/*.env
+          - config/*.env.*
           - secrets/**
           - logs/**
           - tmp/**
           - cache/**
           - caches/**
           - state/setup-progress.json
+          - state/telegram-offset.json
+          - state/telegram-pairing/**
+          - state/jobs/**
+          - state/events/**
           - private/documents/files/**
+          - artifacts/**
+          - "!artifacts/metadata/**"
           - .claude/repo-registry/runtime/node_modules/**
           - .claude/repo-registry/runtime/dist/**
           - .claude/repo-registry/runtime/.turbo/**
@@ -96,8 +116,8 @@ workspaces:
             connectedAccountRef: file:/home/brain/.brain/workspace/config/google-calendar-connected-account.json
             requiredEnvRefs:
               - env:COMPOSIO_API_KEY
-          chat:
+          gmail:
             enabled: false
-            connectedAccountRef: file:/home/brain/.brain/workspace/config/chat-connected-account.json
+            connectedAccountRef: file:/home/brain/.brain/workspace/config/gmail-connected-account.json
             requiredEnvRefs:
               - env:COMPOSIO_API_KEY

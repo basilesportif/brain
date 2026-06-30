@@ -27,8 +27,9 @@ Current implementation includes:
   turn replay/idempotency store;
 - polling and a small webhook HTTP server skeleton that do not require a real token in tests;
 - private admin allowlist filtering by Telegram user/chat id;
-- first-user bootstrap that persists the first Telegram user/chat as paired
-  admin state when no explicit allowlist exists;
+- first-user bootstrap that persists up to two distinct Telegram user/chat
+  pairs as exact paired admin state when no explicit allowlist exists, with a
+  configurable cap for single-admin deployments;
 - optional advanced one-time `/pair <code>` bootstrap state for paired user/chat
   identities before allowlist filtering;
 - immediate best-effort `👀` receipt reactions for authorized user-originated
@@ -48,9 +49,29 @@ Current implementation includes:
   `codex-chat` handler failures;
 - outbound mapping for replies, edits, photo/document/voice/audio/video
   artifacts, status actions, reactions, and delete-after-send cleanup for staged
-  local artifacts.
+  local artifacts;
+- plain-text Telegram replies by default. The adapter intentionally does not
+  enable Telegram's brittle legacy Markdown parser for default or `markdown`
+  text actions; rich formatting must opt into `markdownv2` with correctly
+  escaped text.
 
 It is suitable for runtime smoke tests and mapping checks. Live polling/webhook startup is still intentionally a skeleton: no process manager, reverse proxy, token file, or deployment side effects are installed by this package.
+
+## Pairing state schema
+
+`FileTelegramPairingStore` writes private state under the configured
+`state/telegram-pairing` directory:
+
+- `telegram_admins.json`: versioned exact admin pairs,
+  `{ "version": 1, "admins": [{ "userId": "...", "chatId": "...", "isAdmin": true, "pairedAt": "..." }] }`.
+- `telegram_users.json` and `telegram_chats.json`: legacy mirror files kept for
+  single-admin deployments and metadata checks. When `telegram_admins.json` is
+  absent, Brain synthesizes one exact pair from the first legacy user/chat entry
+  so existing single-admin state remains valid.
+- `pairing_code.txt`: optional one-time `/pair <code>` state; it is removed
+  after successful pairing and when the configured admin-pair cap is reached.
+
+Checks report only counts and code presence, never raw IDs or code values.
 
 ## Voice/audio transcription parity with codex-chat
 
@@ -75,8 +96,8 @@ as closely as possible without leaking Telegram concepts into runtime-core:
 
 The adapter still exposes `transcriptionFailureMode: "generic-metadata"` for
 experiments that need Brain events carrying transcription error metadata, but
-that is not the codex-chat parity mode used by `brainctl` Telegram runtime
-wiring.
+that is not the lab-only codex-chat compatibility mode used by Brain adapter
+tests.
 
 ## Bootstrap minimum
 
@@ -86,22 +107,26 @@ The setup flow should make Telegram usable enough for future configuration work:
    message `@BotFather`, send `/newbot`, choose a display name, choose a unique
    username ending in `bot`, and store the returned token only through a
    one-use private temporary script that prompts with hidden input and writes to
-   Brain's private `secrets.env` or configured secret-store reference. Never
+   the private `codex-chat` service env file or configured secret-store reference. Never
    commit, print, echo, log, paste into chat, or leave the token in shell
    history.
 2. Configure `telegram-main` as the only enabled entrypoint in `single-primary` mode.
-3. Pair the initial admin with default first-user pairing: after the bot token is
-   configured, the first Telegram user/chat to message the bot is stored as
-   paired/admin state. Explicit private allowlists and optional one-time
-   `/pair <code>` are advanced alternatives. Paired identities and any temporary
-   code live under private adapter state; checks report only counts/presence,
-   not raw IDs or code values.
+3. Pair admins with default first-user pairing: after the bot token is
+   configured, up to two distinct Telegram user/chat pairs that message the bot
+   are stored as exact paired/admin state. Pairing is no longer pending once
+   the configured maximum is reached; set `maxAdminPairs: 1` or pass
+   `--telegram-max-admin-pairs 1` when deliberately keeping a single-admin
+   deployment. Explicit private allowlists and optional one-time `/pair <code>`
+   are advanced alternatives. Paired identities and any temporary code live
+   under private adapter state; checks report only counts/presence, not raw IDs
+   or code values.
 4. Prefer polling for first bootstrap because it only requires outbound HTTPS.
 5. Leave webhook URL, reverse proxy, TLS, generated pages, and additional integrations disabled unless the user explicitly enables them.
 6. After admin pairing, allow future integration setup commands to be received through Telegram.
 
 If the bot token is leaked, rotate it immediately in `@BotFather` with
-`/revoke`, update the private Brain secret, restart Brain, and re-run
-metadata-only checks. Check output must stay redacted.
+`/revoke`, update the private service secret/env reference, restart the owning
+runtime service (`codex-chat.service` for production), and re-run metadata-only
+checks. Check output must stay redacted.
 
 Composio and other optional integration tokens are not required for this bootstrap.

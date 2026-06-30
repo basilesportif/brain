@@ -1,6 +1,16 @@
 # brainctl
 
-`brainctl` is the operator CLI for Brain. It remains validation-first and safe by default: it prepares private workspace directories, checks config/assistant-pack hygiene, resolves supervisor provider/entrypoint defaults from runtime config, keeps explicit fake/no-network smoke flags for tests, and renders deployment plans without installing services, contacting Telegram, deploying, or writing secrets unless explicit live flags are supplied.
+`brainctl` is the operator CLI for Brain. Its control-plane commands are the
+current source of truth for stack setup/deploy planning: resolve
+`codex-chat`, `assistant-agent-logic`, and `assistant-agent-data` from the repo
+registry, preserve repo boundaries, and render no-network plans without
+installing services, contacting hosts, or printing secrets. The older Brain
+runtime/provider commands remain validation/lab surfaces.
+
+Brain's supervisor is not the production assistant. Do not install
+`brainctl run`, `brainctl start --foreground`, or `brain-personal.service` as
+the live Telegram assistant. Production deployment uses `stack` commands to
+configure and run `codex-chat.service`.
 
 Setup output should be direct-action first. When a setup step requires the user
 to do something, print the exact copy-paste command or the exact UI message to
@@ -33,6 +43,10 @@ pnpm run brainctl setup reset --workspace personal --path ~/.brain/workspace --y
 pnpm run brainctl doctor --config examples/config/runtime.yaml --pack assistant-packs/core
 pnpm run brainctl config validate examples/config/runtime.yaml
 pnpm run brainctl secrets check --config examples/config/runtime.yaml
+pnpm run brainctl stack status --workspace personal
+pnpm run brainctl stack plan --workspace personal
+pnpm run brainctl stack apply --workspace personal
+pnpm run brainctl stack apply --workspace personal --executor mock --approve --approve-data --approve-config --approve-service --approve-health --metadata-file /tmp/brain-deployments.json
 pnpm run brainctl backup plan --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl backup init --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl backup init --config examples/config/runtime.yaml --workspace personal --apply
@@ -94,13 +108,19 @@ pnpm run brainctl setup inspect --config ~/.brain/workspace/config/runtime.yaml 
 ```
 
 `setup defaults` is intentionally concise: by default it shows only the setup
-mode, remote SSH host/user when `--target remote` is selected, source checkout,
+mode, remote SSH host, initial SSH user, future SSH user, source checkout,
 private workspace, initial workspace name, and the core setup flow. For remote
 setup, ask for an SSH IP/DNS host and SSH login username; if no username is
-given, default the SSH login to `root` for bootstrap. Pass `--verbose` only
-when you need derived config/secrets/log paths, service-user details, or
-copyable commands. In remote mode it also writes the ignored local
-`private/setup-context.json` resume pointer unless `--dry-run` is used.
+given, default the initial login to `root` for one-time bootstrap, but persist
+future setup/auth/deploy commands as the non-root service user (default
+`brain`). Pass `--verbose` only when you need derived config/secrets/log paths,
+service-user details, or copyable commands. In remote mode it also writes the
+ignored local `private/setup-context.json` resume pointer unless `--dry-run` is
+used. Use `pnpm run brainctl setup remote-bootstrap --ssh-host <host>
+--ssh-user root --service-user brain` to idempotently create/validate the
+service user, sudo access, authorized keys, `/home/brain/brain`, and
+`/home/brain/.brain/workspace`, then rewrite the local resume context and any
+explicit `--ssh-config/--ssh-alias` entry to `brain@host`.
 
 The normal core setup flow is:
 
@@ -112,7 +132,7 @@ The normal core setup flow is:
 3. Connect Telegram with exact BotFather messages or the generated token helper
    command; do not start polling/webhooks yet.
 4. Pull or initialize the private data/backup repo.
-5. Connect Composio accounts only if this workspace needs calendar/chat data
+5. Connect Composio accounts only if this workspace needs Gmail/Calendar data
    sources.
 6. Show exact operations/systemd command(s) for review/install/start, then wait
    for explicit confirmation before privileged changes.
@@ -130,6 +150,88 @@ The setup status response groups findings into:
 Destructive replacement is never implicit; commands that support replacement
 require explicit `--force` or `--replace` and still print the planned target.
 Secret refs are checked only by env/file existence, mode, and byte size.
+
+## Control-plane servant stack
+
+`stack status`, `stack plan`, and `stack apply` are the control-plane commands
+for the production architecture where Brain manages the `codex-chat` servant
+runtime stack instead of replacing it:
+
+```bash
+pnpm run brainctl stack status --workspace personal
+pnpm run brainctl stack plan --workspace personal
+pnpm run brainctl stack apply --workspace personal
+pnpm run brainctl stack status --registry /path/to/index.yaml --setup-context /path/to/setup-context.json
+```
+
+The status command resolves repo-registry entries for `codex-chat`,
+`assistant-agent-logic` (or the legacy `assistant-claude` alias), and
+`assistant-agent-data`; it also resolves deploy host, SSH identity, service
+name, env/config paths, env-var names, health-check commands, and the canonical
+deployment metadata ledger from `codex-chat` app metadata and local setup
+context. Secret checks are represented only as metadata plans such as `stat` or
+quiet env-key checks; values are always redacted.
+
+Deployment metadata is canonical on the Brain/control-plane host, under:
+
+```text
+<brain-workspace-root>/state/control-plane/deployments.json
+```
+
+For the current remote Brain workspace that is:
+
+```text
+/home/brain/.brain/workspace/state/control-plane/deployments.json
+```
+
+The schema is `kind: brain.control-plane.deployments`, `version: 1`, with a
+`deployments[]` list keyed by IDs such as `personal:production:codex-chat`.
+Records include servant stack status, repo paths/remotes, approved executor
+metadata, config/env placeholders, health status, and `secretValuesStored:
+false`. Repo-registry and local notes are secondary pointers, not deployment
+status authority.
+
+The plan command renders, but does not run, the first servant-stack flow:
+clone/update `codex-chat`, clone/update `assistant-agent-logic`, install
+dependencies for both checkouts using the matching lockfile/package manager
+(`pnpm install --frozen-lockfile` for `codex-chat`; `npm ci` when
+`assistant-agent-logic` has `package-lock.json`), verify
+`assistant-agent-logic` Composio workflow modules load, prompt/validate
+`assistant-agent-data`/workspace, render `codex-chat` config/env, install/start
+the `codex-chat` service, record deployment metadata, and run health checks. It
+blocks boundary violations such as nesting `assistant-agent-logic` under
+`codex-chat`.
+
+`stack apply` must not reuse stale checkouts. With `--approve` and a real
+executor it fetches or clones the configured branch/ref for `codex-chat` and
+`assistant-agent-logic`, verifies the resulting `git rev-parse HEAD`, and
+records both requested refs and resolved SHAs in the deployment ledger. It then
+installs `assistant-agent-logic` dependencies before Composio/Gmail/Calendar
+scripts are considered ready, so a checkout with `package-lock.json` gets
+`npm ci` rather than assuming `pnpm`. Exact pinning can be represented by a
+configured ref, but the default behavior is to refresh the configured branch
+before service config/build/restart.
+
+For deployments where the service host needs its own live
+`assistant-agent-logic` checkout, the `codex-chat` environment may include an
+`assistant_logic` block with `host`, `path`, `branch`/`ref`, and `remote_url`.
+Brain uses that live checkout in the rendered `codex-chat` config and in the
+SHA-recorded git update action; it must not point the service at Brain's
+in-repo legacy snapshot.
+
+`stack apply` is dry-run unless explicitly approved. Approval gates are:
+
+- `--approve`: git/build/metadata execution gate.
+- `--approve-data`: assistant-agent-data clone/init/validation gate.
+- `--approve-config`: config/env template write gate; secret values remain
+  placeholders only.
+- `--approve-service`: systemd install/enable/start gate.
+- `--approve-health`: live/read-only health check gate.
+
+Executors are `dry-run`, `mock`, `local`, and `ssh`. Use `mock` with
+`--metadata-file` for tests/rehearsals. Use `ssh` only after reviewing the
+rendered action list; it runs approved commands via the resolved SSH identity and
+redacts stdout/stderr before output.
 
 Setup is resumable across Codex sessions. `brainctl setup` writes a
 metadata-only private progress file at
@@ -165,8 +267,10 @@ include/exclude rules; the template excludes `secrets/**`, `logs/**`, `tmp/**`,
 caches, `node_modules`, and `*.log` by default. `backup status` summarizes Git
 presence, remotes, branch, and status counts without printing private filenames.
 
-The default include policy now covers the Brain assistant-logic JSON workspace
-state:
+The default include policy covers non-secret private workspace state. In
+production that state belongs to assistant-agent-data/workspace and is consumed
+by codex-chat plus the separate assistant-agent-logic checkout; Brain's in-repo
+JSON stores are lab compatibility only:
 
 - `data/**` for todos, projects, CRM, reminders, and related JSON stores;
 - `instructions/**` for skill/prompt overlays;
@@ -180,9 +284,15 @@ Bulky/private document bytes under `private/documents/files/**`, secrets, logs,
 tmp/cache paths, setup progress metadata, and repo-registry runtime caches are
 excluded by default.
 
-## Assistant workspace parity
+## Lab assistant workspace parity
 
-Brain carries native todo/project/CRM/reminder/file-save JSON stores and the vendored assistant-agent-logic live integration scripts in the in-repo `packages/assistant-logic` package. Setup creates a compatible workspace and `brainctl workspace run` executes those integrated commands with:
+Brain still carries lab todo/project/CRM/reminder/file-save JSON stores and
+compatibility scripts in the in-repo `packages/assistant-logic` package. These
+commands are useful for tests and future experiments, but the control-plane
+servant stack treats the separate `assistant-agent-logic` repo and
+`assistant-agent-data` workspace as production sources of truth. Setup must not
+vendor or merge those repos into Brain. `brainctl workspace run` executes the
+lab integrated commands with:
 
 ```bash
 ASSISTANT_WORKSPACE=<workspace>
@@ -210,7 +320,10 @@ pnpm run brainctl workspace run --path ~/.brain/workspace whoop-profile.js
 pnpm run brainctl workspace run --path ~/.brain/workspace telegram-unread.js
 ```
 
-No external `assistant-agent-logic` checkout is required. The legacy `--assistant-repo` flag is accepted only as a deprecated no-op. The wrapper prefers native compiled `dist/cli/*.js` commands for core stores and falls back to vendored `packages/assistant-logic/scripts/*` for live integrations.
+The legacy `--assistant-repo` flag is accepted only as a deprecated no-op for
+the lab command wrapper. For stack setup/deploy, use `brainctl stack status` and
+`brainctl stack plan` to resolve the external `assistant-agent-logic` checkout
+from the repo registry instead.
 
 `workspace scaffold` writes empty stores and example templates only. Copy/fill `.env.example`, `composio.yaml.example`, `messaging.yaml.example`, `telegram.yaml.example`, and `protonmail.yaml.example` inside the private workspace; never commit filled credentials, OAuth tokens, Telegram sessions, ProtonMail Bridge passwords, finance tokens, WHOOP tokens, live API output, or private logs.
 
@@ -224,12 +337,30 @@ DNS is reported as not needed; if it is a domain, DNS records are listed as
 operator work only.
 
 `composio setup/status` is optional and generic. It checks refs for Composio API
-key metadata, connected-account metadata, Google Calendar, and chat data-source
+key metadata, connected-account metadata, Google Calendar, and Gmail data-source
 config without using real credentials or printing values.
 
-## Supervisor commands added for parity smoke
+For Composio API-key entry, use the reusable setup helper instead of pasting a
+key into chat or a shell command:
 
-`brainctl start` and `brainctl run` now expose the long-running supervisor shape without making live side effects the default:
+```bash
+pnpm run brainctl setup composio-api-key-script --workspace personal --path ~/.brain/workspace
+bash <returned-store-brain-composio-api-key.sh>
+pnpm run brainctl composio status --config ~/.brain/workspace/config/runtime.yaml --workspace personal
+```
+
+Then create short-lived OAuth links through the vendored assistant-logic command:
+
+```bash
+pnpm run brainctl workspace run --path ~/.brain/workspace composio-connect.js -- --generate --app google_calendar --user-id <label>
+pnpm run brainctl workspace run --path ~/.brain/workspace composio-connect.js -- --generate --app gmail --user-id <label>
+```
+
+## Lab supervisor commands for parity smoke
+
+`brainctl start` and `brainctl run` expose the deprecated/lab Brain supervisor
+shape without making live side effects the default. They are for fake smoke
+tests and runtime package development only, not production setup targets:
 
 ```bash
 # Prints the resolved start plan only; no providers, Telegram, deployment, or services start.
@@ -248,7 +379,7 @@ pnpm run brainctl health --config examples/config/runtime.yaml --workspace perso
 pnpm run brainctl logs --file ~/.brain/workspace/logs/runtime.jsonl --lines 100
 ```
 
-`start` defaults to a dry-run plan. Use `start --foreground` or `run` to enter the foreground supervisor. Provider and entrypoint default to the selected workspace's runtime config; pass `--fake` or explicit `--provider fake --entrypoint fake` for CI/fresh-checkout smoke. Explicit live Telegram polling requires `--entrypoint telegram --telegram-polling` plus `--telegram-token-env` or `--telegram-token-file`; polling offsets remain Telegram-native state only. Telegram bootstrap uses first-user pairing by default and stores paired identity state under the private state root; pass `--telegram-pairing` only for the optional advanced `/pair` code flow. Attachment download is opt-in with `--telegram-downloads`/`--telegram-download-dir`; voice/audio transcription can come from workspace `transcription.provider: openai` with an `apiKeyRef` such as `env:OPENAI_API_KEY`, or from the private `--telegram-transcription-command` seam. Brainctl wires the Telegram adapter in codex-chat parity mode: disabled/unavailable voice transcription replies `Voice transcription is not enabled.` and is not sent to the provider, disabled audio stays an attachment event, and configured voice/audio transcription errors are dropped before provider dispatch. No transcription provider keys belong in the repo.
+`start` defaults to a dry-run plan. Use fake/no-network invocations only for CI/fresh-checkout smoke. The former live Telegram polling path is disabled: `brainctl run --telegram-polling` exits with a boundary error, and production Telegram traffic must go through `codex-chat.service`. Telegram token, pairing, download, and transcription metadata remain private runtime/env refs carried by the codex-chat deployment, not Brain prompt behavior. No transcription provider keys belong in the repo.
 
 The supervisor intercepts service commands before provider turns when configured: `help`, `health`, `logs`/`introspect`, `agents`, `agent status`, `agent kill`, `agent steer`, `agent backend`, `employees`, `employee status/start/stop/steer`, and `update`/`deploy`. Backend mutation and deploy/update remain safe seams only. Employee commands update durable lifecycle records; pass `--employee-runtime` when running the supervisor to back Employee start/steer/stop with the selected provider session.
 
@@ -296,14 +427,14 @@ chat, shell history, command output, or logs.
 When the wizard reaches Codex auth, generate a target-host verification helper:
 
 ```bash
-pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root> --ssh-host <host> --ssh-user <ssh-login-user> --service-user <brain-service-user>
+pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root> --ssh-host <host> --ssh-user <ssh-login-user> --service-user <codex-chat-service-user>
 ```
 
 For remote setup, give the user the returned
 `ssh -t ... 'sudo -iu brain bash .../verify-brain-codex-auth.sh'` command when
 the SSH login user differs from the service user. For local setup, run the
 returned `bash .../verify-brain-codex-auth.sh` command as the same user that
-will run Brain. A root Codex login is not enough for a `User=brain` systemd
+will run codex-chat. A root Codex login is not enough for a `User=brain` systemd
 service. The helper checks `codex login status`. If auth is missing during
 remote setup, the helper itself prints the exact SSH command to run from the
 operator's terminal, such as
@@ -353,7 +484,7 @@ future provider/service health checks can be skipped.
 - `automation run`, `automation due`, and `automation monitor` evaluate loops/monitor events without installing crontabs/watchers. They dry-run by default; `--dispatch` uses a local static subagent lifecycle plus file spool/locks for fake execution smoke.
 - `web` commands validate/publish/prune generated static page packages through the publisher boundary; publish/prune support `--dry-run`.
 - `web setup/status` checks domain vs direct-IP publishing fields and Caddy/reverse-proxy notes without changing DNS.
-- `composio setup/status` checks optional Google Calendar/chat refs through Composio without real credentials.
+- `composio setup/status` checks optional Gmail/Google Calendar refs through Composio without real credentials.
 - `doctor` combines the checks above with toolchain and private-boundary placeholder checks.
 
 The CLI is the place setup, health, runtime, migration, and publisher commands should attach instead of making entrypoint or provider packages own operator workflows.

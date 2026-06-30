@@ -1,15 +1,15 @@
 ---
 name: setup-self-host
-description: Guided Brain setup skill for local or remote self-host bootstrap with Codex-first provider setup, Claude Code placeholder support, and Telegram first entrypoint.
+description: Guided Brain control-plane setup skill for local or remote codex-chat self-host bootstrap with Codex provider setup and Telegram first entrypoint.
 ---
 
 # setup-self-host
 
 Use this skill when a user opens the Brain repo root with Codex or Claude Code
 and asks to install, set up, self-host, or "make this work". The current repo has
-runtime, provider, Telegram entrypoint, `brainctl`, and operations planning
-seams, so this skill guides private workspace creation, local/remote
-preparation, config/secrets placeholders, validations, and a stop-before-live
+control-plane, stack planning, and lab compatibility seams, so this skill
+guides private workspace creation, local/remote preparation, config/secrets
+placeholders, validations, and a stop-before-live `codex-chat.service`
 deployment handoff.
 
 ## Safety rules
@@ -40,6 +40,13 @@ deployment handoff.
   when no existing progress/context was found.
 - Ask before editing local `~/.ssh/config`, contacting a real host, writing a
   secret, creating a systemd unit, or starting/enabling a service.
+- Production service setup must target `codex-chat.service`, not
+  `brain-personal.service`, `brainctl run`, or the Brain lab Telegram runtime.
+  Stop/disable any legacy Brain polling service before enabling codex-chat to
+  avoid double polling.
+- Resolve repo authority from repo-registry metadata and refresh the real
+  `codex-chat` and `assistant-agent-logic` checkouts during deployment/update.
+  Verify and record the resolved SHAs; do not reuse stale embedded copies.
 - Keep real workspace contents, credentials, Telegram IDs, hostnames, logs,
   generated artifacts, and repo-registry data outside git.
 - Do not require Composio or any optional integration for initial bootstrap.
@@ -79,7 +86,7 @@ deployment handoff.
   `pnpm run brainctl setup telegram-token-script --path <workspace>` and run the
   returned command. Do not hand-write that shell script in chat.
 - For Codex auth verification, generate the helper with
-  `pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root> --ssh-host <host> --ssh-user <ssh-login-user> --service-user <brain-service-user>`.
+  `pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root> --ssh-host <host> --ssh-user <ssh-login-user> --service-user <codex-chat-service-user>`.
   Show the exact returned `sshRunCommand` as a copy-paste command, for example
   `ssh -t root@host 'sudo -iu brain bash /tmp/verify-brain-codex-auth.sh'`, so
   the user can enter any device-auth flow in their terminal. Verify auth as the
@@ -98,25 +105,18 @@ deployment handoff.
   `<workspace>/config/brain-<workspace>.env` and
   `<workspace>/secrets/secrets.env`. Do not mark a step incomplete just because
   the current ad hoc shell or SSH command has not sourced those env vars.
-- The initial private workspace scaffold must include the Brain assistant-logic
-  JSON state model: `data/todos.json`, `data/projects.json`, `data/crm.json`,
-  `data/reminders.json`, `private/documents/metadata.jsonl`,
-  `instructions/**`, `tasks/**`, and selected `.claude/repo-registry/` state.
-  `projects/`, `notes/`, `documents/`, and `documents/metadata/` remain
-  supporting markdown/resource paths only; do not migrate current markdown notes
-  or convert JSON state to markdown. Before the first live provider turn, make
-  sure Codex is launched from the private
-  workspace path with `TMPDIR=<workspace>/tmp`, `approval_policy=never`, and
-  self-host service sandbox mode `danger-full-access`. Telegram cannot service
-  interactive approval prompts, and server sandboxes can fail before shell
-  commands start; isolate Brain with the dedicated service user and private
-  workspace path instead. Todos/projects/CRM/reminders and file-save questions
-  should be answered by using Brain's native assistant-logic CLI commands through
-  `brainctl workspace run` with `ASSISTANT_WORKSPACE=<path>` and private roots set,
-  not from active entrypoint metadata or markdown folders alone.
-- Ensure the in-repo `packages/assistant-logic` package is present in the Brain
-  checkout. No sibling assistant-agent-logic checkout is required; validate with
-  `pnpm run brainctl workspace status --path <workspace>`.
+- The initial private workspace scaffold is generic codex-chat/assistant-data
+  state only. Brain setup must not create or treat Brain-owned
+  todos/projects/CRM/reminders stores as production authority. Before the first
+  live provider turn, make sure codex-chat config points at the real
+  `codex-chat` checkout, the separate `assistant-agent-logic` checkout, and the
+  assistant-agent-data/private workspace. Domain questions are handled by the
+  running codex-chat service using assistant-agent-logic/data, not by Brain
+  setup code.
+- Treat the in-repo `packages/assistant-logic` package as lab compatibility
+  only. Production setup requires the separate `assistant-agent-logic` checkout
+  resolved from the repo registry; validate Brain's lab workspace commands with
+  `pnpm run brainctl workspace status --path <workspace>` only as a smoke check.
 
 ## Canonical user flow
 
@@ -182,23 +182,23 @@ Then collect the path-specific fields below.
 ## Common guided questions
 
 For the first default confirmation, optimize for confidence over completeness:
-show only the setup mode, remote SSH host/user when remote mode is selected,
+show only the setup mode, remote SSH host, initial SSH user, future SSH user,
 source checkout path, private workspace path, initial workspace name, and the
-core setup flow. For a remote server, ask for the SSH IP/DNS host and SSH login
-username; default that SSH login username to `root` if omitted. Hide service
-user, systemd service name, derived config/secrets/log paths, and command lists
-unless the user asks for details or `brainctl setup defaults --verbose` is used.
+core setup flow. For a remote server, ask for the SSH IP/DNS host and initial
+SSH login username; default that initial username to `root` if omitted, but
+root must be kept only for one-time bootstrap and future commands should use
+the non-root service user. Hide service user, systemd service name, derived
+config/secrets/log paths, and command lists unless the user asks for details or
+`brainctl setup defaults --verbose` is used.
 
 1. Telegram connection? Default entrypoint is Telegram as `telegram-main`.
    Create/choose the BotFather bot, store only a private token ref, and do not
    start polling/webhooks yet.
-2. Personal workspace memory? Create the Brain assistant-logic-compatible
-   JSON workspace (`data/*.json` for todos/projects/CRM/reminders),
-   instruction overlays, task metadata, file-save metadata, selected
-   repo-registry state paths, and markdown resource folders. Ask whether the
-   user wants to initialize or connect a private Git backup so non-secret
-   workspace state can be committed privately; do not commit secrets, logs,
-   Telegram IDs, transcripts, private document bytes, or raw provider state.
+2. Private assistant-agent-data/workspace state? Validate the workspace root,
+   then pull or initialize the separate private data repo through the stack data
+   gate or an explicit user-approved backup flow. Do not create Brain-owned
+   domain stores as production authority; `brainctl workspace scaffold/run` is
+   legacy/lab compatibility only.
 3. Private data/backup repo? Pull an existing private repo or initialize one in
    the private workspace. Safe defaults exclude secrets, logs, tmp, and caches.
 4. Composio accounts? Connect Google Calendar/chat refs only if this workspace
@@ -216,11 +216,11 @@ unless the user asks for details or `brainctl setup defaults --verbose` is used.
 8. Codex auth ready? Configure or verify this before service start and before
    accepting Telegram traffic:
    - generate a target-host helper with
-     `pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root> --ssh-host <host> --ssh-user <ssh-login-user> --service-user <brain-service-user>`,
+     `pnpm run brainctl setup codex-auth-script --config <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root> --ssh-host <host> --ssh-user <ssh-login-user> --service-user <codex-chat-service-user>`,
    - for remote setup, show the exact returned `sshRunCommand` as a copy-paste
      command including user, host, and remote script path; for local setup,
      show the exact returned `runCommand`,
-   - verify the Codex session as the service user that will run Brain,
+   - verify the Codex session as the service user that will run codex-chat,
    - if it reports missing auth during remote setup, run the exact SSH login
      command printed by the helper, then rerun it,
    - confirm the selected Codex transport/auth path,
@@ -238,8 +238,11 @@ unless the user asks for details or `brainctl setup defaults --verbose` is used.
    - keep the service stopped/pending if Codex auth or private secrets are not
      ready.
 10. Optional follow-up: first-user pairing/admin bootstrap?
-   - default: first-user pairing after service start, where the first Telegram
-     user/chat to message the newly configured bot becomes paired/admin state,
+   - default: first-user pairing after service start, where up to two distinct
+     Telegram user/chat pairs that message the newly configured bot become
+     paired/admin state and pairing closes after the configured max,
+   - cap first-user pairing at one admin pair when deliberately preserving a
+     single-admin deployment,
    - user supplies an explicit admin allowlist privately,
    - optional advanced one-time `/pair <code>` flow,
    - not ready; leave pairing pending.
@@ -360,17 +363,23 @@ Use this flow only after the user chooses remote mode and confirms the host.
 1. Collect:
    - local SSH config host label,
    - server address/IP,
-   - initial SSH login username, default `root` when omitted,
+   - initial SSH login username, default `root` when omitted, and future service-user SSH identity,
    - repo clone path, default `/home/brain/brain` for the `brain` service user,
    - remote workspace path, default `/home/brain/.brain/workspace`,
    - provider and Telegram readiness.
    To display the concise grouped defaults without extra caveats, run:
    `pnpm run brainctl setup defaults --target remote --workspace <workspace-name>`.
    Use `--verbose` only when the user asks for derived paths, service-user, or
-   service-name details.
+   service-name details. If the initial login is `root`, treat it only as the
+   one-time bootstrap identity; future resume/status/auth/deploy commands must
+   use the non-root service user.
 2. Add or reuse a local `~/.ssh/config` entry so `ssh <host-label>` works. If
-   root is needed only for bootstrap, switch the alias to the service user after
-   user creation.
+   root is needed only for bootstrap, run `pnpm run brainctl setup
+   remote-bootstrap --ssh-host <host> --ssh-user root --service-user brain`
+   (plus `--ssh-config/--ssh-alias` when generating an alias) so setup
+   creates/validates the service user, sudo access, authorized keys, checkout
+   and workspace ownership, then switches the alias/context to the service
+   user.
 3. Prepare the server with the configured setup-server runbook. For Brain, adapt it as follows:
    - create/use a dedicated non-root Brain user with sudo for setup,
    - install Ubuntu base packages and Node/pnpm that satisfy this repo,
@@ -382,7 +391,10 @@ Use this flow only after the user chooses remote mode and confirms the host.
      creating a new key for initial bootstrap,
    - keep all provider and Telegram secrets out of the checkout.
 4. Verify service-user access through the local SSH config alias.
-5. Clone/update the user-confirmed Brain repository remote into the chosen repo path.
+5. Clone/update the user-confirmed Brain control-plane repository remote into
+   the chosen repo path, then resolve and clone/update the configured
+   `codex-chat` and `assistant-agent-logic` repositories from repo-registry
+   authority.
 6. Run dependency/check commands from the remote repo root, at minimum
    `pnpm run check` after any install step.
 7. Create the remote private workspace directories listed in the local flow.
@@ -390,10 +402,10 @@ Use this flow only after the user chooses remote mode and confirms the host.
    chosen provider identifier. Store real secret values only if supplied, and
    only through a private temporary script/secret store flow that keeps values
    out of shell history, chat, logs, and the checkout.
-9. Render systemd metadata with `brainctl operations systemd`; install or enable
-   a unit only after explicit confirmation. Record working directory, env file
-   path, `ExecStart`, restart policy, log command, health command, and
-   rollback/update notes.
+9. Render servant-stack metadata with `brainctl stack plan`; install or enable
+   `codex-chat.service` only after explicit confirmation. Record working
+   directory, env/config refs, `ExecStart`, requested refs, resolved SHAs,
+   restart policy, log command, health command, and rollback/update notes.
 10. Report remaining blockers before any live start in this order: Codex auth,
     reviewed service install/start, Telegram bot token, first-user pairing or
     selected admin bootstrap, webhook/firewall, and optional web preview.
@@ -416,8 +428,10 @@ The initial Telegram setup is successful when:
   must never be committed, chatted, logged, printed, echoed, or left in shell
   history.
 - Admin pairing defaults to first-user pairing with private
-  `state/telegram-pairing` persistence; an explicit private admin allowlist or
-  optional `/pair` code is used only when requested.
+  `state/telegram-pairing` persistence for up to two exact admin user/chat
+  pairs; cap it at one when deliberately preserving a single-admin deployment.
+  An explicit private admin allowlist or optional `/pair` code is used only when
+  requested.
 - The setup summary explains that future integrations can be configured through
   Telegram after admin pairing.
 - No Composio or third-party integration token is required.
@@ -430,10 +444,11 @@ Prefer polling for the first bootstrap because it needs only outbound HTTPS.
 Webhook mode, reverse proxy, TLS, firewall rules, generated pages, and web
 preview are optional follow-up setup.
 
-After Brain starts with the token, the user should send the bot its first
-Telegram message to complete first-user pairing. If the token is ever leaked,
+After `codex-chat.service` starts with the token, the intended admin chat(s) should message the
+bot to complete first-user pairing. By default up to two distinct user/chat
+pairs can pair, and pairing closes after the cap. If the token is ever leaked,
 tell the user to rotate it immediately in `@BotFather` with `/revoke`, update
-the private Brain secret, restart Brain, and verify setup checks still report
+the private service secret, restart `codex-chat`, and verify setup checks still report
 only redacted token metadata.
 
 ## Fresh remote prerequisites checklist
@@ -466,6 +481,6 @@ pnpm run brainctl entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN \
   --polling-state <workspace>/state/telegram-offset.json \
   --pairing-state <workspace>/state/telegram-pairing
 pnpm run brainctl doctor --config <workspace>/config/runtime.yaml --pack assistant-packs/core
-pnpm run brainctl operations validate --config <workspace>/config/runtime.yaml --workspace <name> --repo <checkout>
-pnpm run brainctl operations systemd --config <workspace>/config/runtime.yaml --workspace <name> --repo <checkout>
+pnpm run brainctl stack status --workspace <name>
+pnpm run brainctl stack plan --workspace <name>
 ```

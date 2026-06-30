@@ -38,8 +38,10 @@ Setup and backup inspection:
 - `brainctl backup init --apply` may write a private backup `.gitignore`
   template but does not add, commit, or push private workspace files.
 - The private workspace backup template is available at
-  `examples/private-workspace.gitignore`; it excludes `secrets/**`, `logs/**`,
-  `tmp/**`, caches, `node_modules`, private document bytes,
+  `examples/private-workspace.gitignore`; it excludes `.env`, `*.env`,
+  `config/*.env`, `secrets/**`, `logs/**`, `tmp/**`, caches, `node_modules`,
+  private document bytes, Telegram pairing/offset state, job/event state, and
+  runtime artifacts outside `artifacts/metadata/**`,
   repo-registry runtime caches, generated scratch artifacts, and `*.log` by
   default. It includes assistant JSON state, overlays, task metadata, selected
   repo-registry state, and file-save metadata by policy/config rather than

@@ -17,12 +17,14 @@ test("operations plan renders systemd/update/rollback seams without side effects
   assert.equal(plan.unitPath, "/etc/systemd/system/brain-personal.service");
   assert.ok(plan.commands.update.some((command) => command.includes("pnpm run check")));
   assert.ok(plan.commands.rollback.some((command) => command.includes("git reset --hard")));
+  assert.equal(plan.deprecatedLabOnly, true);
   assert.match(plan.safety.join("\n"), /does not install systemd/);
+  assert.match(plan.safety.join("\n"), /production uses codex-chat\.service/);
 
   const unit = renderSystemdService(plan);
-  assert.match(unit, /ExecStart=pnpm run brainctl run/);
+  assert.match(unit, /ExecStart=.*Brain lab runtime systemd service is disabled by policy/);
   assert.match(unit, /EnvironmentFile=-/);
-  assert.match(unit, /Restart=on-failure/);
+  assert.match(unit, /Restart=no/);
 
   const liveTelegramPlan = createOperationsPlan({
     workspaceId: "personal",
@@ -35,10 +37,9 @@ test("operations plan renders systemd/update/rollback seams without side effects
     entrypointKind: "telegram",
   });
   const liveTelegramUnit = renderSystemdService(liveTelegramPlan);
-  assert.match(liveTelegramUnit, /--transport exec/);
-  assert.match(liveTelegramUnit, /--telegram-polling/);
-  assert.match(liveTelegramUnit, /--telegram-token-file \/var\/lib\/brain\/secrets\/telegram-bot-token/);
-  assert.match(liveTelegramUnit, /--polling-state \/var\/lib\/brain\/state\/telegram-offset\.json/);
+  assert.match(liveTelegramPlan.runtimeCommand.join(" "), /--fake --once/);
+  assert.doesNotMatch(liveTelegramPlan.runtimeCommand.join(" "), /--telegram-polling/);
+  assert.match(liveTelegramUnit, /production uses codex-chat\.service/);
 });
 
 test("guarded live validation plan defaults to no-network checks", () => {

@@ -2,6 +2,11 @@
 
 Initial target: users run their own assistant server, one primary entrypoint, and a private workspace. SaaS can be considered later.
 
+Production self-hosting runs `codex-chat.service`. Brain is the
+deployment/control-plane coordinator; its `brainctl run/start` supervisor and
+Telegram entrypoint are lab-only and must not be installed as the live
+assistant.
+
 The setup docs and skills should be readable by Codex or Claude Code itself so a user can clone/open this repo root, say `setup`, and let the agent ask local vs remote before continuing. Agents should not ask users to `cd` into a separate setup directory.
 
 ## Supported first setup paths
@@ -14,10 +19,12 @@ The setup docs and skills should be readable by Codex or Claude Code itself so a
      smoke testing only.
 2. **Remote Ubuntu server over SSH**
    - Add or reuse a local SSH config host alias.
-   - Prepare the server with its own non-root Brain service user using the
+   - Prepare the server with its own non-root control-plane/service user using the
      Brain-owned deployment/self-hosting docs in this repository.
-   - Clone Brain, create a private workspace outside the checkout, install
-     prerequisites, and prepare service metadata.
+   - Clone Brain, resolve repo-registry authority, clone/update the real
+     `codex-chat` and `assistant-agent-logic` checkouts, create a private
+     workspace outside the checkout, install prerequisites, and prepare
+     `codex-chat.service` metadata.
    - Assume a server-side SSH key for Git/provider access already exists; if it
      does not, pause for the user to add one.
 
@@ -36,18 +43,19 @@ The setup docs and skills should be readable by Codex or Claude Code itself so a
   `pnpm run brainctl setup telegram-token-script --path <workspace>`. Run the
   returned command with a TTY so it prompts with hidden input and writes private
   token/config/env files. Never commit, print, echo, log, paste into chat, or
-  leave the token in shell history. After Brain starts, the user sends the bot
-  the first message to complete first-user pairing. If the token leaks, rotate
-  it with BotFather `/revoke`, update the private secret, and restart Brain.
-  Explicit admin
-  allowlists and optional `/pair` code bootstrap remain advanced paths.
+  leave the token in shell history. After `codex-chat.service` starts, up to two distinct
+  admin user/chat pairs can message the bot to complete first-user pairing; the
+  pairing window closes after the configured max, and single-admin deployments
+  can cap it at one. If the token leaks, rotate it with BotFather `/revoke`,
+  update the private secret, and restart `codex-chat`. Explicit admin allowlists and
+  optional `/pair` code bootstrap remain advanced paths.
   This should be enough to continue future integration setup through Telegram
   after pairing.
 - Composio and other third-party integrations are optional follow-ups, never
   required for first bootstrap.
 - Running setup again should always offer missing optional components without
   overwriting existing private config: private Git/local-snapshot backup, web
-  publishing, Google Calendar/chat via Composio, provider/entrypoint refs, and
+  publishing, Gmail/Google Calendar via Composio, provider/entrypoint refs, and
   other integrations.
 - Setup progress state is only a resume aid. If saved progress does not match
   actual workspace/remote/server state, or setup cannot identify a safe next
@@ -71,12 +79,13 @@ Agents should use root-level `AGENTS.md`, `CLAUDE.md` when running under Claude 
 - `brainctl backup plan/init/check/status` for private workspace backup setup.
 - `brainctl web setup/status` for domain vs direct-IP generated-page publishing
   checks; DNS and Caddy changes stay manual/operator-confirmed.
-- `brainctl composio setup/status` for optional Google Calendar/chat metadata
+- `brainctl composio setup/status` for optional Gmail/Google Calendar metadata
   refs via Composio without real credentials.
 - `brainctl doctor` for environment and credential-readiness checks.
 - `brainctl config validate` for runtime config validation.
 - `brainctl secrets check` for metadata-only secret presence checks.
-- `brainctl operations validate/systemd` for non-mutating deployment readiness.
+- `brainctl stack status/plan/apply` for codex-chat servant stack deployment;
+  apply refreshes configured refs and records resolved SHAs.
 
 Setup work should prepare and validate private config, then stop before live
 service installation/start unless the user explicitly confirms. Use

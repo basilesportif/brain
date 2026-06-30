@@ -1,11 +1,23 @@
 # Brain private workspace backup safety defaults
 # Keep secret-bearing, noisy, and local-cache paths out of private Git backups.
+.env
+.env.*
+!.env.example
+*.env
+*.env.*
+!*.env.example
+config/*.env
+config/*.env.*
 secrets/**
 logs/**
 tmp/**
 cache/**
 caches/**
 state/setup-progress.json
+state/telegram-offset.json
+state/telegram-pairing/**
+state/jobs/**
+state/events/**
 private/documents/files/**
 .claude/repo-registry/runtime/node_modules/**
 .claude/repo-registry/runtime/dist/**
@@ -14,6 +26,6 @@ private/documents/files/**
 **/node_modules/**
 **/*.log
 
-# Keep generated runtime scratch data local unless deliberately included.
-artifacts/tmp/**
-artifacts/generated/**
+# Keep generated/runtime scratch artifacts local unless deliberately included.
+artifacts/**
+!artifacts/metadata/**

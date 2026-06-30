@@ -135,7 +135,7 @@ export class BrainSupervisor {
     } catch (error) {
       this.lastError = errorMessage(error);
       await this.log("error", "supervisor", `Event handling failed: ${this.lastError}`, event.id);
-      const fallback = routeOutboundToOrigin(event, { type: "send_text", text: `⚠️ Brain runtime error: ${this.lastError}`, format: "markdown" });
+      const fallback = routeOutboundToOrigin(event, { type: "send_text", text: `⚠️ Brain runtime error: ${this.lastError}`, format: "text" });
       const dispatchResults = await this.dispatchActions(event, [fallback]).catch(() => []);
       this.processedEvents++;
       return { event, dispatchResults, streamingDispatchResults };
@@ -170,7 +170,9 @@ export class BrainSupervisor {
   }
 
   async run(options: BrainSupervisorRunOptions = {}): Promise<BrainSupervisorRunResult> {
-    const processed: BrainSupervisorEventResult[] = [];
+    const processed: Array<BrainSupervisorEventResult | undefined> = [];
+    const inFlight = new Set<Promise<void>>();
+    let acceptedEvents = 0;
     const abortStop = (): void => {
       void this.stop();
     };
@@ -178,12 +180,26 @@ export class BrainSupervisor {
     await this.start();
     try {
       for await (const event of this.options.entrypoint.inboundEvents()) {
-        if (this.stopping) return { processed, stoppedReason: "stopped" };
-        if (options.signal?.aborted) return { processed, stoppedReason: "aborted" };
-        processed.push(await this.handleEvent(event));
-        if (options.maxEvents !== undefined && processed.length >= options.maxEvents) return { processed, stoppedReason: "max-events" };
+        if (this.stopping) return { processed: completedEventResults(processed), stoppedReason: "stopped" };
+        if (options.signal?.aborted) return { processed: completedEventResults(processed), stoppedReason: "aborted" };
+        const index = processed.length;
+        processed.push(undefined);
+        acceptedEvents++;
+        const task = this.handleEvent(event)
+          .then((result) => {
+            processed[index] = result;
+          })
+          .finally(() => {
+            inFlight.delete(task);
+          });
+        inFlight.add(task);
+        if (options.maxEvents !== undefined && acceptedEvents >= options.maxEvents) {
+          await waitForInFlight(inFlight);
+          return { processed: completedEventResults(processed), stoppedReason: "max-events" };
+        }
       }
-      return { processed, stoppedReason: options.signal?.aborted ? "aborted" : "entrypoint-closed" };
+      await waitForInFlight(inFlight);
+      return { processed: completedEventResults(processed), stoppedReason: options.signal?.aborted ? "aborted" : "entrypoint-closed" };
     } finally {
       options.signal?.removeEventListener("abort", abortStop);
       await this.stop();
@@ -233,6 +249,16 @@ export class BrainSupervisor {
   }
 }
 
+async function waitForInFlight(inFlight: Set<Promise<void>>): Promise<void> {
+  while (inFlight.size > 0) {
+    await Promise.allSettled([...inFlight]);
+  }
+}
+
+function completedEventResults(results: Array<BrainSupervisorEventResult | undefined>): BrainSupervisorEventResult[] {
+  return results.filter((result): result is BrainSupervisorEventResult => Boolean(result));
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -243,14 +269,14 @@ function subagentDeliveryActions(job: SubagentJob, result: SubagentRunResult): B
   const artifactPath = resultArtifactPath(job, result);
   if (job.route === "send_to_admins" || job.resultTarget === "admins") {
     return [
-      { type: "send_text", text, format: "markdown", target: { route: "admins" } },
+      { type: "send_text", text, format: "text", target: { route: "admins" } },
       ...artifactActions(artifactPath, { route: "admins" }),
     ];
   }
   if (job.route === "send_to_user" || job.route === "send_progress_and_return" || job.resultTarget === "user") {
     const target = originTargetFromJob(job);
     return [
-      { type: "send_text", text, format: "markdown", target },
+      { type: "send_text", text, format: "text", target },
       ...artifactActions(artifactPath, target),
     ];
   }
@@ -261,7 +287,7 @@ function subagentFallbackAction(job: SubagentJob, result: SubagentRunResult): Br
   return {
     type: "send_text",
     text: formatSubagentResult(job, result),
-    format: "markdown",
+    format: "text",
     target: originTargetFromJob(job),
     metadata: { source: "subagent-result-fallback" },
   };

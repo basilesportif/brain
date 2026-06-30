@@ -59,6 +59,16 @@ test("accepts private workspace backup, web publishing, and optional Composio su
       publishRoot: "/srv/brain/pages",
       reverseProxy: { kind: "caddy" },
     },
+    runtimeContext: {
+      controlPlaneRoot: "/srv/brain/control-plane",
+      codexChatRoot: "/srv/src/codex-chat",
+      assistantLogicRoot: "/srv/src/assistant-agent-logic",
+      assistantDataRoot: "/srv/brain/workspace",
+      repoRegistryPath: "/srv/brain/workspace/.claude/repo-registry/index.yaml",
+      setupContextPath: "/srv/brain/control-plane/private/setup-context.json",
+      assistantPackRoot: "/srv/brain/control-plane/assistant-packs/core",
+      assistantPackPromptPath: "/srv/brain/control-plane/assistant-packs/core/prompts/runtime-boundary.md",
+    },
     integrations: {
       composio: {
         enabled: true,
@@ -70,19 +80,23 @@ test("accepts private workspace backup, web publishing, and optional Composio su
             connectedAccountRef: "file:/srv/brain/workspaces/personal/config/google-calendar-account.json",
             requiredEnvRefs: ["env:COMPOSIO_API_KEY"],
           },
-          chat: { enabled: false },
+          gmail: { enabled: false },
         },
       },
     },
   });
   const result = validateWorkspaceConfig(input);
   assert.equal(result.ok, true, JSON.stringify(result.issues));
+  assert.equal(result.config?.workspaces.personal.runtimeContext?.assistantLogicRoot, "/srv/src/assistant-agent-logic");
+  assert.equal(result.config?.workspaces.personal.runtimeContext?.assistantPackRoot, "/srv/brain/control-plane/assistant-packs/core");
   assert.equal(result.config?.workspaces.personal.backup?.privateGit?.branch, "main");
   assert.ok(result.config?.workspaces.personal.backup?.privateGit?.include.includes("data/**"));
   assert.ok(result.config?.workspaces.personal.backup?.privateGit?.include.includes("instructions/**"));
   assert.ok(result.config?.workspaces.personal.backup?.privateGit?.include.includes("tasks/**"));
   assert.ok(result.config?.workspaces.personal.backup?.privateGit?.include.includes("private/documents/metadata.jsonl"));
   assert.ok(result.config?.workspaces.personal.backup?.privateGit?.include.includes(".claude/repo-registry/index.yaml"));
+  assert.ok(result.config?.workspaces.personal.backup?.privateGit?.exclude.includes(".env"));
+  assert.ok(result.config?.workspaces.personal.backup?.privateGit?.exclude.includes("config/*.env"));
   assert.ok(result.config?.workspaces.personal.backup?.privateGit?.exclude.includes("secrets/**"));
   assert.ok(result.config?.workspaces.personal.backup?.privateGit?.exclude.includes("private/documents/files/**"));
 });

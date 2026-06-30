@@ -1,8 +1,17 @@
 # Agent guidance for `brain`
 
-This repo is a safe, reviewable assistant monorepo with runtime, provider,
-entrypoint, setup, and operations seams. Keep migration work bounded and
-inspectable.
+This repo is the safe, reviewable Brain control plane. Its production role is
+setup/orchestration for the servant runtime stack (`codex-chat` +
+`assistant-agent-logic` + `assistant-agent-data`/workspace). Brain's in-repo
+runtime/provider/entrypoint code is experimental/lab unless a task explicitly
+promotes it. Keep migration work bounded and inspectable.
+
+Brain is **not** the deployed assistant runtime. Do not install
+`brainctl run/start`, `brain-personal.service`, or any Brain Telegram polling
+path as the production assistant. Production deploy/update work must install,
+configure, and start the real `codex-chat.service` runtime, with
+`assistant-agent-logic` as the canonical assistant-domain logic repository and
+`assistant-agent-data`/workspace as private state.
 
 ## Current boundaries
 
@@ -15,14 +24,22 @@ inspectable.
 - Treat `workspace/`, `private/`, and `data/` as user-owned/private boundaries.
   Only the checked-in README files in those folders should exist unless a task
   explicitly changes the private-boundary policy.
-- Personal workspace parity uses the in-repo `packages/assistant-logic` JSON
-  stores and scripts, not a Brain-native markdown model yet. Setup/runtime guidance should
-  treat `data/todos.json`, `data/projects.json`, `data/crm.json`,
-  `data/reminders.json`, `private/documents/metadata.jsonl`,
-  `instructions/**`, `tasks/**`, and selected `.claude/repo-registry/` state as
-  the active private workspace model. Use `brainctl workspace run` from the
-  Brain checkout; do not require a sibling assistant-agent-logic checkout, port
-  stores, or migrate current markdown notes unless explicitly requested.
+- For control-plane stack work, use repo-registry metadata as the source of
+  truth for the separate `codex-chat`, `assistant-agent-logic`, and
+  `assistant-agent-data`/workspace repos. Do not vendor, subtree, copy, or merge
+  those repos into Brain. The in-repo `packages/assistant-logic` commands are
+  lab compatibility helpers only.
+- Deployment/update flows must fetch or clone the configured latest branch/ref
+  for both `codex-chat` and `assistant-agent-logic`, verify the resolved commit
+  SHA after checkout, record requested refs plus resolved SHAs in deployment
+  metadata, and use those live checkouts for `codex-chat` service config. Brain
+  must not deploy stale embedded copies.
+- Do **not** encode Tim-assistant domain workflows, prompts, skills, or intent
+  rules in Brain. Brain wraps deployment/control-plane operations for
+  `codex-chat` and `assistant-agent-logic`; domain behavior belongs in
+  `assistant-agent-logic`, while runtime/channel behavior belongs in
+  `codex-chat` or generic Brain transport/entrypoint code only when it is truly
+  provider- and domain-neutral.
 
 ## Entrypoint and provider direction
 
@@ -72,8 +89,9 @@ an exact phrase unless they must run a command verbatim.
    directory or remote Ubuntu server over SSH?
 5. For remote setup, ask before editing local `~/.ssh/config` or contacting a
    host. Use the Brain-owned deployment/self-hosting docs in this repository to
-   prepare the server with its own non-root Brain service user. Do not require a
-   separate assistant-agent-logic checkout for setup.
+   prepare the server with its own non-root control-plane/service user, then
+   use repo-registry metadata to resolve any separate servant stack checkout
+   such as `assistant-agent-logic`.
    As soon as the user confirms the remote target, run
    `brainctl setup defaults --target remote` or
    `brainctl setup --target remote` with the known host/path fields so the CLI
@@ -111,9 +129,11 @@ an exact phrase unless they must run a command verbatim.
    write only to the private server env/secret store, and delete the script
    after success. Never echo tokens in chat, shell history, logs, command
    output, or repo files.
-11. Treat private workspace env files as the setup source of truth for env refs.
-   `env:TELEGRAM_MAIN_CONFIG` and similar refs should be present in
-   `<workspace>/config/brain-<workspace>.env` or `<workspace>/secrets/secrets.env`
+11. Treat private workspace/env files as the setup source of truth for env refs.
+   `TELEGRAM_BOT_TOKEN`, `OPENAI_API_KEY`, `COMPOSIO_API_KEY`,
+   `env:TELEGRAM_MAIN_CONFIG`, and similar refs should be present only in
+   service/private env files such as `<workspace>/config/codex-chat.env`,
+   `<workspace>/config/brain-<workspace>.env`, or `<workspace>/secrets/secrets.env`
    for services and setup metadata checks. Do not decide a setup step is
    incomplete only because a one-off SSH command's process environment lacks
    the variable; rerun `brainctl setup status --path <workspace> --config
@@ -121,11 +141,11 @@ an exact phrase unless they must run a command verbatim.
 12. When setup reaches Codex auth verification, give concrete commands. Prefer
    generating `pnpm run brainctl setup codex-auth-script --config
    <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root>
-   --ssh-host <host> --ssh-user <ssh-login-user> --service-user <brain-service-user>`
+   --ssh-host <host> --ssh-user <ssh-login-user> --service-user <codex-chat-service-user>`
    on the target host or via SSH context, then print the exact `sshRunCommand`
    value as a copy-paste command for the user, for example
    `ssh -t root@host 'sudo -iu brain bash /tmp/verify-brain-codex-auth.sh'`.
-   Verify auth as the same non-root service user that will run Brain; root's
+   Verify auth as the same non-root service user that will run codex-chat; root's
    Codex session is not sufficient for a `User=brain` systemd service.
    Setup progress must record which OS user verified Codex auth and must not
    treat auth verified as one user as sufficient for a different service user.

@@ -3,7 +3,7 @@
   "id": "core",
   "name": "Brain Core Assistant Pack",
   "version": "0.0.0",
-  "description": "Portable setup and artifact workflow guidance for Brain runtimes.",
+  "description": "Portable setup and artifact workflow guidance for the Brain control plane; production runtime is codex-chat.",
   "skills": [
     "skills/setup-self-host/SKILL.md",
     "skills/setup-server/SKILL.md",
@@ -12,8 +12,7 @@
     "skills/file-save/SKILL.md"
   ],
   "prompts": [
-    "prompts/runtime-boundary.md",
-    "prompts/codex-chat-parity.md"
+    "prompts/runtime-boundary.md"
   ],
   "workflows": [
     "workflows/static-page.json"

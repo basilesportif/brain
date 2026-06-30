@@ -1,16 +1,22 @@
 ---
 name: setup-server
-description: Prepare a generic Ubuntu server for a Brain self-host runtime without storing secrets or deploying automatically.
+description: Prepare a generic Ubuntu server for Brain control-plane deployment of codex-chat without storing secrets or deploying automatically.
 ---
 
 # setup-server
 
-Use this skill when a user asks to prepare a fresh Ubuntu host for Brain.
+Use this skill when a user asks to prepare a fresh Ubuntu host for the Brain
+control plane and `codex-chat.service` servant runtime.
 
 ## Safety rules
 
 - Ask before contacting a host, changing SSH config, creating users, installing packages, writing env files, or enabling services.
-- Use a dedicated non-root service user for Brain.
+- Use a dedicated non-root service/control-plane user.
+- Production runtime service is `codex-chat.service`; do not install
+  `brainctl run`/`brain-personal.service` as the live assistant.
+- During deploy/update, fetch or clone the configured `codex-chat` and
+  `assistant-agent-logic` refs, verify resolved SHAs, and keep the repositories
+  separate.
 - Keep provider auth, entrypoint tokens, admin identifiers, webhook secrets, and workspace data outside the repository checkout.
 - Keep user instructions direct-action first. If the user must do something,
   provide the full copy-paste command or the exact UI action. Do not say "SSH
@@ -47,8 +53,12 @@ Use this skill when a user asks to prepare a fresh Ubuntu host for Brain.
    <name>`). If it points at this remote host, check the remote
    `state/setup-progress.json` metadata and resume from the next incomplete
    step instead of restarting. If no context exists, confirm host label/address
-   and SSH login username; default the SSH login username to `root` if omitted.
-   Then confirm repo path, workspace path, and provider choice. Ask for
+   and SSH login username; default the initial SSH login username to `root` if
+   omitted. Root must be preserved only for one-time bootstrap; after
+   `brainctl setup remote-bootstrap` creates/validates the non-root service
+   user, sudo access, authorized keys, checkout path, and workspace ownership,
+   rewrite local context/SSH alias so future commands use the service user. Then
+   confirm repo path, workspace path, and provider choice. Ask for
    service-user/service details only when needed for bootstrap or when the user
    asks for advanced details.
 2. Install base packages: Git, curl, build tools, certificates, Node, pnpm, and any provider CLI prerequisites the user selected.
@@ -68,7 +78,7 @@ Use this skill when a user asks to prepare a fresh Ubuntu host for Brain.
    Generate `pnpm run brainctl setup codex-auth-script --config
    <workspace>/config/runtime.yaml --workspace <name> --repo <repo-root>
    --ssh-host <host> --ssh-user <ssh-login-user> --service-user
-   <brain-service-user>` and give the user the returned `sshRunCommand`. Verify
+   <codex-chat-service-user>` and give the user the returned `sshRunCommand`. Verify
    auth as the same service user that systemd will run; root's Codex login is
    not sufficient for `User=brain`. Setup progress must record the verified OS
    user and resume from auth if it differs from the service user. If auth is

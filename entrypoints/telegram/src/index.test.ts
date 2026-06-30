@@ -29,6 +29,14 @@ test("maps Brain send_text actions into Telegram call intents", () => {
 });
 
 test("maps Telegram markdownv2 and terminal status conservatively", () => {
+  const plainMarkdown = outboundActionToTelegramIntent({
+    type: "send_text",
+    text: "main_loop: model=gpt-5.5 effort=medium",
+    format: "markdown",
+    target: { conversationId: "123" },
+  });
+  assert.equal(plainMarkdown?.payload.parse_mode, undefined);
+
   const markdown = outboundActionToTelegramIntent({
     type: "send_text",
     text: "*hello*",
@@ -174,6 +182,7 @@ test("Telegram pairing bootstrap stores one-time paired identities before allowl
     assert.equal(events.length, 1);
     assert.equal(events[0]?.text, "hello after pair");
     assert.equal((await store.readPairingCode()), undefined);
+    assert.deepEqual((await store.listIdentities()).map((identity) => [identity.userId, identity.chatId]), [["7", "123"]]);
     assert.deepEqual((await store.listUsers()).map((user) => user.userId), ["7"]);
     assert.deepEqual((await store.listChats()).map((chat) => chat.chatId), ["123"]);
     assert.equal(calls[0]?.method, "sendMessage");
@@ -184,7 +193,7 @@ test("Telegram pairing bootstrap stores one-time paired identities before allowl
 });
 
 
-test("Telegram first-user bootstrap pairs the first user/chat by default", async () => {
+test("Telegram first-user bootstrap pairs up to two distinct admin user/chat pairs by default", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-telegram-first-user-"));
   try {
     const calls: Array<{ method: string; payload?: Record<string, unknown> }> = [];
@@ -203,22 +212,72 @@ test("Telegram first-user bootstrap pairs the first user/chat by default", async
         { update_id: 710, message: { message_id: 1, text: "first hello", chat: { id: 123 }, from: { id: 7 } } },
         { update_id: 711, message: { message_id: 2, text: "same chat intruder", chat: { id: 123 }, from: { id: 8 } } },
         { update_id: 712, message: { message_id: 3, text: "same user other chat", chat: { id: 999 }, from: { id: 7 } } },
-        { update_id: 713, message: { message_id: 4, text: "paired admin again", chat: { id: 123 }, from: { id: 7 } } },
+        { update_id: 713, message: { message_id: 4, text: "second hello", chat: { id: 456 }, from: { id: 8 } } },
+        { update_id: 714, message: { message_id: 5, text: "third blocked", chat: { id: 789 }, from: { id: 9 } } },
+        { update_id: 715, message: { message_id: 6, text: "paired admin again", chat: { id: 123 }, from: { id: 7 } } },
+        { update_id: 716, message: { message_id: 7, text: "second admin again", chat: { id: 456 }, from: { id: 8 } } },
       ],
     });
     await adapter.start();
-    assert.deepEqual(await adapter.pairingStatus(), { enabled: true, pending: true, users: 0, chats: 0, codePresent: false });
+    assert.deepEqual(await adapter.pairingStatus(), { enabled: true, pending: true, users: 0, chats: 0, adminPairs: 0, maxAdminPairs: 2, codePresent: false });
+
+    const events = [];
+    for await (const event of adapter.inboundEvents()) events.push(event);
+
+    assert.deepEqual(events.map((event) => event.text), ["first hello", "second hello", "paired admin again", "second admin again"]);
+    assert.deepEqual((await store.listIdentities()).map((identity) => [identity.userId, identity.chatId, identity.isAdmin]), [["7", "123", true], ["8", "456", true]]);
+    assert.deepEqual((await store.listUsers()).map((user) => [user.userId, user.isAdmin]), [["7", true], ["8", true]]);
+    assert.deepEqual((await store.listChats()).map((chat) => chat.chatId), ["123", "456"]);
+    assert.equal((await store.readPairingCode()), undefined);
+    assert.deepEqual(await adapter.pairingStatus(), { enabled: true, pending: false, users: 2, chats: 2, adminPairs: 2, maxAdminPairs: 2, codePresent: false });
+    const pairReplies = calls.filter((call) => call.method === "sendMessage").map((call) => String(call.payload?.text));
+    assert.equal(pairReplies.length, 2);
+    assert.match(pairReplies[0] ?? "", /Paired this Telegram user and chat as a Brain admin \(1\/2\)/);
+    assert.match(pairReplies[1] ?? "", /Paired this Telegram user and chat as a Brain admin \(2\/2\)/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Telegram first-user bootstrap can be capped at one admin pair for single-admin deployments", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-telegram-one-admin-"));
+  try {
+    const store = new FileTelegramPairingStore(root);
+    const adapter = new TelegramEntrypointAdapter({
+      workspaceId: "personal",
+      pairing: { enabled: true, store, maxAdminPairs: 1 },
+      updates: [
+        { update_id: 720, message: { message_id: 1, text: "first hello", chat: { id: 123 }, from: { id: 7 } } },
+        { update_id: 721, message: { message_id: 2, text: "second blocked", chat: { id: 456 }, from: { id: 8 } } },
+        { update_id: 722, message: { message_id: 3, text: "paired admin again", chat: { id: 123 }, from: { id: 7 } } },
+      ],
+    });
+    await adapter.start();
 
     const events = [];
     for await (const event of adapter.inboundEvents()) events.push(event);
 
     assert.deepEqual(events.map((event) => event.text), ["first hello", "paired admin again"]);
-    assert.deepEqual((await store.listUsers()).map((user) => [user.userId, user.isAdmin]), [["7", true]]);
-    assert.deepEqual((await store.listChats()).map((chat) => chat.chatId), ["123"]);
-    assert.equal((await store.readPairingCode()), undefined);
-    assert.equal((await adapter.pairingStatus()).pending, false);
-    assert.equal(calls[0]?.method, "sendMessage");
-    assert.match(String(calls[0]?.payload?.text), /Paired this Telegram user and chat/);
+    assert.deepEqual((await store.listIdentities()).map((identity) => [identity.userId, identity.chatId]), [["7", "123"]]);
+    assert.deepEqual(await adapter.pairingStatus(), { enabled: true, pending: false, users: 1, chats: 1, adminPairs: 1, maxAdminPairs: 1, codePresent: false });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Telegram pairing state reads legacy user/chat files and writes exact admin pairs", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-telegram-legacy-pairing-"));
+  try {
+    await writeFile(path.join(root, "telegram_users.json"), `${JSON.stringify([{ userId: "7", isAdmin: true, pairedAt: "2026-01-01T00:00:00.000Z" }])}\n`);
+    await writeFile(path.join(root, "telegram_chats.json"), `${JSON.stringify([{ chatId: "123", pairedAt: "2026-01-01T00:00:00.000Z" }])}\n`);
+    const store = new FileTelegramPairingStore(root);
+    assert.deepEqual(await store.listIdentities(), [{ userId: "7", chatId: "123", isAdmin: true, pairedAt: "2026-01-01T00:00:00.000Z" }]);
+
+    await store.addIdentity("8", "456", true);
+    assert.deepEqual((await store.listIdentities()).map((identity) => [identity.userId, identity.chatId]), [["7", "123"], ["8", "456"]]);
+    const rawAdmins = JSON.parse(await readFile(path.join(root, "telegram_admins.json"), "utf8")) as { version: number; admins: Array<{ userId: string; chatId: string }> };
+    assert.equal(rawAdmins.version, 1);
+    assert.deepEqual(rawAdmins.admins.map((identity) => [identity.userId, identity.chatId]), [["7", "123"], ["8", "456"]]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

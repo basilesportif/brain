@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { FakeEntrypointAdapter } from "@brain/entrypoint-protocol";
-import { BrainRuntime, BrainSupervisor, FakeProviderAdapter, InMemorySubagentJobStore, StaticSubagentExecutor, SubagentLifecycle, type ProviderTurn } from "./index.js";
+import { BrainRuntime, BrainSupervisor, FakeProviderAdapter, InMemorySubagentJobStore, RuntimeCommandInterceptor, StaticSubagentExecutor, SubagentLifecycle, type ProviderTurn, type ProviderTurnEvent } from "./index.js";
 
 const workspace = {
   workspacePath: "/tmp/personal",
@@ -82,6 +82,38 @@ test("BrainSupervisor logs successful outbound dispatches at info", async () => 
 
   const dispatchLog = logs.find((record) => record.message === "Dispatched outbound action: send_text");
   assert.equal(dispatchLog?.level, "info");
+});
+
+test("BrainSupervisor dispatches service commands while an earlier provider turn is still running", async () => {
+  const entrypoint = new FakeEntrypointAdapter({ workspaceId: "personal", entrypointId: "fake-main" });
+  entrypoint.enqueueText("slow provider turn", { conversationId: "test" });
+  entrypoint.enqueueText("sub", { conversationId: "test" });
+  entrypoint.close();
+  const runtime = new BrainRuntime({
+    workspaceId: "personal",
+    workspace,
+    provider: new FakeProviderAdapter(async function* (): AsyncIterable<ProviderTurnEvent> {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      yield { type: "final", text: "slow provider done" };
+    }),
+  });
+  const commandInterceptor = new RuntimeCommandInterceptor({
+    subagents: {
+      async dispatch() { return "job_unused"; },
+      async listJobs() { return []; },
+    },
+  });
+  const supervisor = new BrainSupervisor({ runtime, entrypoint, commandInterceptor });
+
+  const result = await supervisor.run({ maxEvents: 2 });
+
+  assert.equal(result.processed.length, 2);
+  assert.equal(result.processed[1]?.intercepted?.command, "agents");
+  const sentTexts = entrypoint.dispatchedActions
+    .filter((action) => action.type === "send_text")
+    .map((action) => action.type === "send_text" ? action.text : "");
+  assert.match(sentTexts[0] ?? "", /^Subagents: 0 running, 0 cancelling, 0 queued/);
+  assert.equal(sentTexts[1], "slow provider done");
 });
 
 test("BrainSupervisor delivers send_to_user subagent terminal results to the originating target", async () => {

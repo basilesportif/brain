@@ -1,18 +1,52 @@
 # brain
 
-`brain` is a local monorepo for consolidating a self-hosted assistant runtime, entrypoint adapters, web shell, reusable assistant logic, and self-host setup guidance.
+`brain` is the external app/control-plane and setup-orchestrator repository for
+Tim's assistant stack. The repo is abstract/source-only: concrete services are
+named Brain deployments with their own host, env, service, and path settings.
+Its first responsibility is to resolve, plan, deploy, and operate the servant
+runtime stack made of separate repositories:
 
-Status: **safe parity surface**. Runtime, entrypoint, provider, supervisor, operations, and web-publisher seams exist for no-network validation and reviewed setup/deployment planning, but no private assistant data, secrets, logs, generated artifacts, or real deployment state has been copied here.
+- `codex-chat` — the internal multi-surface runtime/adapter/engine.
+- `assistant-agent-logic` — reusable assistant logic, scripts, prompts, and
+  setup resources.
+- `assistant-agent-data` / workspace — private durable workspace data and
+  repo-registry state.
+
+Status: **control-plane first, web/admin promotion started**. `brainctl stack
+status` and `brainctl stack plan` resolve the servant runtime stack from
+repo-registry metadata and local setup context without contacting remote hosts,
+mutating servers, or printing secrets. The strategic implementation phase now in progress promotes Brain into the
+long-running server process/web app and orchestrator/control-plane for admin UI,
+install metadata, env/deploy/restart orchestration, health/status, Clerk/admin
+policy, capabilities/audit planning, and `assistant-agent-logic`
+checkout/version orchestration. The first Brain-owned admin service skeleton
+lives in `@brain/web`; see `docs/brain-admin-service.md`. Brain's own in-repo
+runtime packages remain experimental/lab compatibility surfaces; they are not
+the production servant runtime source of truth. The web/admin promotion plan is
+captured in `plans/brain-control-plane.md`.
+
+Current local deployment target: `tim-main-brain` on
+`codex-chat-assistant-1` (`178.104.208.141`). It runs `brain-admin.service` for
+`https://brain.decisive-outcomes.com/admin` beside the local
+`codex-chat.service` checkout at `/home/tim/pkg/tim/codex-chat`. The public
+Slack Events URL is `https://brain.decisive-outcomes.com/api/slack/events`;
+Brain/Caddy reverse-proxies the raw signed request to codex-chat so codex-chat
+verifies Slack signatures and owns runtime behavior.
+
+Production runtime target: `codex-chat.service`. Brain must not be installed as
+the live assistant (`brain-personal.service` / `brainctl run`) and must not
+substitute its experimental Telegram/Codex runtime for `codex-chat`.
 
 ## Intended layout
 
 ```text
-entrypoints/              Channel adapters such as Telegram; they translate external traffic into Brain events.
-apps/                     Durable runtime applications, currently the web shell/static publisher placeholder.
-packages/                 Provider-neutral libraries, entrypoint protocol contracts, and provider adapters.
-assistant-packs/          Pure prompts, skills, workflows, and setup guidance inspectable by Codex/Claude.
-docs/                     Architecture, runtime configuration, entrypoint, self-host, deployment, testing, and public-readiness docs.
-plans/                    Migration and consolidation plans.
+src/brainctl.ts           Control-plane CLI, including stack registry resolution and no-network plans.
+entrypoints/              Lab channel adapter experiments, not the production servant runtime.
+apps/                     Lab app/static publisher placeholders.
+packages/                 Lab provider/runtime compatibility packages and schemas.
+assistant-packs/          Setup/operator guidance inspectable by Codex/Claude.
+docs/                     Control-plane, setup, deployment, testing, and public-readiness docs.
+plans/                    Migration, consolidation, and control-plane plans.
 workspace/, private/, data/  User-owned/private boundaries; ignored except README placeholders.
 ```
 
@@ -52,21 +86,45 @@ provider sessions, Telegram IDs, and logs do not belong in that file.
 Use `brainctl setup reset --workspace <name> --path <workspace-path> --dry-run`
 to inspect a reset, and add `--yes` to remove only that progress file.
 
-Personal workspace parity is JSON-backed through Brain's in-repo
-`packages/assistant-logic` package rather than a sibling checkout. Setup scaffolds
-`data/todos.json`, `data/projects.json`, `data/crm.json`,
-`data/reminders.json`, `private/documents/metadata.jsonl`,
-`instructions/`, `tasks/`, and selected repo-registry state. Use
-`brainctl workspace run --path <workspace> <assistant-script>.js -- <args>` to
-run native `@brain/assistant-logic` CLI commands against that workspace. Markdown
-`projects/`, `notes/`, and `documents/metadata/` folders remain supporting
-resources only.
+Control-plane setup preserves repository boundaries. Brain resolves
+`assistant-agent-logic` and `assistant-agent-data` from the repo registry and
+plans clone/update/validation steps against those separate repositories. The
+older in-repo `packages/assistant-logic` workspace commands are lab
+compatibility helpers only; do not vendor, merge, or make them the production
+source of truth for servant runtime deployment.
+
+Deployment/update also refreshes the actual deployed repos. `brainctl stack
+apply` fetches or clones the configured branch/ref for `codex-chat` and
+`assistant-agent-logic`, verifies the resulting commit SHA, and stores the
+requested ref plus resolved SHA in deployment metadata. It also installs
+`assistant-agent-logic` Node dependencies from that checkout's lockfile (for
+example `npm ci` with `package-lock.json`) and verifies Composio Gmail/Calendar
+workflow modules load before treating those scripts as deployment-ready. A
+deploy must not silently reuse stale embedded checkouts or a dependency-less
+logic checkout.
+
+Brain must not become the home for Tim-assistant domain behavior. Assistant
+workflows, prompts, skills, and intent rules belong in `assistant-agent-logic`;
+runtime/channel behavior belongs in `codex-chat` or in generic Brain
+transport/entrypoint code only when the behavior is domain-neutral.
 
 ## Initial commands
 
 ```bash
 pnpm run check
 ```
+
+Brain admin service (after `pnpm run build`):
+
+```bash
+pnpm run brain-admin
+```
+
+The admin service is fail-closed behind Clerk, writes codex-chat env/config
+entries as write-only values, and can run approved codex-chat deploy/restart
+operations when the server env supplies the relevant commands. Brain owns the
+Slack setup/install checklist and live canary flow; see
+`docs/slack-setup-runbook.md`.
 
 The check validates that the repo structure exists, runtime config examples are present, private boundary directories contain only their README placeholders, and provider/entrypoint/automation seams pass unit tests.
 
@@ -79,6 +137,8 @@ The check validates that the repo structure exists, runtime config examples are 
 pnpm run build
 pnpm run brainctl doctor --config examples/config/runtime.yaml --pack assistant-packs/core
 pnpm run brainctl runtime smoke --config examples/config/runtime.yaml --workspace personal
+pnpm run brainctl stack status --workspace personal
+pnpm run brainctl stack plan --workspace personal
 pnpm run brainctl operations plan --config examples/config/runtime.yaml --workspace personal
 pnpm run brainctl validate live --config examples/config/runtime.yaml --workspace personal --run-safe
 pnpm run brainctl workspace status --path ~/.brain/workspace
@@ -87,8 +147,26 @@ pnpm run brainctl workspace run --path ~/.brain/workspace todo-list.js
 
 ## Design goals
 
-- Clean monorepo first, with an option to make public-safe slices later.
-- Treat channel-specific bots as entrypoint adapters, not as the core app.
+- Brain is the external app/control plane first; the next phase is its long-running
+  web/admin process and orchestration layer. Servant runtime execution belongs
+  to `codex-chat` unless and until a future Brain runtime graduates from the
+  lab.
+- Treat Brain's web/admin UI as a frequently used settings-management surface,
+  not just an occasional setup page; guided web setup/install flows can coexist
+  with Codex-session setup when the latter is easier.
+- Production setup/deploy starts `codex-chat.service`, not Brain's lab
+  supervisor. `brainctl run/start` are for tests and local lab smoke only.
+- Keep Brain free of Tim-assistant domain logic; it is a deployment/control-plane
+  wrapper around `codex-chat` and `assistant-agent-logic`, not a replacement for
+  their runtime or workflow responsibilities.
+- Preserve repo boundaries using repo-registry links/metadata; never vendor or
+  merge `codex-chat`, `assistant-agent-logic`, or `assistant-agent-data` into
+  Brain.
+- Treat channel-specific bots as servant runtime/entrypoint concerns, not as
+  the control-plane core.
+- Treat `tim-main-brain` as one concrete deployment of the abstract Brain
+  source repo; do not infer service paths from retired single deploy-host
+  metadata.
 - Configure one primary active entrypoint per workspace by default through an explicit `enabledEntrypoints` map.
 - Route outbound actions back to the originating entrypoint unless deliberate config says otherwise.
 - Keep assistant prompts and workflows generic around Brain inbound events, active-entrypoint metadata, and outbound actions, while preserving Telegram behavior through the Telegram entrypoint adapter.

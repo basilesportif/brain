@@ -18,6 +18,7 @@ export interface OperationsPlanInput {
   telegramTokenFile?: string;
   telegramPollingState?: string;
   telegramPairingState?: string;
+  telegramMaxAdminPairs?: number;
 }
 
 export interface OperationsPlan {
@@ -33,6 +34,7 @@ export interface OperationsPlan {
   environmentFile: string;
   providerKind?: string;
   entrypointKind?: string;
+  deprecatedLabOnly: true;
   runtimeCommand: string[];
   commands: {
     preflight: string[];
@@ -53,9 +55,6 @@ export function createOperationsPlan(input: OperationsPlanInput): OperationsPlan
   const artifactRoot = path.resolve(input.artifactRoot);
   const logPath = path.resolve(input.logPath);
   const environmentFile = path.resolve(input.environmentFile ?? path.join(path.dirname(stateRoot), "config", `${serviceName}.env`));
-  const telegramTokenFile = path.resolve(input.telegramTokenFile ?? path.join(path.dirname(stateRoot), "secrets", "telegram-bot-token"));
-  const telegramPollingState = path.resolve(input.telegramPollingState ?? path.join(stateRoot, "telegram-offset.json"));
-  const telegramPairingState = path.resolve(input.telegramPairingState ?? path.join(stateRoot, "telegram-pairing"));
   const pnpm = shellWord(input.pnpmBinary ?? "pnpm");
   const brainctl = `${pnpm} --dir ${shellWord(repoPath)} run brainctl`;
   const runtimeCommand = [
@@ -73,15 +72,10 @@ export function createOperationsPlan(input: OperationsPlanInput): OperationsPlan
     "--log",
     logPath,
     ...(input.providerKind === "codex" ? ["--transport", input.providerTransport ?? "exec"] : []),
-    ...(input.entrypointKind === "telegram" ? [
-      "--telegram-polling",
-      "--telegram-token-file",
-      telegramTokenFile,
-      "--polling-state",
-      telegramPollingState,
-      "--telegram-pairing-state",
-      telegramPairingState,
-    ] : []),
+    "--fake",
+    "--once",
+    "--fake-text",
+    "Brain lab runtime smoke only; production live assistant traffic must use codex-chat.service.",
   ];
 
   return {
@@ -97,6 +91,7 @@ export function createOperationsPlan(input: OperationsPlanInput): OperationsPlan
     environmentFile,
     providerKind: input.providerKind,
     entrypointKind: input.entrypointKind,
+    deprecatedLabOnly: true,
     runtimeCommand,
     commands: {
       preflight: [
@@ -128,6 +123,7 @@ export function createOperationsPlan(input: OperationsPlanInput): OperationsPlan
     },
     safety: [
       "This plan is data only; rendering it does not install systemd units, pull git, restart services, or contact live providers.",
+      "Deprecated lab-only Brain runtime operations must not be installed as a live assistant service; production uses codex-chat.service deployed through Brain stack commands.",
       "Secret refs are checked by metadata only; values must stay in the private workspace or host secret store.",
       "Rollback uses explicit known-good git refs; Brain does not keep a persistent turn replay/idempotency store.",
     ],
@@ -135,16 +131,18 @@ export function createOperationsPlan(input: OperationsPlanInput): OperationsPlan
 }
 
 export function renderSystemdService(plan: OperationsPlan): string {
+  const disabledMessage = "Brain lab runtime systemd service is disabled by policy. Deploy codex-chat.service with `brainctl stack apply` for live assistant traffic.";
   const exec = [
-    "pnpm",
-    "run",
-    "brainctl",
-    ...plan.runtimeCommand,
+    "/usr/bin/env",
+    "bash",
+    "-lc",
+    `printf '%s\\n' ${shellWord(disabledMessage)} >&2; exit 1`,
   ].map(systemdEscapeArg).join(" ");
 
   return [
     "[Unit]",
-    `Description=Brain runtime (${plan.workspaceId})`,
+    `Description=Deprecated Brain lab runtime (${plan.workspaceId}); production uses codex-chat.service`,
+    "Conflicts=codex-chat.service",
     "After=network-online.target",
     "Wants=network-online.target",
     "",
@@ -154,7 +152,7 @@ export function renderSystemdService(plan: OperationsPlan): string {
     `WorkingDirectory=${plan.repoPath}`,
     `EnvironmentFile=-${plan.environmentFile}`,
     `ExecStart=${exec}`,
-    "Restart=on-failure",
+    "Restart=no",
     "RestartSec=5s",
     "NoNewPrivileges=true",
     "PrivateTmp=true",
@@ -209,7 +207,7 @@ export function createGuardedLiveValidationPlan(input: {
     networkStarted: false,
     checks,
     guards: [
-      "Default mode is no-secret/no-network; live Telegram polling requires separate run/start flags and an explicit token ref.",
+      "Default mode is no-secret/no-network; live Telegram polling is disabled in Brain and production traffic must use codex-chat.service.",
       "Codex app-server validation is health-only and must be explicitly allowed before connecting to a live URL or spawning a binary.",
       "No real user turns, provider tasks, deployments, or service restarts are part of this validation plan.",
     ],
