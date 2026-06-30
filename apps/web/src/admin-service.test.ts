@@ -177,6 +177,10 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /Brain/);
   assert.match(html, /local-brain|test-brain/);
   assert.match(html, /account-menu/);
+  assert.match(html, /mobile-section-menu-button/);
+  assert.match(html, /Open admin section menu/);
+  assert.match(html, /Jump to section/);
+  assert.match(html, /mobile-section-popover/);
   assert.match(html, /tim\.galebach@gmail\.com/);
   assert.match(html, /Sign out \/ switch account/);
   assert.match(html, /Overview/);
@@ -486,12 +490,13 @@ test("brain admin exposes read-only Slack telemetry without leaking message bodi
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-slack-telemetry-"));
   try {
     const summaryPath = path.join(root, "codex-chat", "data", "state", "slack_telemetry", "summary.json");
+    const observedAt = new Date().toISOString();
     await writeFileRecursive(summaryPath, JSON.stringify({
       schemaVersion: 1,
-      updatedAt: "2026-06-29T10:00:00.000Z",
+      updatedAt: observedAt,
       counters: { "inbound.accepted": 1, "outbound.success": 1 },
       lastInboundEvent: {
-        observedAt: "2026-06-29T10:00:00.000Z",
+        observedAt,
         direction: "inbound",
         outcome: "accepted",
         eventType: "app_mention",
@@ -502,7 +507,7 @@ test("brain admin exposes read-only Slack telemetry without leaking message bodi
         token: "xoxb-super-secret",
       },
       lastAcceptedEvent: {
-        observedAt: "2026-06-29T10:00:00.000Z",
+        observedAt,
         direction: "inbound",
         outcome: "accepted",
         eventType: "app_mention",
@@ -510,7 +515,7 @@ test("brain admin exposes read-only Slack telemetry without leaking message bodi
         userId: "U123",
       },
       lastOutboundSuccess: {
-        observedAt: "2026-06-29T10:00:02.000Z",
+        observedAt,
         direction: "outbound",
         outcome: "success",
         channelId: "C123",

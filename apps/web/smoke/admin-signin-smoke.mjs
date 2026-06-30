@@ -73,12 +73,27 @@ async function runAdminDashboardScenario(page, baseUrl, viewport) {
   const pageErrors = await stubClerk(page, { signedIn: true });
   await page.goto(`${baseUrl}/admin`, { waitUntil: 'domcontentloaded' });
   await page.locator('text=Brain').first().waitFor({ state: 'visible', timeout: 5_000 });
-  const navScope = viewport ? '.mobile-tabs' : '.side';
+  const navScope = viewport ? '#mobile-section-menu' : '.side';
+  if (viewport) {
+    await page.locator('#mobile-section-menu').waitFor({ state: 'hidden', timeout: 5_000 });
+    await page.locator('button[aria-label="Open admin section menu"]').click();
+    await page.locator('#mobile-section-menu').waitFor({ state: 'visible', timeout: 5_000 });
+    await page.locator('#mobile-section-menu', { hasText: 'Jump to section' }).waitFor({ state: 'visible', timeout: 5_000 });
+  }
   await page.locator(`${navScope} a[href="#overview"]`).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator(`${navScope} a[href="#slack-setup"]`).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator(`${navScope} a[href="#mission"]`).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator(`${navScope} a[href="#openrouter"]`).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator(`${navScope} a[href="#slack"]`).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator(`${navScope} a[href="#manifest"]`).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator(`${navScope} a[href="#env"]`).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator(`${navScope} a[href="#deploy"]`).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator(`${navScope} a[href="#audit"]`).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator(`${navScope} a[href="#advanced"]`).waitFor({ state: 'visible', timeout: 5_000 });
+  if (viewport) {
+    await page.locator(`${navScope} a[href="#overview"]`).click();
+    await page.locator('#mobile-section-menu').waitFor({ state: 'hidden', timeout: 5_000 });
+  }
   await page.locator('#mode-title').filter({ hasText: /Slack setup wizard: Slack (setup required|partially configured)/ }).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#slack-setup').waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#slack-setup.setup-primary').waitFor({ state: 'visible', timeout: 5_000 });
@@ -111,7 +126,8 @@ async function runAdminDashboardScenario(page, baseUrl, viewport) {
   await page.locator('text=Sign out / switch account').waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('text=/^(other@example.test|tim.galebach@gmail.com)$/').first().waitFor({ state: 'visible', timeout: 5_000 });
   if (viewport) {
-    await page.locator('.mobile-tabs').waitFor({ state: 'visible', timeout: 5_000 });
+    await page.locator('.mobile-tabs').waitFor({ state: 'hidden', timeout: 5_000 });
+    await page.locator('button[aria-label="Open admin section menu"]').waitFor({ state: 'visible', timeout: 5_000 });
   }
   const bodyText = await page.locator('body').innerText();
   assert.equal(bodyText.includes('xoxb-super-secret'), false);
