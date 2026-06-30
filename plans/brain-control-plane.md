@@ -167,7 +167,7 @@ until those instructions arrive.
 
 ### Future Slack callback/test-event telemetry plan
 
-Status: initial read-only slice in progress as of 2026-06-29. The first slice is
+Status: read-only telemetry plus manual canary rollup implemented as of 2026-06-30. The runtime side remains
 strictly observational: `codex-chat` emits append-only, redacted Slack telemetry
 observations into its own state directory, and Brain reads the resulting summary
 for admin display. Brain still must not claim to own Slack runtime behavior,
@@ -194,14 +194,22 @@ Implemented/target contract:
   `data/state/slack_telemetry/summary.json` under the configured state dir.
   Summary schema starts at `schemaVersion: 1` and includes counters plus
   `lastInboundEvent`, `lastAcceptedEvent`, `lastIgnoredOrRejected`,
-  `lastOutboundAttempt`, `lastOutboundSuccess`, and `lastOutboundFailure`.
+  `lastOutboundAttempt`, `lastOutboundSuccess`, `lastOutboundFailure`,
+  `lastContextDecision`, and `lastSubagentRouting`.
 - Brain exposes `GET /api/admin/brain/slack/telemetry`, which reads the
   `codex-chat` summary file only, sanitizes it again, and returns health,
   recent canary status, source path, counters, and redacted last-observation
   fields for the Clerk-protected admin UI.
-- Canary status is `not_observable` until a future active canary runner writes
-  dedicated canary markers. Operators should use accepted inbound plus outbound
-  success as observational signals, not as proof of a named canary.
+- Brain now also exposes `GET/POST /api/admin/brain/slack/canary` and a Clerk-protected
+  Slack visibility/canary panel. The panel persists manual operator outcomes in
+  Brain private local state (default: next to the audit log as `slack-canary.json`)
+  and correlates them with redacted codex-chat telemetry: context source, fallback
+  codes, output channel/thread target, inbound/outbound counters, recent errors,
+  and subagent callback routing. Brain still does not send Slack messages or run
+  active canaries.
+- The codex-chat telemetry `recentCanary` field remains `not_observable` until a
+  future active canary runner writes dedicated runtime canary markers. Manual
+  Brain outcomes are operator-entered status, not automatic Slack proof.
 
 Guardrails:
 
@@ -550,13 +558,15 @@ and canonical deployment-ledger writes beyond the initial JSONL audit trail.
 
 ### Phase 4 — health, status, canaries, and operations
 
-- [ ] Add Slack, Telegram, provider, queue, loop/monitor, and subagent
-      health/status views.
+- [x] Add initial Slack health/status visibility: Mission Control now shows
+      redacted codex-chat Slack telemetry plus a manual visibility/canary rollup.
+      Telegram/provider/queue/loop/monitor depth remains future work.
 - [ ] Add model-provider defaults UI for `codex-chat`, covering main-loop
       startup settings, subagent defaults, per-dispatch override policy,
       allowlists, env-key presence metadata, and approved apply/restart flow.
-- [ ] Run safe Slack canary plans and display outcomes without exposing token
-      values.
+- [x] Display safe manual Slack canary outcomes without exposing token values;
+      current slice is read-only/manual and does not make Brain send Slack messages.
+      Future work: active/scheduled canary runner and automatic Slack proof markers.
 - [ ] Record operation outcomes and make failures visible in the admin UI.
 - [ ] Keep runtime execution and adapter behavior in `codex-chat`.
 

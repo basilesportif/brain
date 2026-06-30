@@ -840,9 +840,10 @@ installed and live app-mention/DM/private-channel canaries pass.
       operationally complete. Basic inbound Slack Events delivery through
       `https://brain.decisive-outcomes.com/api/slack/events` is confirmed as of
       2026-06-29, and an outbound reply directive was attempted; final outbound
-      Slack reply success still needs a canary proving the reply lands in the
+      Slack reply success still needs a live operator canary proving the reply lands in the
       expected source channel/thread/DM with the installed app scopes and bot
-      membership.
+      membership. As of 2026-06-30 Brain admin has a manual Slack Canary panel to
+      record those outcomes and correlate them with redacted codex-chat telemetry.
 
 ### Phase 3 — promote Brain as the long-running web/admin control plane
 
@@ -973,6 +974,11 @@ visible implementation now, with working Slack delivery preserved.
       source labels, and no Slack token exposure.
 - [x] Add Slack Web API history/replies reads through the runtime-owned adapter
       with mocked tests and bounded limits.
+- [x] Add Brain admin manual/read-only Slack visibility canary rollup that records
+      operator outcomes for root-thread replies, thread continuity, channel/thread
+      hydration, second-channel isolation, DM/MPIM/private behavior, subagent
+      callback routing, immediate reaction checks, and telemetry redaction while
+      keeping Brain out of Slack message sending.
 - [ ] Add optional public-channel history scopes/events after canaries confirm
       fallback behavior and Brain can show installed scopes/events.
 - [ ] Add durable event journal, summaries, explicit cross-channel controls, and

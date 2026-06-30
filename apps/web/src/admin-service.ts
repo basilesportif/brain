@@ -74,6 +74,7 @@ export interface BrainAdminServiceConfig {
   slackEventsBaseUrl: string;
   slackEventsPath: string;
   slackAppId?: string;
+  slackCanaryPath: string;
 }
 
 export interface BrainAdminServiceDeps {
@@ -95,6 +96,7 @@ export function loadBrainAdminServiceConfig(env: NodeJS.ProcessEnv = process.env
   const localHostname = os.hostname();
   const localIp = defaultLocalIp();
   const codexChatPath = env.BRAIN_CODEX_CHAT_PATH || "/home/tim/pkg/tim/codex-chat";
+  const auditLogPath = env.BRAIN_ADMIN_AUDIT_LOG || "/home/tim/.brain/control-plane/audit.jsonl";
   return {
     enabled: boolEnv(env.BRAIN_ADMIN_ENABLED, true),
     host: env.BRAIN_ADMIN_HOST || "127.0.0.1",
@@ -120,12 +122,13 @@ export function loadBrainAdminServiceConfig(env: NodeJS.ProcessEnv = process.env
     codexChatDeployCommand: env.BRAIN_CODEX_CHAT_DEPLOY_COMMAND || undefined,
     codexChatRestartCommand: env.BRAIN_CODEX_CHAT_RESTART_COMMAND || undefined,
     brainServiceName: env.BRAIN_SERVICE_NAME || "brain-admin.service",
-    auditLogPath: env.BRAIN_ADMIN_AUDIT_LOG || "/home/tim/.brain/control-plane/audit.jsonl",
+    auditLogPath,
     allowedEnvKeys,
     operationTimeoutMs: Number.parseInt(env.BRAIN_ADMIN_OPERATION_TIMEOUT_MS || "120000", 10),
     slackEventsBaseUrl: (env.BRAIN_SLACK_EVENTS_BASE_URL || SLACK_EVENTS_BASE_URL).trim(),
     slackEventsPath: normalizeRoutePath(env.BRAIN_SLACK_EVENTS_PATH || SLACK_EVENTS_PATH),
     slackAppId: normalizeSlackAppId(env.BRAIN_SLACK_APP_ID || env.SLACK_APP_ID || env.CODEX_CHAT_SLACK_APP_ID || ""),
+    slackCanaryPath: env.BRAIN_SLACK_CANARY_PATH || path.join(path.dirname(auditLogPath), "slack-canary.json"),
   };
 }
 
@@ -198,6 +201,13 @@ async function handleAdminApi(request: IncomingMessage, response: ServerResponse
   if (request.method === "GET" && url.pathname === "/api/admin/brain/slack/telemetry") {
     return sendJson(response, 200, await slackTelemetrySummary(config));
   }
+  if (request.method === "GET" && url.pathname === "/api/admin/brain/slack/canary") {
+    return sendJson(response, 200, await slackCanarySummary(config));
+  }
+  if (request.method === "POST" && url.pathname === "/api/admin/brain/slack/canary") {
+    const payload = await readJsonBody(request);
+    return handleSlackCanaryUpdate(response, config, adminEmail, payload);
+  }
   if (request.method === "POST" && url.pathname === "/api/admin/brain/slack/settings") {
     const payload = await readJsonBody(request);
     return handleSlackSettingsWrite(response, config, adminEmail, payload);
@@ -263,6 +273,7 @@ async function serviceSettings(config: BrainAdminServiceConfig) {
       restartCommand: operationCommand(config, "restart") ? redactedCommand(operationCommand(config, "restart") ?? "") : null,
     },
     slack: await slackSettingsSummary(config),
+    slackCanary: await slackCanarySummary(config),
     openRouter: await openRouterSettingsSummary(config),
   };
 }
@@ -309,6 +320,16 @@ type SlackTelemetryObservationSummary = {
   outboundResultCount?: number;
   outboundResultChannels?: string[];
   outboundResultTs?: string[];
+  sourceKind?: string;
+  selectedSources?: string[];
+  messagesIncluded?: number;
+  contextTruncated?: boolean;
+  fallbackCodes?: string[];
+  promptExposed?: boolean;
+  outputThreadTsPresent?: boolean;
+  conversationSessionId?: string;
+  correlationId?: string;
+  jobId?: string;
 };
 
 type SlackTelemetryAdminSummary = {
@@ -324,6 +345,8 @@ type SlackTelemetryAdminSummary = {
   lastOutboundAttempt?: SlackTelemetryObservationSummary;
   lastOutboundSuccess?: SlackTelemetryObservationSummary;
   lastOutboundFailure?: SlackTelemetryObservationSummary;
+  lastContextDecision?: SlackTelemetryObservationSummary;
+  lastSubagentRouting?: SlackTelemetryObservationSummary;
   health: { state: string; summary: string; generatedAt: string };
   recentCanary: { status: "not_observable"; summary: string };
   error?: string;
@@ -397,6 +420,8 @@ function sanitizeSlackTelemetrySummary(parsed: Record<string, unknown>, generate
     lastOutboundAttempt: sanitizeSlackTelemetryObservation(parsed.lastOutboundAttempt),
     lastOutboundSuccess: sanitizeSlackTelemetryObservation(parsed.lastOutboundSuccess),
     lastOutboundFailure: sanitizeSlackTelemetryObservation(parsed.lastOutboundFailure),
+    lastContextDecision: sanitizeSlackTelemetryObservation(parsed.lastContextDecision),
+    lastSubagentRouting: sanitizeSlackTelemetryObservation(parsed.lastSubagentRouting),
   };
   return {
     ...summary,
@@ -412,14 +437,17 @@ function sanitizeSlackTelemetryObservation(value: unknown): SlackTelemetryObserv
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
   const out: SlackTelemetryObservationSummary = {};
-  for (const key of ["observedAt", "direction", "outcome", "reason", "eventId", "envelopeType", "eventType", "teamId", "enterpriseId", "apiAppId", "channelId", "channelType", "userId", "botUserId", "messageTs", "threadTs"] as const) {
+  for (const key of ["observedAt", "direction", "outcome", "reason", "eventId", "envelopeType", "eventType", "teamId", "enterpriseId", "apiAppId", "channelId", "channelType", "userId", "botUserId", "messageTs", "threadTs", "sourceKind", "conversationSessionId", "correlationId", "jobId"] as const) {
     if (typeof record[key] === "string") out[key] = redactTelemetryText(record[key]);
   }
-  for (const key of ["slackEventTime", "textLength", "responseStatus", "outboundResultCount"] as const) {
+  for (const key of ["slackEventTime", "textLength", "responseStatus", "outboundResultCount", "messagesIncluded"] as const) {
     if (typeof record[key] === "number" && Number.isFinite(record[key])) out[key] = record[key];
   }
-  for (const key of ["outboundResultChannels", "outboundResultTs"] as const) {
+  for (const key of ["outboundResultChannels", "outboundResultTs", "selectedSources", "fallbackCodes"] as const) {
     if (Array.isArray(record[key])) out[key] = record[key].filter((item): item is string => typeof item === "string").map(redactTelemetryText).slice(0, 20);
+  }
+  for (const key of ["contextTruncated", "promptExposed", "outputThreadTsPresent"] as const) {
+    if (typeof record[key] === "boolean") out[key] = record[key];
   }
   return Object.keys(out).length ? out : undefined;
 }
@@ -468,6 +496,206 @@ function redactTelemetryText(value: string): string {
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
     .replace(/v0=[a-f0-9]{32,}/gi, "v0=[redacted-signature]")
     .slice(0, 240);
+}
+
+type SlackCanaryStatus = "pending" | "passed" | "failed" | "blocked" | "not_applicable";
+
+type SlackCanaryItemDefinition = {
+  id: string;
+  label: string;
+  prompt: string;
+  telemetryHints: string[];
+};
+
+type SlackCanaryItemState = {
+  id: string;
+  status: SlackCanaryStatus;
+  updatedAt?: string;
+  updatedBy?: string;
+  notes?: string;
+  evidence?: string;
+};
+
+type SlackCanaryStore = {
+  schemaVersion: 1;
+  updatedAt?: string;
+  updatedBy?: string;
+  items: Record<string, SlackCanaryItemState>;
+};
+
+const SLACK_CANARY_ITEMS: SlackCanaryItemDefinition[] = [
+  {
+    id: "root_channel_attached_thread_reply",
+    label: "Root-channel attached-thread reply",
+    prompt: "Mention Brain in a public root channel message and verify the reply lands in the thread attached to that root message.",
+    telemetryHints: ["lastAcceptedEvent.eventType", "lastContextDecision.sourceKind=channel", "lastOutboundSuccess.channelId", "lastOutboundSuccess.threadTs"],
+  },
+  {
+    id: "existing_thread_continuity",
+    label: "Existing-thread continuity",
+    prompt: "Mention Brain inside an existing Slack thread and verify it uses/replies in that same source thread.",
+    telemetryHints: ["lastContextDecision.sourceKind=thread", "lastContextDecision.selectedSources", "lastOutboundSuccess.threadTs"],
+  },
+  {
+    id: "channel_history_hydration",
+    label: "Channel history hydration",
+    prompt: "Ask about a recent public channel fact from a root mention and verify bounded channel context was available.",
+    telemetryHints: ["lastContextDecision.selectedSources", "lastContextDecision.messagesIncluded", "lastContextDecision.fallbackCodes"],
+  },
+  {
+    id: "thread_history_hydration",
+    label: "Thread history hydration",
+    prompt: "Ask about earlier replies from inside a thread and verify bounded thread context was available.",
+    telemetryHints: ["lastContextDecision.sourceKind=thread", "lastContextDecision.messagesIncluded", "lastContextDecision.fallbackCodes"],
+  },
+  {
+    id: "second_channel_isolation",
+    label: "Second-channel isolation",
+    prompt: "Repeat a canary in a second channel and verify Brain does not cite or leak the first channel's facts.",
+    telemetryHints: ["lastAcceptedEvent.channelId", "lastContextDecision.channelId", "lastOutboundSuccess.channelId"],
+  },
+  {
+    id: "dm_mpim_private_channel_behavior",
+    label: "DM/MPIM/private-channel behavior",
+    prompt: "Exercise a DM, MPIM, or private channel and verify behavior stays within that Slack conversation's boundary.",
+    telemetryHints: ["lastAcceptedEvent.channelType", "lastContextDecision.sourceKind", "lastOutboundSuccess.channelId"],
+  },
+  {
+    id: "subagent_callback_routing",
+    label: "Subagent callback routing",
+    prompt: "Start Slack-originated work that dispatches a subagent and verify progress/final callback returns to the originating Slack target.",
+    telemetryHints: ["lastSubagentRouting.channelId", "lastSubagentRouting.threadTs", "lastSubagentRouting.outputThreadTsPresent"],
+  },
+  {
+    id: "immediate_receipt_reaction",
+    label: "Immediate receipt reaction",
+    prompt: "Trigger a Slack turn and verify the configured receipt reaction appears promptly without changing final routing.",
+    telemetryHints: ["recent codex-chat logs for reaction_add_failed/ok", "lastAcceptedEvent", "lastOutboundSuccess"],
+  },
+  {
+    id: "telemetry_redaction",
+    label: "Telemetry redaction",
+    prompt: "Review this panel/raw telemetry and verify it contains only IDs/counts/statuses, not Slack tokens, signatures, or message bodies.",
+    telemetryHints: ["values=read-only redacted metadata", "textLength only", "no text/body/token fields"],
+  },
+];
+
+async function slackCanarySummary(config: BrainAdminServiceConfig) {
+  const telemetry = await slackTelemetrySummary(config);
+  const store = await readSlackCanaryStore(config.slackCanaryPath);
+  const items = SLACK_CANARY_ITEMS.map((definition) => ({
+    ...definition,
+    ...(store.items[definition.id] ?? { id: definition.id, status: "pending" as const }),
+  }));
+  const counts = Object.fromEntries(["pending", "passed", "failed", "blocked", "not_applicable"].map((status) => [
+    status,
+    items.filter((item) => item.status === status).length,
+  ]));
+  return {
+    schemaVersion: 1,
+    source: "brain-private-file",
+    path: resolveEnvFilePath(config.slackCanaryPath),
+    values: "manual operator outcomes only; notes/evidence are redacted and stored in Brain private local state",
+    updatedAt: store.updatedAt,
+    updatedBy: store.updatedBy,
+    counts,
+    items,
+    telemetryRollup: {
+      health: telemetry.health,
+      counts: telemetry.counters,
+      context: telemetry.lastContextDecision,
+      outputTarget: {
+        channelId: telemetry.lastOutboundSuccess?.channelId ?? telemetry.lastOutboundAttempt?.channelId,
+        threadTs: telemetry.lastOutboundSuccess?.threadTs ?? telemetry.lastOutboundAttempt?.threadTs,
+        outboundResultCount: telemetry.lastOutboundSuccess?.outboundResultCount ?? telemetry.lastOutboundAttempt?.outboundResultCount,
+      },
+      inbound: {
+        lastAcceptedEvent: telemetry.lastAcceptedEvent,
+        lastIgnoredOrRejected: telemetry.lastIgnoredOrRejected,
+      },
+      outbound: {
+        lastOutboundSuccess: telemetry.lastOutboundSuccess,
+        lastOutboundFailure: telemetry.lastOutboundFailure,
+      },
+      subagent: telemetry.lastSubagentRouting,
+      recentErrors: [telemetry.lastIgnoredOrRejected, telemetry.lastOutboundFailure].filter(Boolean),
+    },
+  };
+}
+
+async function handleSlackCanaryUpdate(response: ServerResponse, config: BrainAdminServiceConfig, adminEmail: string, payload: Record<string, unknown>): Promise<void> {
+  const itemId = typeof payload.itemId === "string" ? payload.itemId.trim() : "";
+  const definition = SLACK_CANARY_ITEMS.find((item) => item.id === itemId);
+  if (!definition) return sendJson(response, 400, { error: "unknown_canary_item", supported: SLACK_CANARY_ITEMS.map((item) => item.id) });
+  const status = typeof payload.status === "string" ? payload.status.trim() : "";
+  if (!isSlackCanaryStatus(status)) return sendJson(response, 400, { error: "invalid_canary_status", supported: ["pending", "passed", "failed", "blocked", "not_applicable"] });
+  const now = new Date().toISOString();
+  const store = await readSlackCanaryStore(config.slackCanaryPath);
+  store.items[itemId] = {
+    id: itemId,
+    status,
+    updatedAt: now,
+    updatedBy: adminEmail,
+    notes: sanitizeCanaryFreeform(payload.notes),
+    evidence: sanitizeCanaryFreeform(payload.evidence),
+  };
+  store.updatedAt = now;
+  store.updatedBy = adminEmail;
+  await writeSlackCanaryStore(config.slackCanaryPath, store);
+  await appendAudit(config, { action: "slack.canary.update", adminEmail, itemId, status, storePath: resolveEnvFilePath(config.slackCanaryPath), values: "manual; redacted" });
+  return sendJson(response, 200, { ok: true, canary: await slackCanarySummary(config) });
+}
+
+function isSlackCanaryStatus(value: string): value is SlackCanaryStatus {
+  return value === "pending" || value === "passed" || value === "failed" || value === "blocked" || value === "not_applicable";
+}
+
+async function readSlackCanaryStore(filePath: string): Promise<SlackCanaryStore> {
+  const resolved = resolveEnvFilePath(filePath);
+  const raw = await readTextIfPresent(resolved);
+  if (!raw) return { schemaVersion: 1, items: {} };
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const items: Record<string, SlackCanaryItemState> = {};
+    if (parsed.items && typeof parsed.items === "object" && !Array.isArray(parsed.items)) {
+      for (const [id, value] of Object.entries(parsed.items as Record<string, unknown>)) {
+        if (!SLACK_CANARY_ITEMS.some((item) => item.id === id) || !value || typeof value !== "object" || Array.isArray(value)) continue;
+        const record = value as Record<string, unknown>;
+        const status = typeof record.status === "string" && isSlackCanaryStatus(record.status) ? record.status : "pending";
+        items[id] = {
+          id,
+          status,
+          updatedAt: typeof record.updatedAt === "string" ? redactTelemetryText(record.updatedAt) : undefined,
+          updatedBy: typeof record.updatedBy === "string" ? redactTelemetryText(record.updatedBy) : undefined,
+          notes: sanitizeCanaryFreeform(record.notes),
+          evidence: sanitizeCanaryFreeform(record.evidence),
+        };
+      }
+    }
+    return {
+      schemaVersion: 1,
+      updatedAt: typeof parsed.updatedAt === "string" ? redactTelemetryText(parsed.updatedAt) : undefined,
+      updatedBy: typeof parsed.updatedBy === "string" ? redactTelemetryText(parsed.updatedBy) : undefined,
+      items,
+    };
+  } catch {
+    return { schemaVersion: 1, items: {} };
+  }
+}
+
+async function writeSlackCanaryStore(filePath: string, store: SlackCanaryStore): Promise<void> {
+  const resolved = resolveEnvFilePath(filePath);
+  await mkdir(path.dirname(resolved), { recursive: true, mode: 0o700 });
+  const tmp = `${resolved}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmp, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+  await chmod(tmp, 0o600).catch(() => undefined);
+  await rename(tmp, resolved);
+}
+
+function sanitizeCanaryFreeform(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const redacted = redactTelemetryText(value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim());
+  return redacted ? redacted.slice(0, 800) : undefined;
 }
 
 

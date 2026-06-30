@@ -41,6 +41,7 @@ function config(root: string, overrides: Partial<BrainAdminServiceConfig> = {}):
     slackEventsBaseUrl: "https://brain.decisive-outcomes.com",
     slackEventsPath: "/api/slack/events",
     slackAppId: undefined,
+    slackCanaryPath: path.join(root, "slack-canary.json"),
     ...overrides,
   } as BrainAdminServiceConfig;
 }
@@ -193,6 +194,11 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /Skip Slack for now/);
   assert.match(html, /Missing required setting/);
   assert.match(html, /Mission Control/);
+  assert.match(html, /Slack Canary/);
+  assert.match(html, /Slack Visibility \/ Canary/);
+  assert.match(html, /Slack visibility \/ canary rollup/);
+  assert.match(html, /Manual read-only canary checklist/);
+  assert.match(html, /Telemetry correlation rollup/);
   assert.match(html, /OpenRouter/);
   assert.match(html, /OpenRouter subagent model settings/);
   assert.match(html, /Review & write OpenRouter settings/);
@@ -559,6 +565,100 @@ test("brain admin exposes read-only Slack telemetry without leaking message bodi
       const serialized = JSON.stringify(payload);
       assert.equal(serialized.includes("do not expose this message body"), false);
       assert.equal(serialized.includes("xoxb-super-secret"), false);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain admin persists manual Slack canary outcomes and correlates redacted telemetry", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-slack-canary-"));
+  try {
+    const observedAt = new Date().toISOString();
+    const summaryPath = path.join(root, "codex-chat", "data", "state", "slack_telemetry", "summary.json");
+    await writeFileRecursive(summaryPath, JSON.stringify({
+      schemaVersion: 1,
+      updatedAt: observedAt,
+      counters: { "inbound.accepted": 2, "outbound.success": 1, "context.hydrated": 1 },
+      lastAcceptedEvent: {
+        observedAt,
+        direction: "inbound",
+        outcome: "accepted",
+        eventType: "app_mention",
+        channelId: "CROOT",
+        userId: "U123",
+        text: "must not leak",
+      },
+      lastContextDecision: {
+        observedAt,
+        direction: "context",
+        outcome: "hydrated",
+        sourceKind: "channel",
+        selectedSources: ["channel_history"],
+        messagesIncluded: 5,
+        fallbackCodes: ["no_thread_history:missing_scope"],
+        promptExposed: true,
+        channelId: "CROOT",
+        threadTs: "1782000000.000100",
+      },
+      lastOutboundSuccess: {
+        observedAt,
+        direction: "outbound",
+        outcome: "success",
+        channelId: "CROOT",
+        threadTs: "1782000000.000100",
+        outboundResultCount: 1,
+      },
+      lastSubagentRouting: {
+        observedAt,
+        direction: "subagent",
+        outcome: "callback_routed",
+        channelId: "CROOT",
+        threadTs: "1782000000.000100",
+        outputThreadTsPresent: true,
+      },
+    }));
+
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const initial = await fetch(`${baseUrl}/api/admin/brain/slack/canary`, { headers: authHeaders() });
+      assert.equal(initial.status, 200);
+      const initialPayload = await initial.json() as {
+        items: Array<{ id: string; label: string; telemetryHints: string[]; status: string }>;
+        telemetryRollup: { context?: { sourceKind?: string; selectedSources?: string[]; fallbackCodes?: string[] }; outputTarget: { channelId?: string; threadTs?: string }; counts: Record<string, number>; subagent?: { outputThreadTsPresent?: boolean } };
+      };
+      assert.ok(initialPayload.items.some((item) => item.id === "root_channel_attached_thread_reply" && item.label === "Root-channel attached-thread reply"));
+      assert.ok(initialPayload.items.some((item) => item.label === "Telemetry redaction"));
+      assert.equal(initialPayload.telemetryRollup.context?.sourceKind, "channel");
+      assert.deepEqual(initialPayload.telemetryRollup.context?.selectedSources, ["channel_history"]);
+      assert.deepEqual(initialPayload.telemetryRollup.context?.fallbackCodes, ["no_thread_history:missing_scope"]);
+      assert.equal(initialPayload.telemetryRollup.outputTarget.channelId, "CROOT");
+      assert.equal(initialPayload.telemetryRollup.outputTarget.threadTs, "1782000000.000100");
+      assert.equal(initialPayload.telemetryRollup.counts["inbound.accepted"], 2);
+      assert.equal(initialPayload.telemetryRollup.subagent?.outputThreadTsPresent, true);
+      assert.equal(JSON.stringify(initialPayload).includes("must not leak"), false);
+
+      const update = await fetch(`${baseUrl}/api/admin/brain/slack/canary`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({
+          itemId: "root_channel_attached_thread_reply",
+          status: "passed",
+          evidence: "CROOT/1782000000.000100 Bearer xoxb-super-secret",
+          notes: "reply landed in attached thread",
+        }),
+      });
+      assert.equal(update.status, 200);
+      const updatePayload = await update.json() as { canary: { counts: Record<string, number>; items: Array<{ id: string; status: string; evidence?: string; notes?: string; updatedBy?: string }> } };
+      assert.equal(updatePayload.canary.counts.passed, 1);
+      const item = updatePayload.canary.items.find((entry) => entry.id === "root_channel_attached_thread_reply");
+      assert.equal(item?.status, "passed");
+      assert.equal(item?.updatedBy, "tim.galebach@gmail.com");
+      assert.equal(item?.evidence?.includes("xoxb-super-secret"), false);
+      assert.match(item?.evidence ?? "", /Bearer \[redacted-slack-token\]/);
+
+      const storeText = await readFile(path.join(root, "slack-canary.json"), "utf8");
+      assert.equal(storeText.includes("xoxb-super-secret"), false);
+      assert.match(storeText, /root_channel_attached_thread_reply/);
     });
   } finally {
     await rm(root, { recursive: true, force: true });

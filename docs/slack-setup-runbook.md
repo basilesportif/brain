@@ -206,11 +206,14 @@ configured service path/name, and whether `brain-admin.service` and
 Slack calls it: request signatures, URL verification responses, event
 deduplication/normalization, model dispatch, and Slack Web API replies.
 
-Until the future Slack callback/test-event telemetry plan is implemented, Brain
-does not have an automatic dashboard proof that Slack delivered an event or that
-a canary reply succeeded. Treat Slack's Event Subscriptions verification screen,
-manual DM/app-mention canaries, and redacted codex-chat Slack logs as the live
-source of truth.
+Brain now has a read-only/manual Slack visibility panel under admin Mission
+Control / Slack Canary. It displays codex-chat's redacted telemetry rollup and
+persists operator-entered canary outcomes in Brain private local state (default
+`~/.brain/control-plane/slack-canary.json`, unless `BRAIN_SLACK_CANARY_PATH` is
+set). It is not an active canary runner and does not send Slack messages. Treat
+Slack's Event Subscriptions verification screen, manual DM/app-mention canaries,
+the admin Slack Canary panel, and redacted codex-chat Slack logs as the live
+source of truth until automatic test-event/canary proof exists.
 
 ## Live Slack canary checklist
 
@@ -247,7 +250,7 @@ loop inside the right conversation, without leaking context across channels.
    dispatches a subagent. Confirm progress/final callback output returns to the
    originating Slack thread/DM after the main turn hibernates or waits.
 
-For each canary, confirm:
+For each canary, record the manual status in Brain admin → **Slack Canary** and confirm:
 
 - Slack receives a timely reply in the correct channel/thread/DM.
 - codex-chat logs show accepted Slack event delivery, not signature rejection.
@@ -262,7 +265,7 @@ For each canary, confirm:
   metadata and do not fall back to an unrelated channel.
 - no raw Slack tokens, signing secrets, raw private-channel text, or unrelated
   channel context appear in logs, browser responses, copied troubleshooting
-  output, or public-channel replies.
+  output, the Slack Canary private notes/evidence fields, or public-channel replies.
 
 If delivery fails, check Slack **Event Subscriptions** retry/error details,
 Brain/codex-chat health, and codex-chat journal lines around the Slack
