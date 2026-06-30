@@ -211,7 +211,10 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /https:\/\/brain\.decisive-outcomes\.com\/api\/slack\/events/);
   assert.match(html, /no trailing slash/);
   assert.match(html, /I configured this inside Slack, not only in Brain/);
-  assert.match(html, /Open Slack API app settings/);
+  assert.match(html, /Open Slack App Settings/);
+  assert.match(html, /id="slack-app-settings-wizard-link"/);
+  assert.match(html, /id="slack-app-settings-top-link"/);
+  assert.match(html, /Slack API settings/);
   assert.match(html, /https:\/\/api\.slack\.com\/apps/);
   assert.match(html, /Finish \/ record install metadata/);
   assert.match(html, /Required settings/);
@@ -234,6 +237,16 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.equal(html.includes('Type exactly: write Slack settings'), false);
   assert.equal(html.includes("xoxb-super-secret"), false);
   assert.equal(html.includes("signing-secret"), false);
+});
+
+test("brain admin page renders direct Slack app settings URL when app id is configured", () => {
+  const cfg = config("/tmp/brain-admin-render-app-id", { slackAppId: "A0123456789" });
+  const html = renderBrainAdminPage(cfg, "tim.galebach@gmail.com");
+
+  assert.match(html, /Open Slack App Settings/);
+  assert.match(html, /https:\/\/api\.slack\.com\/apps\/A0123456789/);
+  assert.match(html, /id="slack-app-settings-wizard-url"/);
+  assert.match(html, /id="slack-app-settings-top-url"/);
 });
 
 test("brain admin settings identify the concrete local instance separately from repo registry", async () => {
