@@ -879,18 +879,18 @@ execution.
 
 ### Phase 4 — capability requirements, enforcement, and audit spine
 
-Status as of 2026-06-30: Brain control-plane Phase 5 capabilities work can start
-now because the manual Slack visibility/canary slice is complete. Start with the
-separate Brain UI **Capabilities** tab, read-only catalog/store, grant/audit
-vocabulary, and audit-event shape. Do not start full capability enforcement,
-capability bundles, temporary approval flows, or admin grant management directly
-from the rough capability lists in this document. First run/continue dedicated
-planning to capture
-all requirements and produce the canonical capability vocabulary, resource
-selector model, grant lifecycle, migration plan, audit schema, denial behavior,
-and admin UX. Brain should own the admin/planning/control-plane surface for
-capabilities and audit, while `codex-chat` enforces runtime checks at tools,
-adapters, output sends, and subagent execution.
+Status as of 2026-06-30: Brain control-plane Phase 5 has its first read-only
+slice: the separate Brain UI **Capabilities** tab, grouped catalog/store,
+subject/grant vocabulary, group-implies-child semantics, and audit-event shape.
+It remains non-enforcing and does not grant live permissions. Do not start full
+capability enforcement, temporary approval flows, or live admin grant management
+directly from the rough capability lists in this document. Continue dedicated
+planning/validation to capture all requirements and produce the canonical
+enforcement vocabulary, resource selector model, grant lifecycle, migration
+plan, audit schema, denial behavior, and admin UX. Brain should own the
+admin/planning/control-plane surface for capabilities and audit, while
+`codex-chat` enforces runtime checks at tools, adapters, output sends, and
+subagent execution only after review.
 
 Tim's capability-system decisions to carry into that planning session:
 
@@ -947,7 +947,11 @@ extension rather than a hidden behavior in the first implementation.
 - [x] Add a separate Brain admin **Capabilities** tab/section placeholder for
       read-only catalog, grant vocabulary, audit event shape, and explicit
       no-enforcement constraints.
-- [ ] Define canonical capability IDs/descriptions.
+- [x] Add the first Brain-owned read-only capability catalog/store/admin surface
+      with Projects, CRM, Calendar, Slack, Todos, Finance, Health, and
+      capability-admin groups; Projects group grants visibly imply child project
+      capabilities. This is validation vocabulary, not live enforcement.
+- [ ] Define canonical capability IDs/descriptions for enforced runtime checks.
 - [ ] Define bundle semantics for common trust levels while preserving
       individual auditable grants.
 - [ ] Enforce checks at every runtime-owned tool call and output send.

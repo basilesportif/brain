@@ -577,12 +577,13 @@ rollup; it still does not send Slack messages or change Slack runtime behavior.
 
 ### Phase 5 — capability and audit control plane
 
-Status as of 2026-06-30: Phase 5 can start now. The first surface should be a
-separate Brain UI tab/section named **Capabilities**, distinct from Slack setup,
-Mission Control, Runtime Config, and Audit Log. Start with read-only/manual
-control-plane vocabulary before enforcement: a capability catalog, grant model,
-resource/action selectors, and audit event shape. No live Slack behavior should
-change in this slice.
+Status as of 2026-06-30: the first Phase 5 slice is implemented as a separate
+Brain UI tab/section named **Capabilities**, distinct from Slack setup, Mission
+Control, Runtime Config, and Audit Log. It provides read-only/manual
+control-plane vocabulary before enforcement: a grouped capability catalog, a
+private local seed store for subjects/grants/audit shape, resource/action
+selectors, visible group-implies-child semantics, and audit event schema. No
+live Slack or `codex-chat` authorization behavior changes in this slice.
 
 First MVP Brain UI surface:
 
@@ -607,16 +608,32 @@ Constraints for Phase 5 startup:
 - `codex-chat` remains the runtime enforcement point for tools, adapter reads,
   output sends, and subagent dispatch; Brain owns admin/catalog/audit surfaces.
 
-First implementation slice after this planning pass:
+First implementation slice status:
 
-1. Add/keep the Brain UI **Capabilities** tab with a read-only catalog and grant
-   vocabulary.
-2. Add a read-only local/private catalog store schema and loader, with seed data
-   only; no grant writes and no runtime decisions.
-3. Define the first audit event shape (`capability.catalog.viewed`,
+1. [x] Add/keep the Brain UI **Capabilities** tab with a read-only catalog and
+   grant vocabulary.
+2. [x] Add a read-only local/private catalog store schema and loader, with seed
+   data only; no grant writes and no runtime decisions. Default path:
+   `/home/tim/.brain/control-plane/capabilities.json`.
+3. [x] Define the first audit event shape (`capability.catalog.viewed`,
    `capability.grant.proposed`, `capability.check.observed`) with redacted
-   metadata and correlation IDs.
-4. Wire tests around no-secret rendering and no live enforcement paths.
+   metadata and correlation IDs. The schema is persisted in the private store;
+   append-only grant mutation audit writes remain disabled until grant writes
+   exist.
+4. [x] Wire tests around no-secret rendering, grouped Project grant inheritance,
+   read-only API behavior, and no live enforcement paths.
+
+Concrete next options:
+
+1. Validate the first catalog vocabulary against real Projects, Slack, CRM,
+   Calendar, Todos, Finance, and Health workflows.
+2. Add explicit admin-only grant proposal/apply/revoke APIs with confirmation
+   dialogs, non-secret diff previews, and append-only audit records.
+3. Import `codex-chat` runtime capability-check observations before enforcement.
+4. Design bundles/roles that expand into ordinary per-capability grants, rather
+   than bypassing the model.
+5. Only after review, wire `codex-chat` runtime tools/output sends to
+   fail-closed capability checks.
 
 - [ ] Implement Brain-owned actor, bundle, grant, temporary approval, and
       revocation administration after the read-only model is validated.

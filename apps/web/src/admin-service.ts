@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { authorizeBrainAdminRequest, isBrainAdminAuthConfigured, parseAdminAllowedEmails, type ClerkUserLookup, type VerifyClerkToken } from "./admin-auth.js";
+import { capabilityAdminSummary } from "./capabilities.js";
 import { envFileMetadata, readEnvKeyPresence, resolveEnvFilePath, writeMergedEnvFile } from "./env-file.js";
 import { renderBrainAdminDeniedPage, renderBrainAdminPage, renderBrainAdminSignInPage } from "./admin-page.js";
 
@@ -75,6 +76,8 @@ export interface BrainAdminServiceConfig {
   slackEventsPath: string;
   slackAppId?: string;
   slackCanaryPath: string;
+  capabilityStorePath: string;
+  capabilityAuditLogPath: string;
 }
 
 export interface BrainAdminServiceDeps {
@@ -97,6 +100,9 @@ export function loadBrainAdminServiceConfig(env: NodeJS.ProcessEnv = process.env
   const localIp = defaultLocalIp();
   const codexChatPath = env.BRAIN_CODEX_CHAT_PATH || "/home/tim/pkg/tim/codex-chat";
   const auditLogPath = env.BRAIN_ADMIN_AUDIT_LOG || "/home/tim/.brain/control-plane/audit.jsonl";
+  const controlPlaneDir = path.dirname(resolveEnvFilePath(auditLogPath));
+  const capabilityStorePath = env.BRAIN_CAPABILITY_STORE_PATH || path.join(controlPlaneDir, "capabilities.json");
+  const capabilityAuditLogPath = env.BRAIN_CAPABILITY_AUDIT_LOG || path.join(path.dirname(resolveEnvFilePath(capabilityStorePath)), "capability-audit.jsonl");
   return {
     enabled: boolEnv(env.BRAIN_ADMIN_ENABLED, true),
     host: env.BRAIN_ADMIN_HOST || "127.0.0.1",
@@ -129,6 +135,8 @@ export function loadBrainAdminServiceConfig(env: NodeJS.ProcessEnv = process.env
     slackEventsPath: normalizeRoutePath(env.BRAIN_SLACK_EVENTS_PATH || SLACK_EVENTS_PATH),
     slackAppId: normalizeSlackAppId(env.BRAIN_SLACK_APP_ID || env.SLACK_APP_ID || env.CODEX_CHAT_SLACK_APP_ID || ""),
     slackCanaryPath: env.BRAIN_SLACK_CANARY_PATH || path.join(path.dirname(auditLogPath), "slack-canary.json"),
+    capabilityStorePath,
+    capabilityAuditLogPath,
   };
 }
 
@@ -219,6 +227,9 @@ async function handleAdminApi(request: IncomingMessage, response: ServerResponse
     const manifest = await renderSlackManifestForBrain(config);
     return sendDownload(response, "brain.slack.manifest.json", manifest.text);
   }
+  if (request.method === "GET" && url.pathname === "/api/admin/brain/capabilities") {
+    return sendJson(response, 200, await capabilityAdminSummary({ storePath: config.capabilityStorePath, auditLogPath: config.capabilityAuditLogPath, adminEmail }));
+  }
   if (request.method === "POST" && url.pathname === "/api/admin/brain/codex-chat/operation") {
     const payload = await readJsonBody(request);
     return handleOperation(response, config, deps, adminEmail, payload);
@@ -275,6 +286,13 @@ async function serviceSettings(config: BrainAdminServiceConfig) {
     slack: await slackSettingsSummary(config),
     slackCanary: await slackCanarySummary(config),
     openRouter: await openRouterSettingsSummary(config),
+    capabilities: {
+      storePath: resolveEnvFilePath(config.capabilityStorePath),
+      auditLogPath: resolveEnvFilePath(config.capabilityAuditLogPath),
+      writesEnabled: false,
+      enforcementEnabled: false,
+      role: "read-only Phase 5 catalog/store/admin surface; codex-chat runtime enforcement is not connected",
+    },
   };
 }
 

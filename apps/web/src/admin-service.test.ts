@@ -42,6 +42,8 @@ function config(root: string, overrides: Partial<BrainAdminServiceConfig> = {}):
     slackEventsPath: "/api/slack/events",
     slackAppId: undefined,
     slackCanaryPath: path.join(root, "slack-canary.json"),
+    capabilityStorePath: path.join(root, "capabilities.json"),
+    capabilityAuditLogPath: path.join(root, "capability-audit.jsonl"),
     ...overrides,
   } as BrainAdminServiceConfig;
 }
@@ -205,6 +207,13 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /Confirm OpenRouter settings write/);
   assert.match(html, /Slack Details/);
   assert.match(html, /Manifest/);
+  assert.match(html, /Capabilities/);
+  assert.match(html, /Phase 5 read-only catalog\/store\/admin surface/);
+  assert.match(html, /View grants for subject/);
+  assert.match(html, /Grouped catalog/);
+  assert.match(html, /Audit event shape/);
+  assert.match(html, /Read-only \/ non-enforcing/);
+  assert.match(html, /Raw \/capabilities/);
   assert.match(html, /Runtime Config/);
   assert.match(html, /Env &amp; Config/);
   assert.match(html, /Deploy \/ Restart/);
@@ -282,6 +291,75 @@ test("brain admin settings identify the concrete local instance separately from 
       assert.equal(payload.codexChat.operationCommands.restart.configured, true);
       assert.match(payload.codexChat.operationCommands.restart.command ?? "", /echo restart-ok/);
       assert.equal(payload.codexChat.operationCommands.deploy.configured, true);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain admin capabilities API exposes read-only grouped catalog, subjects, seed grants, and audit shape", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-capabilities-"));
+  try {
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/admin/brain/capabilities`, { headers: authHeaders() });
+      assert.equal(response.status, 200);
+      const payload = await response.json() as {
+        path: string;
+        writesEnabled: boolean;
+        enforcement: { enabled: boolean; codexChatChanged: boolean };
+        catalog: { groups: Array<{ id: string; label: string; semantics: { impliedCapabilityIds: string[] }; children: Array<{ id: string; label: string }> }>; counts: { groups: number; capabilities: number } };
+        store: { path: string; mode?: string; seededThisRequest: boolean };
+        defaultSubjectId: string;
+        subjects: Array<{ id: string; kind: string; label: string }>;
+        grants: Array<{ id: string; subjectId: string; capabilityId: string; grantKind: string; enforcement: string }>;
+        effectiveBySubject: Record<string, { directGroupCapabilityIds: string[]; impliedCapabilityIds: string[]; byCapabilityId: Record<string, { effective: boolean; impliedByCapabilityIds: string[] }> }>;
+        audit: { writesEnabled: boolean; requiredFields: string[]; eventTypes: Array<{ type: string }>; sampleEvent: Record<string, unknown> };
+      };
+
+      assert.equal(payload.path, path.join(root, "capabilities.json"));
+      assert.equal(payload.store.path, path.join(root, "capabilities.json"));
+      assert.equal(payload.writesEnabled, false);
+      assert.equal(payload.enforcement.enabled, false);
+      assert.equal(payload.enforcement.codexChatChanged, false);
+      assert.ok(payload.catalog.counts.groups >= 7);
+      assert.ok(payload.catalog.counts.capabilities >= 20);
+
+      const projects = payload.catalog.groups.find((group) => group.id === "projects");
+      assert.ok(projects);
+      assert.equal(projects.label, "Projects");
+      assert.ok(projects.semantics.impliedCapabilityIds.includes("projects.files.write"));
+      assert.ok(projects.children.some((child) => child.id === "projects.tasks.write"));
+
+      assert.ok(payload.subjects.some((subject) => subject.id === "brain-admin:current" && subject.kind === "admin_user" && /tim\.galebach@gmail\.com/.test(subject.label)));
+      assert.ok(payload.subjects.some((subject) => subject.id === "slack:channel:T00000000:C00000000" && subject.kind === "slack_channel"));
+      assert.ok(payload.grants.some((grant) => grant.id === "grant_seed_current_admin_projects_group" && grant.capabilityId === "projects" && grant.grantKind === "group" && grant.enforcement === "non_enforcing"));
+      assert.ok(payload.grants.some((grant) => grant.capabilityId === "slack.channel.read" && grant.grantKind === "capability"));
+
+      const adminEffective = payload.effectiveBySubject["brain-admin:current"];
+      assert.ok(adminEffective);
+      assert.ok(adminEffective.directGroupCapabilityIds.includes("projects"));
+      assert.ok(adminEffective.impliedCapabilityIds.includes("projects.files.write"));
+      assert.equal(adminEffective.byCapabilityId["projects.files.write"].effective, true);
+      assert.deepEqual(adminEffective.byCapabilityId["projects.files.write"].impliedByCapabilityIds, ["projects"]);
+
+      assert.equal(payload.audit.writesEnabled, false);
+      assert.ok(payload.audit.requiredFields.includes("correlationId"));
+      assert.ok(payload.audit.eventTypes.some((event) => event.type === "capability.grant.proposed"));
+      assert.ok(payload.audit.eventTypes.some((event) => event.type === "capability.check.observed"));
+      assert.equal(JSON.stringify(payload).includes("xoxb-super-secret"), false);
+
+      const fileInfo = await stat(path.join(root, "capabilities.json"));
+      assert.equal(`0${(fileInfo.mode & 0o777).toString(8)}`, "0600");
+      const store = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8")) as { mode: string; audit: { eventTypes: Array<{ type: string }> } };
+      assert.equal(store.mode, "read_only_seed");
+      assert.ok(store.audit.eventTypes.some((event) => event.type === "capability.catalog.viewed"));
+
+      const writeAttempt = await fetch(`${baseUrl}/api/admin/brain/capabilities`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ capabilityId: "projects" }),
+      });
+      assert.equal(writeAttempt.status, 404);
     });
   } finally {
     await rm(root, { recursive: true, force: true });

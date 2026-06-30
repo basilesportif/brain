@@ -41,6 +41,8 @@ BRAIN_CODEX_CHAT_CONFIG_FILE=/home/tim/pkg/tim/codex-chat/config/codex-chat.toml
 BRAIN_CODEX_CHAT_SERVICE_NAME=codex-chat.service \
 BRAIN_CODEX_CHAT_DEPLOY_COMMAND='cd /home/tim/pkg/tim/codex-chat && git pull --ff-only && pnpm install --frozen-lockfile && pnpm run build' \
 BRAIN_CODEX_CHAT_RESTART_COMMAND='systemctl --user restart codex-chat.service' \
+BRAIN_CAPABILITY_STORE_PATH=/home/tim/.brain/control-plane/capabilities.json \
+BRAIN_CAPABILITY_AUDIT_LOG=/home/tim/.brain/control-plane/capability-audit.jsonl \
 pnpm run brain-admin
 ```
 
@@ -60,6 +62,9 @@ Routes:
 - `GET /api/admin/brain/slack/telemetry` — read-only Slack runtime telemetry summary from codex-chat state; redacted metadata only.
 - `GET /api/admin/brain/slack/manifest` — render the codex-chat-owned Slack manifest contract with Brain's public Events URL.
 - `GET /api/admin/brain/slack/manifest/download` — download the rendered manifest JSON.
+- `GET /api/admin/brain/capabilities` — read-only Phase 5 capability catalog,
+  private local subject/grant seed store metadata, group-implies-child grant
+  view, and audit event schema. No grant writes or runtime enforcement.
 
 The service fails closed when Clerk keys or `CLERK_ALLOWED_EMAILS` are missing.
 Env values are write-only in API responses and audit records; responses expose
@@ -134,6 +139,36 @@ Telemetry responses must not include Slack tokens, signing secrets, signatures,
 headers, request bodies, challenge values, message text, channel names, or user
 names. Slack IDs and timestamps are operational metadata only and are exposed
 through the Clerk-protected admin UI.
+
+## Capabilities tab boundary
+
+The admin UI includes a dedicated **Capabilities** tab for the first Phase 5
+slice. It is intentionally separate from Slack setup, Mission Control, Runtime
+Config, and Audit Log.
+
+Implemented in this slice:
+
+- Brain-owned read-only catalog groups for Projects, CRM, Calendar, Slack,
+  Todos, Finance placeholders, Health placeholders, and capability
+  administration.
+- Stable capability IDs, labels, descriptions, actions, resource selectors, and
+  group inheritance semantics. A top-level `projects` group grant visibly
+  implies child project capabilities such as `projects.files.write` while
+  preserving child rows/details.
+- Private local seed store at `BRAIN_CAPABILITY_STORE_PATH` (default
+  `/home/tim/.brain/control-plane/capabilities.json`) with separate subjects
+  such as current Brain admin, Slack workspace/user/channel placeholders, and a
+  codex-chat runtime placeholder.
+- Non-enforcing seed grants only. The UI is read-only; there is no POST grant
+  route, no live Slack behavior change, and no `codex-chat` authorization hook.
+- Audit event schema persisted in the private store, including
+  `capability.catalog.viewed`, `capability.grant.proposed`, and
+  `capability.check.observed`. Append-only grant mutation audit records should
+  be written to `BRAIN_CAPABILITY_AUDIT_LOG` only after explicit grant writes
+  are implemented.
+
+Capability responses must not include secrets, Slack message bodies, raw health
+or finance data, tokens, cookies, or credential values.
 
 ## Systemd and Caddy sketch
 
