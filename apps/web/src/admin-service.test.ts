@@ -137,6 +137,7 @@ test("brain admin auth failures show signed-in account and switch-account action
       const deniedHtml = await deniedPage.text();
       assert.match(deniedHtml, /other@example\.test/);
       assert.match(deniedHtml, /Sign out/);
+      assert.equal(deniedHtml.includes("Brain Control Plane"), false);
       assert.match(deniedHtml, /switch Clerk account/);
 
       const deniedApi = await fetch(`${baseUrl}/api/admin/brain/me`, { headers: authHeaders() });
@@ -159,11 +160,13 @@ test("brain admin auth pages embed parseable JSON config and keep account contro
   assert.match(signInHtml, /brain-admin-auto-continue/);
   assert.match(signInHtml, /Automatic continue already ran once/);
   assert.match(signInHtml, /Checking whether this account is allowlisted/);
+  assert.equal(signInHtml.includes("Brain Control Plane"), false);
 
   const deniedHtml = renderBrainAdminDeniedPage(cfg, "forbidden", "https://brain.example.test/admin/auth/sign-in", "other@example.test");
   assert.deepEqual(extractJsonScript(deniedHtml, "config"), { publishableKey: `pk_test_<unsafe>&value`, signInUrl: "https://brain.example.test/admin/auth/sign-in" });
   assert.match(deniedHtml, /other@example\.test/);
   assert.match(deniedHtml, /Sign out/);
+  assert.equal(deniedHtml.includes("Brain Control Plane"), false);
 });
 
 test("brain admin page renders redesigned dashboard IA without secrets", () => {
@@ -182,10 +185,19 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /account-menu/);
   assert.match(html, /mobile-section-menu-button/);
   assert.match(html, /Open admin section menu/);
-  assert.match(html, /Jump to section/);
+  assert.match(html, /Control Plane sections/);
+  assert.match(html, /Capabilities &amp; Users sections/);
   assert.match(html, /mobile-section-popover/);
   assert.match(html, /tim\.galebach@gmail\.com/);
   assert.match(html, /Sign out \/ switch account/);
+  assert.match(html, /<title>Brain<\/title>/);
+  assert.equal(html.includes("Brain Control Plane"), false);
+  assert.match(html, /id="admin-shell" class="shell" data-app-area="control-plane"/);
+  assert.match(html, /data-app-area-switch="control-plane"[^>]*>Control Plane/);
+  assert.match(html, /data-app-area-switch="capabilities-users"[^>]*>Capabilities & Users/);
+  assert.match(html, /aria-label="Control Plane sections"/);
+  assert.match(html, /aria-label="Capabilities &amp; Users sections"/);
+  assert.equal(html.includes("href=\"#capabilities\""), false);
   assert.match(html, /Overview/);
   assert.match(html, /State-aware operator console/);
   assert.match(html, /Slack setup wizard/);
@@ -207,11 +219,22 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /Confirm OpenRouter settings write/);
   assert.match(html, /Slack Details/);
   assert.match(html, /Manifest/);
-  assert.match(html, /Capabilities/);
-  assert.match(html, /Phase 5 non-enforcing identity\/capability foundation/);
+  assert.match(html, /Capabilities &amp; Users/);
+  assert.match(html, /href="#cap-overview"/);
+  assert.match(html, /href="#cap-users"/);
+  assert.match(html, /href="#cap-identities"/);
+  assert.match(html, /href="#cap-grants"/);
+  assert.match(html, /href="#cap-audit"/);
+  assert.match(html, /id="cap-overview"/);
+  assert.match(html, /id="cap-users"/);
+  assert.match(html, /id="cap-identities"/);
+  assert.match(html, /id="cap-grants"/);
+  assert.match(html, /id="cap-audit"/);
+  assert.match(html, /Non-enforcing identity\/capability foundation/);
   assert.match(html, /View grants for subject/);
   assert.match(html, /Users \/ People and communication identities/);
   assert.match(html, /Future admin write API shape/);
+  assert.match(html, /External identities and channels/);
   assert.match(html, /Grouped catalog/);
   assert.match(html, /Audit event shape/);
   assert.match(html, /Read-only \/ non-enforcing/);

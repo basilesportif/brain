@@ -73,12 +73,13 @@ async function runAdminDashboardScenario(page, baseUrl, viewport) {
   const pageErrors = await stubClerk(page, { signedIn: true });
   await page.goto(`${baseUrl}/admin`, { waitUntil: 'domcontentloaded' });
   await page.locator('text=Brain').first().waitFor({ state: 'visible', timeout: 5_000 });
-  const navScope = viewport ? '#mobile-section-menu' : '.side';
+  assert.equal(await page.title(), 'Brain');
+  const navScope = viewport ? '#mobile-section-menu' : '.side[data-app-area="control-plane"]';
   if (viewport) {
     await page.locator('#mobile-section-menu').waitFor({ state: 'hidden', timeout: 5_000 });
     await page.locator('button[aria-label="Open admin section menu"]').click();
     await page.locator('#mobile-section-menu').waitFor({ state: 'visible', timeout: 5_000 });
-    await page.locator('#mobile-section-menu', { hasText: 'Jump to section' }).waitFor({ state: 'visible', timeout: 5_000 });
+    await page.locator('#mobile-section-menu', { hasText: 'Control Plane sections' }).waitFor({ state: 'visible', timeout: 5_000 });
   }
   await page.locator(`${navScope} a[href="#overview"]`).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator(`${navScope} a[href="#slack-setup"]`).waitFor({ state: 'visible', timeout: 5_000 });
@@ -94,6 +95,33 @@ async function runAdminDashboardScenario(page, baseUrl, viewport) {
     await page.locator(`${navScope} a[href="#overview"]`).click();
     await page.locator('#mobile-section-menu').waitFor({ state: 'hidden', timeout: 5_000 });
   }
+
+  await page.locator('#app-area-capabilities-users').click();
+  await page.locator('#admin-shell[data-app-area="capabilities-users"]').waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#app-area-capabilities-users[aria-pressed="true"]').waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#cap-overview').waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#overview').waitFor({ state: 'hidden', timeout: 5_000 });
+  const capNavScope = viewport ? '#mobile-section-menu' : '.side[data-app-area="capabilities-users"]';
+  if (viewport) {
+    await page.locator('button[aria-label="Open admin section menu"]').click();
+    await page.locator('#mobile-section-menu', { hasText: 'Capabilities & Users sections' }).waitFor({ state: 'visible', timeout: 5_000 });
+  }
+  await page.locator(`${capNavScope} a[href="#cap-overview"]`).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator(`${capNavScope} a[href="#cap-users"]`).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator(`${capNavScope} a[href="#cap-identities"]`).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator(`${capNavScope} a[href="#cap-grants"]`).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator(`${capNavScope} a[href="#cap-audit"]`).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#capabilities-status', { hasText: 'V2 identity/capability store loaded' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#capabilities-identities', { hasText: 'External identities' }).waitFor({ state: 'visible', timeout: 5_000 });
+  if (viewport) {
+    await page.locator(`${capNavScope} a[href="#cap-users"]`).click();
+    await page.locator('#mobile-section-menu').waitFor({ state: 'hidden', timeout: 5_000 });
+  }
+  await page.locator('#app-area-control-plane').click();
+  await page.locator('#admin-shell[data-app-area="control-plane"]').waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#overview').waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#cap-overview').waitFor({ state: 'hidden', timeout: 5_000 });
+
   await page.locator('#mode-title').filter({ hasText: /Slack setup wizard: Slack (setup required|partially configured)/ }).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#slack-setup').waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#slack-setup.setup-primary').waitFor({ state: 'visible', timeout: 5_000 });
@@ -130,7 +158,8 @@ async function runAdminDashboardScenario(page, baseUrl, viewport) {
   await page.locator('text=Sign out / switch account').waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('text=/^(other@example.test|tim.galebach@gmail.com)$/').first().waitFor({ state: 'visible', timeout: 5_000 });
   if (viewport) {
-    await page.locator('.mobile-tabs').waitFor({ state: 'hidden', timeout: 5_000 });
+    await page.locator('.mobile-tabs').first().waitFor({ state: 'hidden', timeout: 5_000 });
+    await page.locator('.mobile-tabs').nth(1).waitFor({ state: 'hidden', timeout: 5_000 });
     await page.locator('button[aria-label="Open admin section menu"]').waitFor({ state: 'visible', timeout: 5_000 });
   }
   const bodyText = await page.locator('body').innerText();
