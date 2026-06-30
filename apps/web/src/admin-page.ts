@@ -62,6 +62,7 @@ const adminNavItems = [
   ["OpenRouter", "openrouter"],
   ["Slack Details", "slack"],
   ["Manifest", "manifest"],
+  ["Capabilities", "capabilities"],
   ["Runtime Config", "env"],
   ["Deploy / Restart", "deploy"],
   ["Audit Log", "audit"],
@@ -297,6 +298,36 @@ function dashboard(config: BrainAdminServiceConfig): string {
         h("div", { id: "manifest-result", style: "margin-top:12px" }, ""),
         h("details", { id: "manifest-json-details", class: "details" }, h("summary", {}, "View manifest JSON"), h("div", {}, h("pre", { id: "manifest-text", class: "code mono" }, "Render the manifest to view JSON."))),
         h("details", { id: "manifest-draft-details", class: "details" }, h("summary", {}, "Draft-only manifest editor"), h("div", {}, h("p", { class: "alert warn" }, "Draft only — codex-chat remains source of truth. This editor does not save."), h("textarea", { id: "manifest-draft", class: "mono", spellcheck: "false" }, ""), h("div", { class: "row", style: "margin-top:10px" }, h("button", { class: "btn ghost", type: "button", onclick: "copyManifestDraft()" }, "Copy draft"), h("button", { class: "btn ghost", type: "button", onclick: "downloadManifestDraft()" }, "Download draft"))))
+      ),
+    ),
+    section("capabilities", "Capabilities", "Phase 5 planning surface: read-only capability catalog, grant vocabulary, and audit event shape before enforcement.",
+      h("div", { class: "two-col" },
+        h("div", { class: "card" },
+          h("h3", {}, "MVP capability catalog"),
+          h("p", { class: "alert warn" }, "Read-only placeholder. No grants are written here and no live enforcement is enabled from this tab."),
+          h("table", { class: "table" },
+            h("thead", {}, h("tr", {}, h("th", {}, "Family"), h("th", {}, "Example capability IDs"), h("th", {}, "First resource selectors"))),
+            h("tbody", {},
+              h("tr", {}, h("td", { "data-label": "Family" }, "Slack source context"), h("td", { "data-label": "Example capability IDs", class: "mono small" }, "slack.thread.read · slack.channel.read · slack.source.post"), h("td", { "data-label": "First resource selectors" }, "teamId/channelId/threadTs; source conversation only by default")),
+              h("tr", {}, h("td", { "data-label": "Family" }, "Cross-surface output"), h("td", { "data-label": "Example capability IDs", class: "mono small" }, "slack.channel.post · telegram.chat.post · artifact.share"), h("td", { "data-label": "First resource selectors" }, "explicit target channel/chat/artifact scope; no implicit exports")),
+              h("tr", {}, h("td", { "data-label": "Family" }, "Subagents and repos"), h("td", { "data-label": "Example capability IDs", class: "mono small" }, "subagent.dispatch · repo.read · repo.write"), h("td", { "data-label": "First resource selectors" }, "assistant/repo/worktree plus narrowed run context")),
+              h("tr", {}, h("td", { "data-label": "Family" }, "Administration"), h("td", { "data-label": "Example capability IDs", class: "mono small" }, "capability.grant · capability.revoke · audit.read"), h("td", { "data-label": "First resource selectors" }, "manual/admin-only subjects until model validation"))
+            )
+          )
+        ),
+        h("aside", { class: "card" },
+          h("h3", {}, "Grant and audit vocabulary"),
+          h("table", { class: "table" },
+            h("tbody", {},
+              h("tr", {}, h("th", {}, "Grant lifecycle"), h("td", {}, "proposal → manual admin grant → audited check → revoke/expire")),
+              h("tr", {}, h("th", {}, "First audit event"), h("td", { class: "mono small" }, "capability.catalog.viewed / capability.grant.proposed / capability.check.observed")),
+              h("tr", {}, h("th", {}, "Required fields"), h("td", {}, "eventId, timestamp, actor, subject, capabilityId, resource, action, decision, reason, correlationId")),
+              h("tr", {}, h("th", {}, "Constraints"), h("td", {}, "no secrets, no Slack behavior breakage, explicit audited enforcement only")),
+              h("tr", {}, h("th", {}, "Next slice"), h("td", {}, "UI tab + read-only catalog/store + audit event shape; no live enforcement"))
+            )
+          ),
+          h("p", { class: "muted small" }, "Phase 5 can start now because the Phase 4 manual Slack visibility/canary slice is complete; this tab remains informational until the model is validated.")
+        )
       ),
     ),
     section("env", "Env & Config", "Presence-only codex-chat env metadata and an advanced write-only escape hatch.",

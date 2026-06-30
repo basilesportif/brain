@@ -41,6 +41,10 @@ Repository context inspected:
   requires visible account/switch-account UX in all auth states
   (`docs/brain-admin-service.md:68-78`), and documents exact operation approval
   phrases plus the no-self-restart caution (`docs/brain-admin-service.md:80-106`).
+- `apps/web/src/admin-page.ts` now also exposes a separate **Capabilities** nav
+  item/section as the Phase 5 read-only planning surface, keeping capability
+  catalog and grant/audit vocabulary out of Slack setup, Runtime Config, and
+  Audit Log until enforcement is explicit and audited.
 - `apps/web/src/admin-service.test.ts` covers fail-closed auth, visible account
   controls, concrete-instance settings, write-only env behavior, exact operation
   approval, auditing, manifest rendering, and self-service refusal

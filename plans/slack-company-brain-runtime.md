@@ -879,9 +879,13 @@ execution.
 
 ### Phase 4 — capability requirements, enforcement, and audit spine
 
-Do not start full capability enforcement, capability bundles, temporary approval
-flows, or admin grant management directly from the rough capability lists in
-this document. First run a dedicated brainstorming/planning session to capture
+Status as of 2026-06-30: Brain control-plane Phase 5 capabilities work can start
+now because the manual Slack visibility/canary slice is complete. Start with the
+separate Brain UI **Capabilities** tab, read-only catalog/store, grant/audit
+vocabulary, and audit-event shape. Do not start full capability enforcement,
+capability bundles, temporary approval flows, or admin grant management directly
+from the rough capability lists in this document. First run/continue dedicated
+planning to capture
 all requirements and produce the canonical capability vocabulary, resource
 selector model, grant lifecycle, migration plan, audit schema, denial behavior,
 and admin UX. Brain should own the admin/planning/control-plane surface for
@@ -940,6 +944,9 @@ the actor, current chat/channel, applicable bundles, and system/admin bootstrap
 state. Future deny semantics, if ever needed, should be a deliberate later
 extension rather than a hidden behavior in the first implementation.
 
+- [x] Add a separate Brain admin **Capabilities** tab/section placeholder for
+      read-only catalog, grant vocabulary, audit event shape, and explicit
+      no-enforcement constraints.
 - [ ] Define canonical capability IDs/descriptions.
 - [ ] Define bundle semantics for common trust levels while preserving
       individual auditable grants.

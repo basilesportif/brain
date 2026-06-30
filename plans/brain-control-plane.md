@@ -558,6 +558,11 @@ and canonical deployment-ledger writes beyond the initial JSONL audit trail.
 
 ### Phase 4 — health, status, canaries, and operations
 
+Status as of 2026-06-30: the visibility/manual canary slice is complete enough
+to unblock Phase 5 capability-control-plane planning and UI scaffolding. Brain
+shows redacted codex-chat Slack telemetry and a manual/admin-entered Slack canary
+rollup; it still does not send Slack messages or change Slack runtime behavior.
+
 - [x] Add initial Slack health/status visibility: Mission Control now shows
       redacted codex-chat Slack telemetry plus a manual visibility/canary rollup.
       Telegram/provider/queue/loop/monitor depth remains future work.
@@ -572,12 +577,54 @@ and canonical deployment-ledger writes beyond the initial JSONL audit trail.
 
 ### Phase 5 — capability and audit control plane
 
+Status as of 2026-06-30: Phase 5 can start now. The first surface should be a
+separate Brain UI tab/section named **Capabilities**, distinct from Slack setup,
+Mission Control, Runtime Config, and Audit Log. Start with read-only/manual
+control-plane vocabulary before enforcement: a capability catalog, grant model,
+resource/action selectors, and audit event shape. No live Slack behavior should
+change in this slice.
+
+First MVP Brain UI surface:
+
+- read-only capability catalog grouped by family, for example Slack source
+  context, cross-surface output, subagent/repo operations, and administration;
+- grant vocabulary for subject, capability ID, resource selector, action, source,
+  grantor, expiry/revocation, and reason;
+- audit vocabulary for grant proposals, grant/revoke decisions, observed checks,
+  denials, output sends, and admin changes;
+- clear read-only/manual labels until the model has been validated against real
+  Slack/Telegram/admin workflows.
+
+Constraints for Phase 5 startup:
+
+- no breaking current Slack behavior, routing, ack timing, or manual canary flow;
+- no secret exposure in UI, logs, audit events, repo files, or prompts;
+- capability enforcement must be explicit, fail-closed, and audited when it is
+  introduced; prompt text alone is not enforcement;
+- manual/admin-only changes come first; do not add self-service grant flows until
+  the vocabulary and audit model are validated;
+- keep the catalog/store read-only until the model is validated and reviewed;
+- `codex-chat` remains the runtime enforcement point for tools, adapter reads,
+  output sends, and subagent dispatch; Brain owns admin/catalog/audit surfaces.
+
+First implementation slice after this planning pass:
+
+1. Add/keep the Brain UI **Capabilities** tab with a read-only catalog and grant
+   vocabulary.
+2. Add a read-only local/private catalog store schema and loader, with seed data
+   only; no grant writes and no runtime decisions.
+3. Define the first audit event shape (`capability.catalog.viewed`,
+   `capability.grant.proposed`, `capability.check.observed`) with redacted
+   metadata and correlation IDs.
+4. Wire tests around no-secret rendering and no live enforcement paths.
+
 - [ ] Implement Brain-owned actor, bundle, grant, temporary approval, and
-      revocation administration.
+      revocation administration after the read-only model is validated.
 - [ ] Import or query runtime audit/capability-check records from `codex-chat`.
 - [ ] Add audit search by actor, resource, run, subagent, output target, and
       capability.
-- [ ] Require explicit admin capabilities for all sensitive Brain actions.
+- [ ] Require explicit admin capabilities for all sensitive Brain actions, only
+      after audited enforcement semantics are approved.
 
 ### Phase 6 — keep codex-chat runtime-only
 
