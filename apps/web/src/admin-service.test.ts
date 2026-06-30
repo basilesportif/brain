@@ -208,11 +208,14 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /Slack Details/);
   assert.match(html, /Manifest/);
   assert.match(html, /Capabilities/);
-  assert.match(html, /Phase 5 read-only catalog\/store\/admin surface/);
+  assert.match(html, /Phase 5 non-enforcing identity\/capability foundation/);
   assert.match(html, /View grants for subject/);
+  assert.match(html, /Users \/ People and communication identities/);
+  assert.match(html, /Future admin write API shape/);
   assert.match(html, /Grouped catalog/);
   assert.match(html, /Audit event shape/);
   assert.match(html, /Read-only \/ non-enforcing/);
+  assert.match(html, /models users, identity links, grants, and proofs/);
   assert.match(html, /Raw \/capabilities/);
   assert.match(html, /Runtime Config/);
   assert.match(html, /Env &amp; Config/);
@@ -297,25 +300,37 @@ test("brain admin settings identify the concrete local instance separately from 
   }
 });
 
-test("brain admin capabilities API exposes read-only grouped catalog, subjects, seed grants, and audit shape", async () => {
+test("brain admin capabilities API exposes v2 identities, grouped catalog, grants, and audit shape", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-capabilities-"));
   try {
     await withServer(config(root), authDeps(), async (baseUrl) => {
       const response = await fetch(`${baseUrl}/api/admin/brain/capabilities`, { headers: authHeaders() });
       assert.equal(response.status, 200);
       const payload = await response.json() as {
+        schemaVersion: number;
         path: string;
+        mode: string;
         writesEnabled: boolean;
         enforcement: { enabled: boolean; codexChatChanged: boolean };
         catalog: { groups: Array<{ id: string; label: string; semantics: { impliedCapabilityIds: string[] }; children: Array<{ id: string; label: string }> }>; counts: { groups: number; capabilities: number } };
-        store: { path: string; mode?: string; seededThisRequest: boolean };
+        store: { path: string; mode?: string; seededThisRequest: boolean; migratedThisRequest: boolean };
         defaultSubjectId: string;
+        defaultPersonId: string;
+        people: Array<{ id: string; displayName: string; status: string; primarySubjectId: string }>;
+        externalIdentities: Array<{ id: string; provider: string; personId?: string; providerUserId: string; providerChatId?: string; status: string }>;
+        identityProofs: Array<{ identityId: string; source: string }>;
+        communicationChannels: Array<{ provider: string; kind: string; externalIds: Record<string, string> }>;
         subjects: Array<{ id: string; kind: string; label: string }>;
-        grants: Array<{ id: string; subjectId: string; capabilityId: string; grantKind: string; enforcement: string }>;
+        grantBundles: Array<{ id: string; includes: { capabilityIds: string[] } }>;
+        grants: Array<{ id: string; subjectId: string; capabilityId: string; grantKind: string; bundleId?: string; enforcement: string }>;
         effectiveBySubject: Record<string, { directGroupCapabilityIds: string[]; impliedCapabilityIds: string[]; byCapabilityId: Record<string, { effective: boolean; impliedByCapabilityIds: string[] }> }>;
+        effectiveByPerson: Record<string, { effective: { directBundleIds: string[]; summary: { allCapabilities: boolean; effectiveCapabilityCount: number; totalCapabilityCount: number }; byCapabilityId: Record<string, { effective: boolean; impliedByBundleIds: string[] }> } }>;
+        adminWriteModel: { writesEnabled: boolean; plannedEndpoints: Array<{ path: string }> };
         audit: { writesEnabled: boolean; requiredFields: string[]; eventTypes: Array<{ type: string }>; sampleEvent: Record<string, unknown> };
       };
 
+      assert.equal(payload.schemaVersion, 2);
+      assert.equal(payload.mode, "identity_capability_foundation");
       assert.equal(payload.path, path.join(root, "capabilities.json"));
       assert.equal(payload.store.path, path.join(root, "capabilities.json"));
       assert.equal(payload.writesEnabled, false);
@@ -330,8 +345,18 @@ test("brain admin capabilities API exposes read-only grouped catalog, subjects, 
       assert.ok(projects.semantics.impliedCapabilityIds.includes("projects.files.write"));
       assert.ok(projects.children.some((child) => child.id === "projects.tasks.write"));
 
+      assert.equal(payload.defaultPersonId, "person_tim");
+      assert.equal(payload.defaultSubjectId, "person:person_tim");
+      assert.ok(payload.people.some((person) => person.id === "person_tim" && person.displayName === "Tim" && person.status === "active"));
+      assert.ok(payload.externalIdentities.some((identity) => identity.id === "identity_telegram_253768951" && identity.provider === "telegram" && identity.personId === "person_tim" && identity.providerUserId === "253768951" && identity.providerChatId === "253768951"));
+      assert.ok(payload.externalIdentities.some((identity) => identity.provider === "slack" && identity.personId === "person_tim" && identity.status === "addable_placeholder"));
+      assert.ok(payload.identityProofs.some((proof) => proof.identityId === "identity_telegram_253768951" && proof.source === "telegram_allowlist_migration"));
+      assert.ok(payload.communicationChannels.some((channel) => channel.provider === "telegram" && channel.kind === "telegram_private_chat" && channel.externalIds.chatId === "253768951"));
       assert.ok(payload.subjects.some((subject) => subject.id === "brain-admin:current" && subject.kind === "admin_user" && /tim\.galebach@gmail\.com/.test(subject.label)));
+      assert.ok(payload.subjects.some((subject) => subject.id === "person:person_tim" && subject.kind === "person"));
       assert.ok(payload.subjects.some((subject) => subject.id === "slack:channel:T00000000:C00000000" && subject.kind === "slack_channel"));
+      assert.ok(payload.grantBundles.some((bundle) => bundle.id === "bundle.owner.all" && bundle.includes.capabilityIds.includes("projects.files.write")));
+      assert.ok(payload.grants.some((grant) => grant.id === "grant_seed_tim_owner_all" && grant.subjectId === "person:person_tim" && grant.capabilityId === "bundle.owner.all" && grant.grantKind === "bundle" && grant.bundleId === "bundle.owner.all" && grant.enforcement === "non_enforcing"));
       assert.ok(payload.grants.some((grant) => grant.id === "grant_seed_current_admin_projects_group" && grant.capabilityId === "projects" && grant.grantKind === "group" && grant.enforcement === "non_enforcing"));
       assert.ok(payload.grants.some((grant) => grant.capabilityId === "slack.channel.read" && grant.grantKind === "capability"));
 
@@ -342,16 +367,27 @@ test("brain admin capabilities API exposes read-only grouped catalog, subjects, 
       assert.equal(adminEffective.byCapabilityId["projects.files.write"].effective, true);
       assert.deepEqual(adminEffective.byCapabilityId["projects.files.write"].impliedByCapabilityIds, ["projects"]);
 
+      const timEffective = payload.effectiveByPerson.person_tim.effective;
+      assert.ok(timEffective.directBundleIds.includes("bundle.owner.all"));
+      assert.equal(timEffective.summary.allCapabilities, true);
+      assert.equal(timEffective.summary.effectiveCapabilityCount, timEffective.summary.totalCapabilityCount);
+      assert.equal(timEffective.byCapabilityId["projects.files.write"].effective, true);
+      assert.ok(timEffective.byCapabilityId["projects.files.write"].impliedByBundleIds.includes("bundle.owner.all"));
+      assert.equal(payload.adminWriteModel.writesEnabled, false);
+      assert.ok(payload.adminWriteModel.plannedEndpoints.some((endpoint) => /identity-links/.test(endpoint.path)));
+
       assert.equal(payload.audit.writesEnabled, false);
       assert.ok(payload.audit.requiredFields.includes("correlationId"));
       assert.ok(payload.audit.eventTypes.some((event) => event.type === "capability.grant.proposed"));
       assert.ok(payload.audit.eventTypes.some((event) => event.type === "capability.check.observed"));
+      assert.ok(payload.audit.eventTypes.some((event) => event.type === "identity.link.seeded"));
       assert.equal(JSON.stringify(payload).includes("xoxb-super-secret"), false);
 
       const fileInfo = await stat(path.join(root, "capabilities.json"));
       assert.equal(`0${(fileInfo.mode & 0o777).toString(8)}`, "0600");
-      const store = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8")) as { mode: string; audit: { eventTypes: Array<{ type: string }> } };
-      assert.equal(store.mode, "read_only_seed");
+      const store = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8")) as { schemaVersion: number; mode: string; audit: { eventTypes: Array<{ type: string }> } };
+      assert.equal(store.schemaVersion, 2);
+      assert.equal(store.mode, "identity_capability_foundation");
       assert.ok(store.audit.eventTypes.some((event) => event.type === "capability.catalog.viewed"));
 
       const writeAttempt = await fetch(`${baseUrl}/api/admin/brain/capabilities`, {

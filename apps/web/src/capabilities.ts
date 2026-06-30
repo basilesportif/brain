@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { resolveEnvFilePath } from "./env-file.js";
 
@@ -38,20 +38,100 @@ export interface CapabilityCatalogGroup {
   children: CapabilityCatalogCapability[];
 }
 
+export type CapabilityIdentityProvider = "telegram" | "slack" | "clerk" | "system" | "unknown";
+
+export interface CapabilityPerson {
+  id: string;
+  displayName: string;
+  status: "active" | "inactive" | "observed" | "placeholder";
+  personType: "human" | "system";
+  primarySubjectId: string;
+  source: "admin_seed" | "telegram_allowlist_migration" | "migration" | "observed_runtime_metadata" | "manual_admin";
+  identityIds: string[];
+  subjectIds: string[];
+  notes: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CapabilityExternalIdentity {
+  id: string;
+  provider: CapabilityIdentityProvider;
+  providerUserId: string;
+  providerTeamId?: string;
+  providerChatId?: string;
+  providerChannelId?: string;
+  personId?: string;
+  label: string;
+  status: "linked" | "observed_unlinked" | "addable_placeholder" | "inactive";
+  channelKinds: string[];
+  communicationChannelIds: string[];
+  proofIds: string[];
+  metadata: Record<string, string>;
+  createdAt: string;
+  updatedAt: string;
+  lastSeenAt?: string;
+}
+
+export interface CapabilityIdentityProof {
+  id: string;
+  personId?: string;
+  identityId: string;
+  source: "telegram_allowlist_migration" | "admin_seed" | "slack_signed_event" | "observed_runtime_metadata" | "manual_admin" | "migration";
+  confidence: "high" | "medium" | "low" | "placeholder";
+  observedAt: string;
+  summary: string;
+  evidence: Record<string, string | number | boolean>;
+}
+
+export interface CapabilityCommunicationChannel {
+  id: string;
+  provider: CapabilityIdentityProvider;
+  kind: "telegram_private_chat" | "slack_workspace" | "slack_channel" | "slack_dm" | "unknown";
+  label: string;
+  status: "linked" | "observed" | "addable_placeholder" | "inactive";
+  identityIds: string[];
+  externalIds: Record<string, string>;
+  metadata: Record<string, string>;
+  createdAt: string;
+  updatedAt: string;
+  lastSeenAt?: string;
+}
+
 export interface CapabilitySubject {
   id: string;
-  kind: "admin_user" | "slack_workspace" | "slack_user" | "slack_channel" | "system";
+  kind: "person" | "external_identity" | "admin_user" | "slack_workspace" | "slack_user" | "slack_channel" | "system";
   label: string;
   description: string;
   source: string;
+  personId?: string;
+  identityId?: string;
   externalIds?: Record<string, string>;
+}
+
+export interface CapabilityGrantBundle {
+  id: string;
+  label: string;
+  description: string;
+  status: "active" | "placeholder";
+  includes: {
+    groupIds: string[];
+    capabilityIds: string[];
+  };
+  semantics: {
+    grantKind: "bundle";
+    implies: "all_catalog_capabilities" | "listed_capabilities";
+    expansion: string;
+    positiveGrantOnly: true;
+  };
 }
 
 export interface CapabilityGrant {
   id: string;
   subjectId: string;
   capabilityId: string;
-  grantKind: "group" | "capability";
+  grantKind: "bundle" | "group" | "capability";
+  bundleId?: string;
   resource: {
     kind: string;
     id: string;
@@ -59,7 +139,7 @@ export interface CapabilityGrant {
   };
   actions: string[];
   source: {
-    kind: "seed" | "admin" | "bundle" | "migration" | "chat_approval" | "system";
+    kind: "seed" | "admin" | "bundle" | "migration" | "chat_approval" | "system" | "identity_proof";
     id: string;
   };
   grantedBy: string;
@@ -88,24 +168,33 @@ export interface CapabilityAuditShape {
 }
 
 interface CapabilityStore {
-  schemaVersion: 1;
+  schemaVersion: 2;
   storeId: string;
-  mode: "read_only_seed";
+  mode: "identity_capability_foundation";
   createdAt: string;
   updatedAt: string;
   writesEnabled: false;
   enforcementEnabled: false;
+  people: CapabilityPerson[];
+  externalIdentities: CapabilityExternalIdentity[];
+  identityProofs: CapabilityIdentityProof[];
+  communicationChannels: CapabilityCommunicationChannel[];
   subjects: CapabilitySubject[];
+  grantBundles: CapabilityGrantBundle[];
   grants: CapabilityGrant[];
   audit: CapabilityAuditShape;
   notes: string[];
+  legacyStoreIds?: string[];
 }
 
 export interface CapabilityEffectiveEntry {
   capabilityId: string;
   effective: boolean;
   directGrantIds: string[];
+  directBundleGrantIds: string[];
   directGroupGrantIds: string[];
+  impliedByBundleGrantIds: string[];
+  impliedByBundleIds: string[];
   impliedByGroupGrantIds: string[];
   impliedByCapabilityIds: string[];
 }
@@ -113,18 +202,48 @@ export interface CapabilityEffectiveEntry {
 export interface CapabilityEffectiveSubject {
   subjectId: string;
   directGrantIds: string[];
+  directBundleGrantIds: string[];
+  directBundleIds: string[];
   directCapabilityIds: string[];
   directGroupCapabilityIds: string[];
+  impliedGroupCapabilityIds: string[];
   impliedCapabilityIds: string[];
   byCapabilityId: Record<string, CapabilityEffectiveEntry>;
+  summary: {
+    activeGrantCount: number;
+    effectiveCapabilityCount: number;
+    totalCapabilityCount: number;
+    allCapabilities: boolean;
+    bundles: string[];
+    enforcement: "non_enforcing";
+  };
+}
+
+export interface CapabilityEffectivePerson {
+  personId: string;
+  subjectId: string;
+  identityIds: string[];
+  communicationChannelIds: string[];
+  effective: CapabilityEffectiveSubject;
+}
+
+export interface CapabilityAdminWriteModel {
+  writesEnabled: false;
+  plannedEndpoints: Array<{ method: "POST" | "PATCH" | "DELETE"; path: string; purpose: string }>;
+  mutationShapes: {
+    linkIdentity: Record<string, string>;
+    grantBundle: Record<string, string>;
+    grantCapability: Record<string, string>;
+    revokeGrant: Record<string, string>;
+  };
 }
 
 export interface CapabilityAdminSummary {
-  schemaVersion: 1;
+  schemaVersion: 2;
   source: "brain-private-file";
   path: string;
   values: string;
-  mode: "read_only_seed";
+  mode: "identity_capability_foundation";
   writesEnabled: false;
   enforcement: {
     enabled: false;
@@ -151,13 +270,22 @@ export interface CapabilityAdminSummary {
     createdAt: string;
     updatedAt: string;
     seededThisRequest: boolean;
+    migratedThisRequest: boolean;
     parseError?: string;
   };
   defaultSubjectId: string;
+  defaultPersonId: string;
+  people: CapabilityPerson[];
+  externalIdentities: CapabilityExternalIdentity[];
+  identityProofs: CapabilityIdentityProof[];
+  communicationChannels: CapabilityCommunicationChannel[];
   subjects: CapabilitySubject[];
+  grantBundles: CapabilityGrantBundle[];
   grants: CapabilityGrant[];
   effectiveBySubject: Record<string, CapabilityEffectiveSubject>;
+  effectiveByPerson: Record<string, CapabilityEffectivePerson>;
   audit: CapabilityAuditShape;
+  adminWriteModel: CapabilityAdminWriteModel;
   nextOptions: string[];
 }
 
@@ -165,10 +293,45 @@ export interface CapabilityAdminSummaryOptions {
   storePath: string;
   auditLogPath: string;
   adminEmail: string;
+  codexChatPath?: string;
+}
+
+interface ReadStoreResult {
+  store: CapabilityStore;
+  seededThisRequest: boolean;
+  migratedThisRequest: boolean;
+  parseError?: string;
+}
+
+interface ObservedSlackIdentity {
+  providerTeamId: string;
+  providerUserId: string;
+  channelIds: string[];
+  eventCount: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  sourcePath: string;
+  correlationIds: string[];
+}
+
+interface ObservedSlackState {
+  status: "not_observed" | "single_signed_user" | "multiple_signed_users" | "unreadable";
+  observedIdentities: ObservedSlackIdentity[];
+  linkableIdentity?: ObservedSlackIdentity;
+  sourcePath?: string;
+  error?: string;
 }
 
 const SEED_TIME = "2026-06-30T00:00:00.000Z";
 const CURRENT_ADMIN_SUBJECT_ID = "brain-admin:current";
+const TIM_PERSON_ID = "person_tim";
+const TIM_SUBJECT_ID = "person:person_tim";
+const TIM_TELEGRAM_USER_ID = "253768951";
+const TIM_TELEGRAM_CHAT_ID = "253768951";
+const TIM_TELEGRAM_IDENTITY_ID = "identity_telegram_253768951";
+const TIM_TELEGRAM_CHANNEL_ID = "channel_telegram_private_253768951";
+const TIM_TELEGRAM_PROOF_ID = "proof_tim_telegram_allowlist_migration";
+const OWNER_ALL_BUNDLE_ID = "bundle.owner.all";
 
 const projectSelectors = [
   selector("projectId", "Project", "project", true, "Stable project/resource id, not a free-form prompt label.", ["brain", "codex-chat", "assistant-agent-logic"]),
@@ -324,6 +487,21 @@ const AUDIT_EVENT_TYPES: CapabilityAuditEventType[] = [
     decisionValues: ["revoked", "expired"],
   },
   {
+    type: "identity.link.seeded",
+    description: "A person/external identity link was seeded or migrated with proof metadata; non-enforcing in this slice.",
+    decisionValues: ["not_enforced", "linked"],
+  },
+  {
+    type: "identity.proof.observed",
+    description: "External identity proof metadata was observed from runtime telemetry without logging message bodies or secrets.",
+    decisionValues: ["observed", "not_enforced"],
+  },
+  {
+    type: "capability.bundle.granted",
+    description: "A non-enforcing bundle grant was seeded or applied; effective view expands it into ordinary catalog capabilities.",
+    decisionValues: ["granted", "not_enforced"],
+  },
+  {
     type: "capability.check.observed",
     description: "A runtime capability check result was imported or observed without logging secrets or payload bodies.",
     decisionValues: ["allowed", "denied", "not_enforced"],
@@ -340,6 +518,7 @@ const AUDIT_REQUIRED_FIELDS = [
   "timestamp",
   "actor",
   "subject",
+  "identity",
   "capabilityId",
   "resource",
   "action",
@@ -349,29 +528,32 @@ const AUDIT_REQUIRED_FIELDS = [
   "redaction",
 ];
 
+
 export async function capabilityAdminSummary(options: CapabilityAdminSummaryOptions): Promise<CapabilityAdminSummary> {
   const storePath = resolveEnvFilePath(options.storePath);
   const auditLogPath = resolveEnvFilePath(options.auditLogPath);
-  const { store, seededThisRequest, parseError } = await readOrSeedCapabilityStore(storePath, auditLogPath);
+  const observedSlack = await deriveObservedSlackState(options.codexChatPath);
+  const { store, seededThisRequest, migratedThisRequest, parseError } = await readOrSeedCapabilityStore(storePath, auditLogPath, observedSlack);
   const metadata = await capabilityStoreMetadata(storePath);
   const subjects = store.subjects.map((subject) => subject.id === CURRENT_ADMIN_SUBJECT_ID
     ? { ...subject, label: `Current Brain admin (${sanitizeText(options.adminEmail, "allowlisted admin", 180)})` }
     : subject);
-  const effectiveBySubject = buildEffectiveBySubject(subjects, store.grants, CAPABILITY_CATALOG);
-  const capabilityCount = CAPABILITY_CATALOG.reduce((sum, item) => sum + item.children.length, 0);
+  const effectiveBySubject = buildEffectiveBySubject(subjects, store.grants, store.grantBundles, CAPABILITY_CATALOG);
+  const effectiveByPerson = buildEffectiveByPerson(store.people, store.externalIdentities, store.communicationChannels, effectiveBySubject);
+  const capabilityCount = catalogCapabilityIds(CAPABILITY_CATALOG).length;
   const placeholderCount = CAPABILITY_CATALOG.reduce((sum, item) => sum + item.children.filter((child) => child.status === "placeholder").length, 0);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     source: "brain-private-file",
     path: storePath,
-    values: "read-only catalog/store; seed grants are non-enforcing examples; no secrets, tokens, message bodies, or runtime authorization decisions",
-    mode: "read_only_seed",
+    values: "identity/capability foundation store; writes and runtime enforcement disabled; no secrets, tokens, message bodies, or runtime authorization decisions",
+    mode: "identity_capability_foundation",
     writesEnabled: false,
     enforcement: {
       enabled: false,
       runtime: "not_connected",
       codexChatChanged: false,
-      summary: "Brain shows the catalog/store/admin surface only. codex-chat Slack behavior and authorization enforcement are unchanged.",
+      summary: "Brain shows unified identities, catalog/store/admin surface only. codex-chat Slack/Telegram behavior and authorization enforcement are unchanged.",
     },
     catalog: {
       schemaVersion: 1,
@@ -392,19 +574,28 @@ export async function capabilityAdminSummary(options: CapabilityAdminSummaryOpti
       createdAt: store.createdAt,
       updatedAt: store.updatedAt,
       seededThisRequest,
+      migratedThisRequest,
       parseError,
     },
-    defaultSubjectId: CURRENT_ADMIN_SUBJECT_ID,
+    defaultSubjectId: TIM_SUBJECT_ID,
+    defaultPersonId: TIM_PERSON_ID,
+    people: store.people,
+    externalIdentities: store.externalIdentities,
+    identityProofs: store.identityProofs,
+    communicationChannels: store.communicationChannels,
     subjects,
+    grantBundles: store.grantBundles,
     grants: store.grants,
     effectiveBySubject,
+    effectiveByPerson,
     audit: store.audit,
+    adminWriteModel: defaultAdminWriteModel(),
     nextOptions: [
-      "Validate this capability vocabulary against real Projects, Slack, CRM, Calendar, Todos, Finance, and Health workflows.",
-      "Add explicit admin-only grant proposal/apply/revoke APIs with confirmation dialogs and append-only audit events.",
+      "Review Tim's seeded Telegram owner identity and any Slack signed-event identity observation before enabling writes.",
+      "Add explicit admin-only person/identity link and unlink APIs with confirmation dialogs and append-only audit events.",
+      "Add grant proposal/apply/revoke APIs that write ordinary auditable grants or owner/all bundle assignments.",
       "Import codex-chat runtime capability-check observations before turning on enforcement.",
-      "Design bundles/roles that expand into ordinary per-capability grants instead of bypassing the model.",
-      "Only after review, wire codex-chat runtime tools/output sends to fail-closed capability checks.",
+      "Only after review, wire Telegram/Slack runtimes, tools, and output sends to fail-closed capability checks.",
     ],
   };
 }
@@ -439,31 +630,63 @@ function group(input: Omit<CapabilityCatalogGroup, "grantable" | "semantics">): 
   };
 }
 
-async function readOrSeedCapabilityStore(storePath: string, auditLogPath: string): Promise<{ store: CapabilityStore; seededThisRequest: boolean; parseError?: string }> {
+async function readOrSeedCapabilityStore(storePath: string, auditLogPath: string, observedSlack: ObservedSlackState): Promise<ReadStoreResult> {
   const raw = await readTextIfPresent(storePath);
   if (!raw) {
-    const store = defaultCapabilityStore(auditLogPath);
+    const store = defaultCapabilityStore(auditLogPath, observedSlack);
     await writeCapabilityStore(storePath, store);
-    return { store, seededThisRequest: true };
+    return { store, seededThisRequest: true, migratedThisRequest: false };
   }
   try {
     const parsed = JSON.parse(raw) as unknown;
-    return { store: normalizeCapabilityStore(parsed, auditLogPath), seededThisRequest: false };
+    const normalized = normalizeCapabilityStore(parsed, auditLogPath, observedSlack);
+    if (normalized.changed) await writeCapabilityStore(storePath, normalized.store);
+    return { store: normalized.store, seededThisRequest: false, migratedThisRequest: normalized.migrated };
   } catch {
-    return { store: defaultCapabilityStore(auditLogPath), seededThisRequest: false, parseError: "invalid_capability_store_json" };
+    return { store: defaultCapabilityStore(auditLogPath, observedSlack), seededThisRequest: false, migratedThisRequest: false, parseError: "invalid_capability_store_json" };
   }
 }
 
-function defaultCapabilityStore(auditLogPath: string): CapabilityStore {
+function defaultCapabilityStore(auditLogPath: string, observedSlack: ObservedSlackState = { status: "not_observed", observedIdentities: [] }): CapabilityStore {
+  const identitySeed = defaultIdentitySeed(observedSlack);
+  const people = [
+    {
+      id: TIM_PERSON_ID,
+      displayName: "Tim",
+      status: "active",
+      personType: "human",
+      primarySubjectId: TIM_SUBJECT_ID,
+      source: "admin_seed",
+      identityIds: identitySeed.externalIdentities.filter((identity) => identity.personId === TIM_PERSON_ID).map((identity) => identity.id),
+      subjectIds: [TIM_SUBJECT_ID],
+      notes: ["Seeded as the owner/admin person for the non-enforcing Phase 5 identity/capability foundation."],
+      createdAt: SEED_TIME,
+      updatedAt: SEED_TIME,
+    } satisfies CapabilityPerson,
+  ];
+  const identitySubjects = identitySeed.externalIdentities.map(identitySubjectFromIdentity);
   return {
-    schemaVersion: 1,
-    storeId: "brain-local-capabilities-v1",
-    mode: "read_only_seed",
+    schemaVersion: 2,
+    storeId: "brain-local-capabilities-v2",
+    mode: "identity_capability_foundation",
     createdAt: SEED_TIME,
     updatedAt: SEED_TIME,
     writesEnabled: false,
     enforcementEnabled: false,
+    people,
+    externalIdentities: identitySeed.externalIdentities,
+    identityProofs: identitySeed.identityProofs,
+    communicationChannels: identitySeed.communicationChannels,
     subjects: [
+      {
+        id: TIM_SUBJECT_ID,
+        kind: "person",
+        label: "Tim",
+        description: "Tim's unified person/user subject seeded for future runtime capability checks.",
+        source: "admin_seed",
+        personId: TIM_PERSON_ID,
+      },
+      ...identitySubjects,
       {
         id: CURRENT_ADMIN_SUBJECT_ID,
         kind: "admin_user",
@@ -503,57 +726,299 @@ function defaultCapabilityStore(auditLogPath: string): CapabilityStore {
         source: "seed_placeholder",
       },
     ],
-    grants: [
-      {
-        id: "grant_seed_current_admin_projects_group",
-        subjectId: CURRENT_ADMIN_SUBJECT_ID,
-        capabilityId: "projects",
-        grantKind: "group",
-        resource: { kind: "project", id: "*", selectors: { projectId: "*", repoAlias: "*" } },
-        actions: ["read", "search", "write", "publish", "manage"],
-        source: { kind: "seed", id: "phase-5-read-only-slice" },
-        grantedBy: "system:seed",
-        grantedAt: SEED_TIME,
-        status: "active",
-        reason: "Seed grant that demonstrates a top-level Projects group grant implying all project child capabilities.",
-        enforcement: "non_enforcing",
-      },
-      {
-        id: "grant_seed_current_admin_catalog_read",
-        subjectId: CURRENT_ADMIN_SUBJECT_ID,
-        capabilityId: "capability.catalog.read",
-        grantKind: "capability",
-        resource: { kind: "admin_scope", id: "brain-local", selectors: { adminScope: "brain-local" } },
-        actions: ["read"],
-        source: { kind: "seed", id: "phase-5-read-only-slice" },
-        grantedBy: "system:seed",
-        grantedAt: SEED_TIME,
-        status: "active",
-        reason: "Seed child-specific grant for reading the local capability catalog.",
-        enforcement: "non_enforcing",
-      },
-      {
-        id: "grant_seed_slack_channel_read_example",
-        subjectId: "slack:channel:T00000000:C00000000",
-        capabilityId: "slack.channel.read",
-        grantKind: "capability",
-        resource: { kind: "slack_channel", id: "T00000000:C00000000", selectors: { teamId: "T00000000", channelId: "C00000000" } },
-        actions: ["read", "search"],
-        source: { kind: "seed", id: "phase-5-read-only-slice" },
-        grantedBy: "system:seed",
-        grantedAt: SEED_TIME,
-        status: "example",
-        reason: "Example channel-scoped Slack grant shape only; not used by codex-chat runtime enforcement.",
-        enforcement: "non_enforcing",
-      },
-    ],
+    grantBundles: defaultGrantBundles(),
+    grants: defaultCapabilityGrants(),
     audit: defaultAuditShape(auditLogPath),
     notes: [
-      "This is a Brain-local private seed store for Phase 5 UI validation.",
-      "Grant writes are disabled; seed grants are examples and non-enforcing.",
-      "Do not store tokens, secrets, Slack message bodies, health details, or financial transaction payloads here.",
+      "This Brain-local private store is the non-enforcing Phase 5 foundation for unified people, external identities, capabilities, grants, proofs, and audit shape.",
+      "Grant/link writes are disabled; seed grants are non-enforcing and runtime authorization remains disconnected.",
+      "Do not store tokens, secrets, Telegram or Slack message bodies, health details, or financial transaction payloads here.",
     ],
   };
+}
+
+function defaultIdentitySeed(observedSlack: ObservedSlackState): Pick<CapabilityStore, "externalIdentities" | "identityProofs" | "communicationChannels"> {
+  const telegramIdentity: CapabilityExternalIdentity = {
+    id: TIM_TELEGRAM_IDENTITY_ID,
+    provider: "telegram",
+    providerUserId: TIM_TELEGRAM_USER_ID,
+    providerChatId: TIM_TELEGRAM_CHAT_ID,
+    personId: TIM_PERSON_ID,
+    label: "Tim Telegram (253768951)",
+    status: "linked",
+    channelKinds: ["telegram_private_chat"],
+    communicationChannelIds: [TIM_TELEGRAM_CHANNEL_ID],
+    proofIds: [TIM_TELEGRAM_PROOF_ID],
+    metadata: { provider: "telegram", chatId: TIM_TELEGRAM_CHAT_ID, origin: "origin_message", chatType: "private" },
+    createdAt: SEED_TIME,
+    updatedAt: SEED_TIME,
+  };
+  const telegramProof: CapabilityIdentityProof = {
+    id: TIM_TELEGRAM_PROOF_ID,
+    personId: TIM_PERSON_ID,
+    identityId: TIM_TELEGRAM_IDENTITY_ID,
+    source: "telegram_allowlist_migration",
+    confidence: "high",
+    observedAt: SEED_TIME,
+    summary: "Tim explicitly requested linking this Brain user to Telegram user_id/chat_id 253768951 in the origin task.",
+    evidence: { provider: "telegram", providerUserId: TIM_TELEGRAM_USER_ID, chatId: TIM_TELEGRAM_CHAT_ID, payloadBodiesLogged: false, secretValuesLogged: false },
+  };
+  const telegramChannel: CapabilityCommunicationChannel = {
+    id: TIM_TELEGRAM_CHANNEL_ID,
+    provider: "telegram",
+    kind: "telegram_private_chat",
+    label: "Telegram private chat 253768951",
+    status: "linked",
+    identityIds: [TIM_TELEGRAM_IDENTITY_ID],
+    externalIds: { userId: TIM_TELEGRAM_USER_ID, chatId: TIM_TELEGRAM_CHAT_ID },
+    metadata: { chatType: "private", provider: "telegram" },
+    createdAt: SEED_TIME,
+    updatedAt: SEED_TIME,
+  };
+
+  const externalIdentities = [telegramIdentity];
+  const identityProofs = [telegramProof];
+  const communicationChannels = [telegramChannel];
+  if (observedSlack.linkableIdentity) {
+    const slack = linkedSlackIdentityForTim(observedSlack.linkableIdentity);
+    externalIdentities.push(slack.identity);
+    identityProofs.push(slack.proof);
+    communicationChannels.push(...slack.channels);
+  } else if (observedSlack.observedIdentities.length > 0) {
+    for (const observed of observedSlack.observedIdentities) {
+      const slack = observedUnlinkedSlackIdentity(observed);
+      externalIdentities.push(slack.identity);
+      identityProofs.push(slack.proof);
+      communicationChannels.push(...slack.channels);
+    }
+  } else {
+    const placeholder = slackAddablePlaceholder();
+    externalIdentities.push(placeholder.identity);
+    identityProofs.push(placeholder.proof);
+    communicationChannels.push(placeholder.channel);
+  }
+  return { externalIdentities, identityProofs, communicationChannels };
+}
+
+function linkedSlackIdentityForTim(observed: ObservedSlackIdentity): { identity: CapabilityExternalIdentity; proof: CapabilityIdentityProof; channels: CapabilityCommunicationChannel[] } {
+  const identityId = slackIdentityId(observed.providerTeamId, observed.providerUserId);
+  const proofId = `proof_tim_${identityId}`;
+  const channelIds = observed.channelIds.map((channelId) => slackChannelId(observed.providerTeamId, channelId));
+  const identity: CapabilityExternalIdentity = {
+    id: identityId,
+    provider: "slack",
+    providerUserId: observed.providerUserId,
+    providerTeamId: observed.providerTeamId,
+    personId: TIM_PERSON_ID,
+    label: `Tim Slack (${observed.providerTeamId}/${observed.providerUserId})`,
+    status: "linked",
+    channelKinds: ["slack_workspace", "slack_channel"],
+    communicationChannelIds: channelIds.length ? channelIds : [slackWorkspaceChannelId(observed.providerTeamId)],
+    proofIds: [proofId],
+    metadata: { teamId: observed.providerTeamId, source: "codex-chat-slack-telemetry", eventCount: String(observed.eventCount) },
+    createdAt: observed.firstSeenAt,
+    updatedAt: observed.lastSeenAt,
+    lastSeenAt: observed.lastSeenAt,
+  };
+  const proof: CapabilityIdentityProof = {
+    id: proofId,
+    personId: TIM_PERSON_ID,
+    identityId,
+    source: "slack_signed_event",
+    confidence: "medium",
+    observedAt: observed.lastSeenAt,
+    summary: "A single Slack user/team pair was observed in accepted codex-chat Slack event telemetry; no Slack profile lookup or message body was used.",
+    evidence: {
+      provider: "slack",
+      teamId: observed.providerTeamId,
+      providerUserId: observed.providerUserId,
+      acceptedEventCount: observed.eventCount,
+      sourcePath: observed.sourcePath,
+      payloadBodiesLogged: false,
+      secretValuesLogged: false,
+    },
+  };
+  return { identity, proof, channels: slackChannelsFromObserved(observed, identityId, "linked") };
+}
+
+function observedUnlinkedSlackIdentity(observed: ObservedSlackIdentity): { identity: CapabilityExternalIdentity; proof: CapabilityIdentityProof; channels: CapabilityCommunicationChannel[] } {
+  const identityId = slackIdentityId(observed.providerTeamId, observed.providerUserId);
+  const proofId = `proof_observed_${identityId}`;
+  const channelIds = observed.channelIds.map((channelId) => slackChannelId(observed.providerTeamId, channelId));
+  const identity: CapabilityExternalIdentity = {
+    id: identityId,
+    provider: "slack",
+    providerUserId: observed.providerUserId,
+    providerTeamId: observed.providerTeamId,
+    label: `Observed Slack user (${observed.providerTeamId}/${observed.providerUserId})`,
+    status: "observed_unlinked",
+    channelKinds: ["slack_workspace", "slack_channel"],
+    communicationChannelIds: channelIds.length ? channelIds : [slackWorkspaceChannelId(observed.providerTeamId)],
+    proofIds: [proofId],
+    metadata: { teamId: observed.providerTeamId, source: "codex-chat-slack-telemetry", eventCount: String(observed.eventCount), linkState: "unlinked_requires_admin_review" },
+    createdAt: observed.firstSeenAt,
+    updatedAt: observed.lastSeenAt,
+    lastSeenAt: observed.lastSeenAt,
+  };
+  const proof: CapabilityIdentityProof = {
+    id: proofId,
+    identityId,
+    source: "observed_runtime_metadata",
+    confidence: "medium",
+    observedAt: observed.lastSeenAt,
+    summary: "Slack metadata was observed but not linked to Tim because more than one signed Slack user was present or admin review is still required.",
+    evidence: { provider: "slack", teamId: observed.providerTeamId, providerUserId: observed.providerUserId, acceptedEventCount: observed.eventCount, sourcePath: observed.sourcePath, payloadBodiesLogged: false, secretValuesLogged: false },
+  };
+  return { identity, proof, channels: slackChannelsFromObserved(observed, identityId, "observed") };
+}
+
+function slackAddablePlaceholder(): { identity: CapabilityExternalIdentity; proof: CapabilityIdentityProof; channel: CapabilityCommunicationChannel } {
+  const identityId = "identity_slack_addable_tim";
+  const proofId = "proof_slack_addable_tim";
+  const channelId = "channel_slack_addable_tim";
+  return {
+    identity: {
+      id: identityId,
+      provider: "slack",
+      providerUserId: "",
+      personId: TIM_PERSON_ID,
+      label: "Tim Slack identity (addable)",
+      status: "addable_placeholder",
+      channelKinds: ["slack_workspace", "slack_channel", "slack_dm"],
+      communicationChannelIds: [channelId],
+      proofIds: [proofId],
+      metadata: { linkState: "awaiting_signed_slack_event_or_admin_link", provider: "slack" },
+      createdAt: SEED_TIME,
+      updatedAt: SEED_TIME,
+    },
+    proof: {
+      id: proofId,
+      personId: TIM_PERSON_ID,
+      identityId,
+      source: "admin_seed",
+      confidence: "placeholder",
+      observedAt: SEED_TIME,
+      summary: "Slack identity support is modeled, but no safe Tim Slack user ID was available at seed time.",
+      evidence: { provider: "slack", payloadBodiesLogged: false, secretValuesLogged: false },
+    },
+    channel: {
+      id: channelId,
+      provider: "slack",
+      kind: "unknown",
+      label: "Slack channel/DM (add after identity link)",
+      status: "addable_placeholder",
+      identityIds: [identityId],
+      externalIds: {},
+      metadata: { linkState: "awaiting_slack_metadata" },
+      createdAt: SEED_TIME,
+      updatedAt: SEED_TIME,
+    },
+  };
+}
+
+function identitySubjectFromIdentity(identity: CapabilityExternalIdentity): CapabilitySubject {
+  if (identity.provider === "slack" && identity.providerTeamId && identity.providerUserId) {
+    return {
+      id: `identity:${identity.id}`,
+      kind: "external_identity",
+      label: identity.label,
+      description: identity.personId ? "Linked Slack external identity subject for future grants." : "Observed Slack external identity subject awaiting person link.",
+      source: identity.status === "linked" ? "identity_link" : "observed_runtime_metadata",
+      personId: identity.personId,
+      identityId: identity.id,
+      externalIds: { teamId: identity.providerTeamId, userId: identity.providerUserId },
+    };
+  }
+  return {
+    id: `identity:${identity.id}`,
+    kind: "external_identity",
+    label: identity.label,
+    description: `${identity.provider} external identity subject for future grants and link administration.`,
+    source: identity.status === "linked" ? "identity_link" : identity.status,
+    personId: identity.personId,
+    identityId: identity.id,
+    externalIds: compactRecord({ provider: identity.provider, providerUserId: identity.providerUserId, providerChatId: identity.providerChatId, providerTeamId: identity.providerTeamId }),
+  };
+}
+
+function defaultGrantBundles(): CapabilityGrantBundle[] {
+  return [
+    {
+      id: OWNER_ALL_BUNDLE_ID,
+      label: "Owner / all capabilities",
+      description: "Non-enforcing owner bundle for Tim that expands to every current catalog group and child capability in the effective grant view.",
+      status: "active",
+      includes: { groupIds: CAPABILITY_CATALOG.map((item) => item.id), capabilityIds: catalogCapabilityIds(CAPABILITY_CATALOG) },
+      semantics: {
+        grantKind: "bundle",
+        implies: "all_catalog_capabilities",
+        expansion: "The bundle is represented as ordinary effective group/child capabilities for review; it is not a runtime bypass and enforcement remains disabled.",
+        positiveGrantOnly: true,
+      },
+    },
+  ];
+}
+
+function defaultCapabilityGrants(): CapabilityGrant[] {
+  return [
+    {
+      id: "grant_seed_tim_owner_all",
+      subjectId: TIM_SUBJECT_ID,
+      capabilityId: OWNER_ALL_BUNDLE_ID,
+      grantKind: "bundle",
+      bundleId: OWNER_ALL_BUNDLE_ID,
+      resource: { kind: "global", id: "*", selectors: { scope: "*" } },
+      actions: ["read", "search", "write", "publish", "manage", "post", "audit", "propose"],
+      source: { kind: "bundle", id: "owner_all_seed" },
+      grantedBy: "system:admin_seed",
+      grantedAt: SEED_TIME,
+      status: "active",
+      reason: "Tim is seeded as owner with all current catalog capabilities for the non-enforcing foundation slice.",
+      enforcement: "non_enforcing",
+    },
+    {
+      id: "grant_seed_current_admin_projects_group",
+      subjectId: CURRENT_ADMIN_SUBJECT_ID,
+      capabilityId: "projects",
+      grantKind: "group",
+      resource: { kind: "project", id: "*", selectors: { projectId: "*", repoAlias: "*" } },
+      actions: ["read", "search", "write", "publish", "manage"],
+      source: { kind: "seed", id: "phase-5-read-only-slice" },
+      grantedBy: "system:seed",
+      grantedAt: SEED_TIME,
+      status: "active",
+      reason: "Seed grant that preserves the original top-level Projects group example semantics.",
+      enforcement: "non_enforcing",
+    },
+    {
+      id: "grant_seed_current_admin_catalog_read",
+      subjectId: CURRENT_ADMIN_SUBJECT_ID,
+      capabilityId: "capability.catalog.read",
+      grantKind: "capability",
+      resource: { kind: "admin_scope", id: "brain-local", selectors: { adminScope: "brain-local" } },
+      actions: ["read"],
+      source: { kind: "seed", id: "phase-5-read-only-slice" },
+      grantedBy: "system:seed",
+      grantedAt: SEED_TIME,
+      status: "active",
+      reason: "Seed child-specific grant for reading the local capability catalog.",
+      enforcement: "non_enforcing",
+    },
+    {
+      id: "grant_seed_slack_channel_read_example",
+      subjectId: "slack:channel:T00000000:C00000000",
+      capabilityId: "slack.channel.read",
+      grantKind: "capability",
+      resource: { kind: "slack_channel", id: "T00000000:C00000000", selectors: { teamId: "T00000000", channelId: "C00000000" } },
+      actions: ["read", "search"],
+      source: { kind: "seed", id: "phase-5-read-only-slice" },
+      grantedBy: "system:seed",
+      grantedAt: SEED_TIME,
+      status: "example",
+      reason: "Example channel-scoped Slack grant shape only; not used by codex-chat runtime enforcement.",
+      enforcement: "non_enforcing",
+    },
+  ];
 }
 
 function defaultAuditShape(auditLogPath: string): CapabilityAuditShape {
@@ -561,41 +1026,219 @@ function defaultAuditShape(auditLogPath: string): CapabilityAuditShape {
     appendOnly: true,
     writesEnabled: false,
     path: auditLogPath,
-    values: "schema persisted in private store; no grant mutation writes are enabled yet, so no capability audit events are appended by this UI slice",
+    values: "schema persisted in private store; no grant/link mutation writes are enabled yet, so no capability audit events are appended by this UI slice",
     requiredFields: AUDIT_REQUIRED_FIELDS,
     eventTypes: AUDIT_EVENT_TYPES,
     sampleEvent: {
       eventId: "cap_evt_01HZ0000000000000000000000",
       timestamp: "2026-06-30T00:00:00.000Z",
       actor: { subjectId: CURRENT_ADMIN_SUBJECT_ID, kind: "admin_user" },
-      subject: { subjectId: "slack:channel:T00000000:C00000000", kind: "slack_channel" },
-      capabilityId: "slack.channel.read",
-      resource: { kind: "slack_channel", id: "T00000000:C00000000", selectors: { teamId: "T00000000", channelId: "C00000000" } },
-      action: "grant.proposed",
-      decision: "proposed",
-      reason: "admin-reviewed explicit grant request",
-      correlationId: "corr_phase5_example",
+      subject: { subjectId: TIM_SUBJECT_ID, kind: "person", personId: TIM_PERSON_ID },
+      identity: { identityId: TIM_TELEGRAM_IDENTITY_ID, provider: "telegram" },
+      capabilityId: OWNER_ALL_BUNDLE_ID,
+      resource: { kind: "global", id: "*", selectors: { scope: "*" } },
+      action: "identity.link.seeded",
+      decision: "not_enforced",
+      reason: "admin-seeded non-enforcing identity/capability foundation",
+      correlationId: "corr_phase5_identity_seed_example",
       redaction: { secretValuesLogged: false, payloadBodiesLogged: false },
     },
   };
 }
 
-function normalizeCapabilityStore(value: unknown, auditLogPath: string): CapabilityStore {
-  const fallback = defaultCapabilityStore(auditLogPath);
-  if (!isRecord(value)) return fallback;
-  return {
-    schemaVersion: 1,
+function normalizeCapabilityStore(value: unknown, auditLogPath: string, observedSlack: ObservedSlackState): { store: CapabilityStore; migrated: boolean; changed: boolean } {
+  const fallback = defaultCapabilityStore(auditLogPath, observedSlack);
+  if (!isRecord(value)) return { store: fallback, migrated: false, changed: true };
+  if (value.schemaVersion !== 2) return { store: migrateCapabilityStoreV1(value, fallback), migrated: true, changed: true };
+  const store: CapabilityStore = {
+    schemaVersion: 2,
     storeId: sanitizeText(value.storeId, fallback.storeId, 120),
-    mode: "read_only_seed",
+    mode: "identity_capability_foundation",
     createdAt: sanitizeIso(value.createdAt, fallback.createdAt),
     updatedAt: sanitizeIso(value.updatedAt, fallback.updatedAt),
     writesEnabled: false,
     enforcementEnabled: false,
+    people: normalizePeople(value.people, fallback.people),
+    externalIdentities: normalizeExternalIdentities(value.externalIdentities, fallback.externalIdentities),
+    identityProofs: normalizeIdentityProofs(value.identityProofs, fallback.identityProofs),
+    communicationChannels: normalizeCommunicationChannels(value.communicationChannels, fallback.communicationChannels),
     subjects: normalizeSubjects(value.subjects, fallback.subjects),
+    grantBundles: normalizeGrantBundles(value.grantBundles, fallback.grantBundles),
     grants: normalizeGrants(value.grants, fallback.grants),
     audit: normalizeAudit(value.audit, fallback.audit),
     notes: Array.isArray(value.notes) ? value.notes.map((item) => sanitizeText(item, "", 500)).filter(Boolean) : fallback.notes,
+    legacyStoreIds: Array.isArray(value.legacyStoreIds) ? normalizeStringArray(value.legacyStoreIds, 20) : undefined,
   };
+  const ensured = ensureCoreSeed(store, fallback);
+  return { store: ensured.store, migrated: false, changed: ensured.changed };
+}
+
+function migrateCapabilityStoreV1(value: Record<string, unknown>, fallback: CapabilityStore): CapabilityStore {
+  const legacyStoreId = sanitizeText(value.storeId, "", 120);
+  const store: CapabilityStore = {
+    ...fallback,
+    createdAt: sanitizeIso(value.createdAt, fallback.createdAt),
+    updatedAt: SEED_TIME,
+    legacyStoreIds: legacyStoreId ? [legacyStoreId] : undefined,
+    subjects: mergeUniqueById(fallback.subjects, normalizeSubjects(value.subjects, [])),
+    grants: mergeUniqueById(fallback.grants, normalizeGrants(value.grants, [])),
+    audit: normalizeAudit(value.audit, fallback.audit),
+    notes: [
+      ...fallback.notes,
+      "Migrated from capability store schema v1; original read-only subject/grant semantics were preserved and v2 identity foundation rows were added.",
+    ],
+  };
+  return pruneSupersededPlaceholders(store);
+}
+
+function ensureCoreSeed(store: CapabilityStore, fallback: CapabilityStore): { store: CapabilityStore; changed: boolean } {
+  let changed = false;
+  const merge = <T extends { id: string }>(current: T[], required: T[]): T[] => {
+    const before = current.length;
+    const merged = mergeUniqueById(current, required);
+    if (merged.length !== before) changed = true;
+    return merged;
+  };
+  store.people = merge(store.people, fallback.people);
+  store.externalIdentities = merge(store.externalIdentities, fallback.externalIdentities);
+  store.identityProofs = merge(store.identityProofs, fallback.identityProofs);
+  store.communicationChannels = merge(store.communicationChannels, fallback.communicationChannels);
+  store.subjects = merge(store.subjects, fallback.subjects);
+  store.grantBundles = merge(store.grantBundles, fallback.grantBundles).map((bundle) => bundle.id === OWNER_ALL_BUNDLE_ID ? defaultGrantBundles()[0] ?? bundle : bundle);
+  store.grants = merge(store.grants, fallback.grants);
+  const pruned = pruneSupersededPlaceholders(store);
+  if (pruned !== store) changed = true;
+  const tim = pruned.people.find((person) => person.id === TIM_PERSON_ID);
+  if (tim) {
+    const identityIds = pruned.externalIdentities.filter((identity) => identity.personId === TIM_PERSON_ID).map((identity) => identity.id).sort();
+    if (identityIds.join("\0") !== [...tim.identityIds].sort().join("\0")) {
+      tim.identityIds = identityIds;
+      changed = true;
+    }
+  }
+  return { store: pruned, changed };
+}
+
+function pruneSupersededPlaceholders(store: CapabilityStore): CapabilityStore {
+  const hasLinkedSlack = store.externalIdentities.some((identity) => identity.provider === "slack" && identity.personId === TIM_PERSON_ID && identity.status === "linked" && identity.id !== "identity_slack_addable_tim");
+  if (!hasLinkedSlack) return store;
+  const removeIds = new Set(["identity_slack_addable_tim", "proof_slack_addable_tim", "channel_slack_addable_tim", "identity:identity_slack_addable_tim"]);
+  return {
+    ...store,
+    externalIdentities: store.externalIdentities.filter((item) => !removeIds.has(item.id)),
+    identityProofs: store.identityProofs.filter((item) => !removeIds.has(item.id)),
+    communicationChannels: store.communicationChannels.filter((item) => !removeIds.has(item.id)),
+    subjects: store.subjects.filter((item) => !removeIds.has(item.id)),
+  };
+}
+
+function normalizePeople(value: unknown, fallback: CapabilityPerson[]): CapabilityPerson[] {
+  if (!Array.isArray(value)) return fallback;
+  const out: CapabilityPerson[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    const id = sanitizePersonId(item.id);
+    if (!id) continue;
+    out.push({
+      id,
+      displayName: sanitizeText(item.displayName, id, 160),
+      status: sanitizePersonStatus(item.status),
+      personType: item.personType === "system" ? "system" : "human",
+      primarySubjectId: sanitizeSubjectId(item.primarySubjectId) || `person:${id}`,
+      source: sanitizePersonSource(item.source),
+      identityIds: normalizeStringArray(item.identityIds, 50),
+      subjectIds: normalizeStringArray(item.subjectIds, 50),
+      notes: normalizeStringArray(item.notes, 20),
+      createdAt: sanitizeIso(item.createdAt, SEED_TIME),
+      updatedAt: sanitizeIso(item.updatedAt, SEED_TIME),
+    });
+  }
+  return out.length ? out : fallback;
+}
+
+function normalizeExternalIdentities(value: unknown, fallback: CapabilityExternalIdentity[]): CapabilityExternalIdentity[] {
+  if (!Array.isArray(value)) return fallback;
+  const out: CapabilityExternalIdentity[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    const id = sanitizeIdentityId(item.id);
+    if (!id) continue;
+    const identity: CapabilityExternalIdentity = {
+      id,
+      provider: sanitizeIdentityProvider(item.provider),
+      providerUserId: sanitizeText(item.providerUserId, "", 180),
+      label: sanitizeText(item.label, id, 200),
+      status: sanitizeIdentityStatus(item.status),
+      channelKinds: normalizeStringArray(item.channelKinds, 20),
+      communicationChannelIds: normalizeStringArray(item.communicationChannelIds, 50),
+      proofIds: normalizeStringArray(item.proofIds, 50),
+      metadata: normalizeStringRecord(item.metadata) ?? {},
+      createdAt: sanitizeIso(item.createdAt, SEED_TIME),
+      updatedAt: sanitizeIso(item.updatedAt, SEED_TIME),
+    };
+    const providerTeamId = sanitizeText(item.providerTeamId, "", 180);
+    const providerChatId = sanitizeText(item.providerChatId, "", 180);
+    const providerChannelId = sanitizeText(item.providerChannelId, "", 180);
+    const personId = sanitizePersonId(item.personId);
+    const lastSeenAt = sanitizeIso(item.lastSeenAt, "");
+    if (providerTeamId) identity.providerTeamId = providerTeamId;
+    if (providerChatId) identity.providerChatId = providerChatId;
+    if (providerChannelId) identity.providerChannelId = providerChannelId;
+    if (personId) identity.personId = personId;
+    if (lastSeenAt) identity.lastSeenAt = lastSeenAt;
+    out.push(identity);
+  }
+  return out.length ? out : fallback;
+}
+
+function normalizeIdentityProofs(value: unknown, fallback: CapabilityIdentityProof[]): CapabilityIdentityProof[] {
+  if (!Array.isArray(value)) return fallback;
+  const out: CapabilityIdentityProof[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    const id = sanitizeProofId(item.id);
+    const identityId = sanitizeIdentityId(item.identityId);
+    if (!id || !identityId) continue;
+    const proof: CapabilityIdentityProof = {
+      id,
+      identityId,
+      source: sanitizeProofSource(item.source),
+      confidence: sanitizeProofConfidence(item.confidence),
+      observedAt: sanitizeIso(item.observedAt, SEED_TIME),
+      summary: sanitizeText(item.summary, "", 500),
+      evidence: normalizeEvidenceRecord(item.evidence),
+    };
+    const personId = sanitizePersonId(item.personId);
+    if (personId) proof.personId = personId;
+    out.push(proof);
+  }
+  return out.length ? out : fallback;
+}
+
+function normalizeCommunicationChannels(value: unknown, fallback: CapabilityCommunicationChannel[]): CapabilityCommunicationChannel[] {
+  if (!Array.isArray(value)) return fallback;
+  const out: CapabilityCommunicationChannel[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    const id = sanitizeChannelId(item.id);
+    if (!id) continue;
+    const channel: CapabilityCommunicationChannel = {
+      id,
+      provider: sanitizeIdentityProvider(item.provider),
+      kind: sanitizeChannelKind(item.kind),
+      label: sanitizeText(item.label, id, 200),
+      status: sanitizeChannelStatus(item.status),
+      identityIds: normalizeStringArray(item.identityIds, 50),
+      externalIds: normalizeStringRecord(item.externalIds) ?? {},
+      metadata: normalizeStringRecord(item.metadata) ?? {},
+      createdAt: sanitizeIso(item.createdAt, SEED_TIME),
+      updatedAt: sanitizeIso(item.updatedAt, SEED_TIME),
+    };
+    const lastSeenAt = sanitizeIso(item.lastSeenAt, "");
+    if (lastSeenAt) channel.lastSeenAt = lastSeenAt;
+    out.push(channel);
+  }
+  return out.length ? out : fallback;
 }
 
 function normalizeSubjects(value: unknown, fallback: CapabilitySubject[]): CapabilitySubject[] {
@@ -614,11 +1257,43 @@ function normalizeSubjects(value: unknown, fallback: CapabilitySubject[]): Capab
       description: sanitizeText(item.description, "", 400),
       source: sanitizeText(item.source, "manual", 80),
     };
+    const personId = sanitizePersonId(item.personId);
+    const identityId = sanitizeIdentityId(item.identityId);
     const externalIds = normalizeStringRecord(item.externalIds);
+    if (personId) subject.personId = personId;
+    if (identityId) subject.identityId = identityId;
     if (externalIds) subject.externalIds = externalIds;
     out.push(subject);
   }
-  return out.some((item) => item.id === CURRENT_ADMIN_SUBJECT_ID) ? out : fallback;
+  return out.length ? out : fallback;
+}
+
+function normalizeGrantBundles(value: unknown, fallback: CapabilityGrantBundle[]): CapabilityGrantBundle[] {
+  if (!Array.isArray(value)) return fallback;
+  const out: CapabilityGrantBundle[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    const id = sanitizeBundleId(item.id);
+    if (!id) continue;
+    const includes = isRecord(item.includes) ? item.includes : {};
+    out.push({
+      id,
+      label: sanitizeText(item.label, id, 160),
+      description: sanitizeText(item.description, "", 500),
+      status: item.status === "placeholder" ? "placeholder" : "active",
+      includes: {
+        groupIds: normalizeStringArray(includes.groupIds, 100),
+        capabilityIds: normalizeStringArray(includes.capabilityIds, 300),
+      },
+      semantics: {
+        grantKind: "bundle",
+        implies: "all_catalog_capabilities",
+        expansion: sanitizeText(isRecord(item.semantics) ? item.semantics.expansion : undefined, "Bundle expands into listed capabilities.", 500),
+        positiveGrantOnly: true,
+      },
+    });
+  }
+  return out.length ? out : fallback;
 }
 
 function normalizeGrants(value: unknown, fallback: CapabilityGrant[]): CapabilityGrant[] {
@@ -630,11 +1305,12 @@ function normalizeGrants(value: unknown, fallback: CapabilityGrant[]): Capabilit
     const subjectId = sanitizeSubjectId(item.subjectId);
     const capabilityId = sanitizeCapabilityId(item.capabilityId);
     if (!id || !subjectId || !capabilityId) continue;
+    const grantKind = item.grantKind === "bundle" ? "bundle" : item.grantKind === "group" ? "group" : "capability";
     const grant: CapabilityGrant = {
       id,
       subjectId,
       capabilityId,
-      grantKind: item.grantKind === "group" ? "group" : "capability",
+      grantKind,
       resource: normalizeGrantResource(item.resource),
       actions: normalizeStringArray(item.actions, 20),
       source: normalizeGrantSource(item.source),
@@ -644,11 +1320,15 @@ function normalizeGrants(value: unknown, fallback: CapabilityGrant[]): Capabilit
       reason: sanitizeText(item.reason, "", 500),
       enforcement: "non_enforcing",
     };
-    if (typeof item.expiresAt === "string") grant.expiresAt = sanitizeText(item.expiresAt, "", 80);
-    if (typeof item.revokedAt === "string") grant.revokedAt = sanitizeText(item.revokedAt, "", 80);
+    const bundleId = sanitizeBundleId(item.bundleId);
+    if (bundleId) grant.bundleId = bundleId;
+    const expiresAt = sanitizeIso(item.expiresAt, "");
+    const revokedAt = sanitizeIso(item.revokedAt, "");
+    if (expiresAt) grant.expiresAt = expiresAt;
+    if (revokedAt) grant.revokedAt = revokedAt;
     out.push(grant);
   }
-  return out.length > 0 ? out : fallback;
+  return out.length ? out : fallback;
 }
 
 function normalizeAudit(value: unknown, fallback: CapabilityAuditShape): CapabilityAuditShape {
@@ -659,20 +1339,40 @@ function normalizeAudit(value: unknown, fallback: CapabilityAuditShape): Capabil
     path: sanitizeText(value.path, fallback.path, 400),
     values: sanitizeText(value.values, fallback.values, 500),
     requiredFields: Array.isArray(value.requiredFields) ? normalizeStringArray(value.requiredFields, 50) : fallback.requiredFields,
-    eventTypes: fallback.eventTypes,
+    eventTypes: AUDIT_EVENT_TYPES,
     sampleEvent: fallback.sampleEvent,
   };
 }
 
-function buildEffectiveBySubject(subjects: CapabilitySubject[], grants: CapabilityGrant[], catalog: CapabilityCatalogGroup[]): Record<string, CapabilityEffectiveSubject> {
-  return Object.fromEntries(subjects.map((subject) => [subject.id, buildEffectiveForSubject(subject.id, grants, catalog)]));
+function buildEffectiveBySubject(subjects: CapabilitySubject[], grants: CapabilityGrant[], bundles: CapabilityGrantBundle[], catalog: CapabilityCatalogGroup[]): Record<string, CapabilityEffectiveSubject> {
+  return Object.fromEntries(subjects.map((subject) => [subject.id, buildEffectiveForSubject(subject.id, grants, bundles, catalog)]));
 }
 
-function buildEffectiveForSubject(subjectId: string, grants: CapabilityGrant[], catalog: CapabilityCatalogGroup[]): CapabilityEffectiveSubject {
+function buildEffectiveByPerson(people: CapabilityPerson[], identities: CapabilityExternalIdentity[], channels: CapabilityCommunicationChannel[], effectiveBySubject: Record<string, CapabilityEffectiveSubject>): Record<string, CapabilityEffectivePerson> {
+  const byPerson: Record<string, CapabilityEffectivePerson> = {};
+  for (const person of people) {
+    const identityIds = identities.filter((identity) => identity.personId === person.id).map((identity) => identity.id);
+    const channelIds = channels.filter((channel) => channel.identityIds.some((identityId) => identityIds.includes(identityId))).map((channel) => channel.id);
+    const subjectId = person.primarySubjectId;
+    byPerson[person.id] = {
+      personId: person.id,
+      subjectId,
+      identityIds,
+      communicationChannelIds: channelIds,
+      effective: effectiveBySubject[subjectId] ?? buildEffectiveForSubject(subjectId, [], [], CAPABILITY_CATALOG),
+    };
+  }
+  return byPerson;
+}
+
+function buildEffectiveForSubject(subjectId: string, grants: CapabilityGrant[], bundles: CapabilityGrantBundle[], catalog: CapabilityCatalogGroup[]): CapabilityEffectiveSubject {
   const activeGrants = grants.filter((grant) => grant.subjectId === subjectId && (grant.status === "active" || grant.status === "example") && !grant.revokedAt);
   const directGrantIds: string[] = [];
+  const directBundleGrantIds: string[] = [];
+  const directBundleIds = new Set<string>();
   const directCapabilityIds = new Set<string>();
   const directGroupCapabilityIds = new Set<string>();
+  const impliedGroupCapabilityIds = new Set<string>();
   const impliedCapabilityIds = new Set<string>();
   const byCapabilityId: Record<string, CapabilityEffectiveEntry> = {};
   const ensureEntry = (capabilityId: string): CapabilityEffectiveEntry => {
@@ -680,18 +1380,51 @@ function buildEffectiveForSubject(subjectId: string, grants: CapabilityGrant[], 
       capabilityId,
       effective: false,
       directGrantIds: [],
+      directBundleGrantIds: [],
       directGroupGrantIds: [],
+      impliedByBundleGrantIds: [],
+      impliedByBundleIds: [],
       impliedByGroupGrantIds: [],
       impliedByCapabilityIds: [],
     };
     return byCapabilityId[capabilityId];
   };
+  for (const bundle of bundles) ensureEntry(bundle.id);
   for (const groupItem of catalog) {
     ensureEntry(groupItem.id);
     for (const child of groupItem.children) ensureEntry(child.id);
   }
   for (const grant of activeGrants) {
     directGrantIds.push(grant.id);
+    const bundle = grant.grantKind === "bundle" ? bundles.find((item) => item.id === (grant.bundleId || grant.capabilityId)) : undefined;
+    if (bundle) {
+      directBundleGrantIds.push(grant.id);
+      directBundleIds.add(bundle.id);
+      const bundleEntry = ensureEntry(bundle.id);
+      bundleEntry.effective = true;
+      bundleEntry.directGrantIds.push(grant.id);
+      bundleEntry.directBundleGrantIds.push(grant.id);
+      const groupIds = bundle.id === OWNER_ALL_BUNDLE_ID ? catalog.map((item) => item.id) : bundle.includes.groupIds;
+      const capabilityIds = new Set(bundle.id === OWNER_ALL_BUNDLE_ID ? catalogCapabilityIds(catalog) : bundle.includes.capabilityIds);
+      for (const groupId of groupIds) {
+        const groupItem = catalog.find((item) => item.id === groupId);
+        const groupEntry = ensureEntry(groupId);
+        groupEntry.effective = true;
+        groupEntry.impliedByBundleGrantIds.push(grant.id);
+        groupEntry.impliedByBundleIds.push(bundle.id);
+        impliedGroupCapabilityIds.add(groupId);
+        if (groupItem) for (const child of groupItem.children) capabilityIds.add(child.id);
+      }
+      for (const capabilityId of capabilityIds) {
+        const childEntry = ensureEntry(capabilityId);
+        childEntry.effective = true;
+        childEntry.impliedByBundleGrantIds.push(grant.id);
+        childEntry.impliedByBundleIds.push(bundle.id);
+        childEntry.impliedByCapabilityIds.push(bundle.id);
+        if (!catalog.some((item) => item.id === capabilityId)) impliedCapabilityIds.add(capabilityId);
+      }
+      continue;
+    }
     const groupItem = catalog.find((item) => item.id === grant.capabilityId);
     const entry = ensureEntry(grant.capabilityId);
     entry.effective = true;
@@ -710,13 +1443,134 @@ function buildEffectiveForSubject(subjectId: string, grants: CapabilityGrant[], 
       directCapabilityIds.add(grant.capabilityId);
     }
   }
+  const allCapabilityIds = catalogCapabilityIds(catalog);
+  const effectiveCapabilityCount = allCapabilityIds.filter((capabilityId) => byCapabilityId[capabilityId]?.effective).length;
   return {
     subjectId,
     directGrantIds,
+    directBundleGrantIds,
+    directBundleIds: [...directBundleIds].sort(),
     directCapabilityIds: [...directCapabilityIds].sort(),
     directGroupCapabilityIds: [...directGroupCapabilityIds].sort(),
+    impliedGroupCapabilityIds: [...impliedGroupCapabilityIds].sort(),
     impliedCapabilityIds: [...impliedCapabilityIds].sort(),
     byCapabilityId,
+    summary: {
+      activeGrantCount: activeGrants.length,
+      effectiveCapabilityCount,
+      totalCapabilityCount: allCapabilityIds.length,
+      allCapabilities: effectiveCapabilityCount === allCapabilityIds.length,
+      bundles: [...directBundleIds].sort(),
+      enforcement: "non_enforcing",
+    },
+  };
+}
+
+async function deriveObservedSlackState(codexChatPath?: string): Promise<ObservedSlackState> {
+  if (!codexChatPath) return { status: "not_observed", observedIdentities: [] };
+  const summaryPath = path.join(resolveEnvFilePath(codexChatPath), "data", "state", "slack_telemetry", "summary.json");
+  const telemetryDir = path.dirname(summaryPath);
+  const observations = new Map<string, { teamId: string; userId: string; channelIds: Set<string>; eventCount: number; firstSeenAt: string; lastSeenAt: string; correlationIds: Set<string> }>();
+  const observe = (record: unknown, sourcePath: string): void => {
+    if (!isRecord(record)) return;
+    if (record.direction !== "inbound" || record.outcome !== "accepted") return;
+    const teamId = sanitizeText(record.teamId, "", 80);
+    const userId = sanitizeText(record.userId, "", 80);
+    if (!teamId || !userId) return;
+    const key = `${teamId}/${userId}`;
+    const observedAt = sanitizeIso(record.observedAt, SEED_TIME);
+    const entry = observations.get(key) ?? { teamId, userId, channelIds: new Set<string>(), eventCount: 0, firstSeenAt: observedAt, lastSeenAt: observedAt, correlationIds: new Set<string>() };
+    entry.eventCount += 1;
+    const channelId = sanitizeText(record.channelId, "", 80);
+    const correlationId = sanitizeText(record.correlationId, "", 160);
+    if (channelId) entry.channelIds.add(channelId);
+    if (correlationId) entry.correlationIds.add(correlationId);
+    if (observedAt < entry.firstSeenAt) entry.firstSeenAt = observedAt;
+    if (observedAt > entry.lastSeenAt) entry.lastSeenAt = observedAt;
+    observations.set(key, entry);
+    void sourcePath;
+  };
+  try {
+    const rawSummary = await readTextIfPresent(summaryPath);
+    if (!rawSummary) return { status: "not_observed", observedIdentities: [], sourcePath: summaryPath };
+    const summary = JSON.parse(rawSummary) as unknown;
+    if (isRecord(summary)) {
+      observe(summary.lastAcceptedEvent, summaryPath);
+      observe(summary.lastInboundEvent, summaryPath);
+    }
+    const files = await readdir(telemetryDir).catch(() => [] as string[]);
+    for (const file of files.filter((item) => item.endsWith(".jsonl")).sort().slice(-7)) {
+      const filePath = path.join(telemetryDir, file);
+      const text = await readTextIfPresent(filePath);
+      for (const line of text.split("\n")) {
+        if (!line.trim()) continue;
+        try { observe(JSON.parse(line) as unknown, filePath); } catch { /* ignore corrupt telemetry line */ }
+      }
+    }
+  } catch (error) {
+    return { status: "unreadable", observedIdentities: [], sourcePath: summaryPath, error: error instanceof Error ? error.message : String(error) };
+  }
+  const observedIdentities: ObservedSlackIdentity[] = [...observations.values()].map((entry) => ({
+    providerTeamId: entry.teamId,
+    providerUserId: entry.userId,
+    channelIds: [...entry.channelIds].sort(),
+    eventCount: entry.eventCount,
+    firstSeenAt: entry.firstSeenAt,
+    lastSeenAt: entry.lastSeenAt,
+    sourcePath: summaryPath,
+    correlationIds: [...entry.correlationIds].sort().slice(0, 10),
+  })).sort((a, b) => `${a.providerTeamId}/${a.providerUserId}`.localeCompare(`${b.providerTeamId}/${b.providerUserId}`));
+  if (observedIdentities.length === 1) return { status: "single_signed_user", observedIdentities, linkableIdentity: observedIdentities[0], sourcePath: summaryPath };
+  if (observedIdentities.length > 1) return { status: "multiple_signed_users", observedIdentities, sourcePath: summaryPath };
+  return { status: "not_observed", observedIdentities: [], sourcePath: summaryPath };
+}
+
+function slackChannelsFromObserved(observed: ObservedSlackIdentity, identityId: string, status: "linked" | "observed"): CapabilityCommunicationChannel[] {
+  if (!observed.channelIds.length) {
+    return [{
+      id: slackWorkspaceChannelId(observed.providerTeamId),
+      provider: "slack",
+      kind: "slack_workspace",
+      label: `Slack workspace ${observed.providerTeamId}`,
+      status,
+      identityIds: [identityId],
+      externalIds: { teamId: observed.providerTeamId },
+      metadata: { source: "codex-chat-slack-telemetry", eventCount: String(observed.eventCount) },
+      createdAt: observed.firstSeenAt,
+      updatedAt: observed.lastSeenAt,
+      lastSeenAt: observed.lastSeenAt,
+    }];
+  }
+  return observed.channelIds.map((channelId) => ({
+    id: slackChannelId(observed.providerTeamId, channelId),
+    provider: "slack" as const,
+    kind: "slack_channel" as const,
+    label: `Slack channel ${observed.providerTeamId}/${channelId}`,
+    status,
+    identityIds: [identityId],
+    externalIds: { teamId: observed.providerTeamId, channelId },
+    metadata: { source: "codex-chat-slack-telemetry", eventCount: String(observed.eventCount) },
+    createdAt: observed.firstSeenAt,
+    updatedAt: observed.lastSeenAt,
+    lastSeenAt: observed.lastSeenAt,
+  }));
+}
+
+function defaultAdminWriteModel(): CapabilityAdminWriteModel {
+  return {
+    writesEnabled: false,
+    plannedEndpoints: [
+      { method: "POST", path: "/api/admin/brain/capabilities/people", purpose: "Create a person/user with no runtime enforcement side effect." },
+      { method: "POST", path: "/api/admin/brain/capabilities/identity-links", purpose: "Link an external Telegram/Slack/Clerk identity to a person with proof metadata." },
+      { method: "POST", path: "/api/admin/brain/capabilities/grants", purpose: "Apply a non-enforcing grant or bundle after explicit confirmation." },
+      { method: "DELETE", path: "/api/admin/brain/capabilities/grants/{grantId}", purpose: "Revoke or expire a grant with an append-only audit event." },
+    ],
+    mutationShapes: {
+      linkIdentity: { personId: TIM_PERSON_ID, provider: "telegram|slack", providerUserId: "external user id", proofSource: "admin_seed|slack_signed_event" },
+      grantBundle: { subjectId: TIM_SUBJECT_ID, grantKind: "bundle", bundleId: OWNER_ALL_BUNDLE_ID, resource: "global:*" },
+      grantCapability: { subjectId: "person:...", grantKind: "capability|group", capabilityId: "projects.files.write", resource: "selector map" },
+      revokeGrant: { grantId: "grant_...", reason: "admin-reviewed reason" },
+    },
   };
 }
 
@@ -760,7 +1614,7 @@ function normalizeGrantResource(value: unknown): CapabilityGrant["resource"] {
 function normalizeGrantSource(value: unknown): CapabilityGrant["source"] {
   const fallback = { kind: "seed" as const, id: "unknown" };
   if (!isRecord(value)) return fallback;
-  const kind = value.kind === "admin" || value.kind === "bundle" || value.kind === "migration" || value.kind === "chat_approval" || value.kind === "system" ? value.kind : "seed";
+  const kind = value.kind === "admin" || value.kind === "bundle" || value.kind === "migration" || value.kind === "chat_approval" || value.kind === "system" || value.kind === "identity_proof" ? value.kind : "seed";
   return { kind, id: sanitizeText(value.id, "unknown", 120) };
 }
 
@@ -769,23 +1623,86 @@ function normalizeStringRecord(value: unknown): Record<string, string> | undefin
   const out: Record<string, string> = {};
   for (const [key, item] of Object.entries(value)) {
     const safeKey = sanitizeText(key, "", 80);
-    const safeValue = sanitizeText(item, "", 180);
+    const safeValue = sanitizeText(item, "", 220);
     if (safeKey && safeValue) out[safeKey] = safeValue;
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+function normalizeEvidenceRecord(value: unknown): Record<string, string | number | boolean> {
+  if (!isRecord(value)) return {};
+  const out: Record<string, string | number | boolean> = {};
+  for (const [key, item] of Object.entries(value)) {
+    const safeKey = sanitizeText(key, "", 80);
+    if (!safeKey) continue;
+    if (typeof item === "boolean" || typeof item === "number") out[safeKey] = item;
+    else {
+      const safeValue = sanitizeText(item, "", 260);
+      if (safeValue) out[safeKey] = safeValue;
+    }
+  }
+  return out;
+}
+
 function normalizeStringArray(value: unknown, maxItems: number): string[] {
   if (!Array.isArray(value)) return [];
-  return value.slice(0, maxItems).map((item) => sanitizeText(item, "", 120)).filter(Boolean);
+  return value.slice(0, maxItems).map((item) => sanitizeText(item, "", 160)).filter(Boolean);
+}
+
+function sanitizePersonStatus(value: unknown): CapabilityPerson["status"] {
+  return value === "inactive" || value === "observed" || value === "placeholder" ? value : "active";
+}
+
+function sanitizePersonSource(value: unknown): CapabilityPerson["source"] {
+  return value === "telegram_allowlist_migration" || value === "migration" || value === "observed_runtime_metadata" || value === "manual_admin" ? value : "admin_seed";
+}
+
+function sanitizeIdentityProvider(value: unknown): CapabilityIdentityProvider {
+  return value === "telegram" || value === "slack" || value === "clerk" || value === "system" ? value : "unknown";
+}
+
+function sanitizeIdentityStatus(value: unknown): CapabilityExternalIdentity["status"] {
+  return value === "observed_unlinked" || value === "addable_placeholder" || value === "inactive" ? value : "linked";
+}
+
+function sanitizeProofSource(value: unknown): CapabilityIdentityProof["source"] {
+  return value === "telegram_allowlist_migration" || value === "slack_signed_event" || value === "observed_runtime_metadata" || value === "manual_admin" || value === "migration" ? value : "admin_seed";
+}
+
+function sanitizeProofConfidence(value: unknown): CapabilityIdentityProof["confidence"] {
+  return value === "medium" || value === "low" || value === "placeholder" ? value : "high";
+}
+
+function sanitizeChannelKind(value: unknown): CapabilityCommunicationChannel["kind"] {
+  return value === "telegram_private_chat" || value === "slack_workspace" || value === "slack_channel" || value === "slack_dm" ? value : "unknown";
+}
+
+function sanitizeChannelStatus(value: unknown): CapabilityCommunicationChannel["status"] {
+  return value === "observed" || value === "addable_placeholder" || value === "inactive" ? value : "linked";
 }
 
 function sanitizeSubjectKind(value: unknown): CapabilitySubject["kind"] | undefined {
-  return value === "admin_user" || value === "slack_workspace" || value === "slack_user" || value === "slack_channel" || value === "system" ? value : undefined;
+  return value === "person" || value === "external_identity" || value === "admin_user" || value === "slack_workspace" || value === "slack_user" || value === "slack_channel" || value === "system" ? value : undefined;
 }
 
 function sanitizeGrantStatus(value: unknown): CapabilityGrant["status"] {
   return value === "revoked" || value === "expired" || value === "example" ? value : "active";
+}
+
+function sanitizePersonId(value: unknown): string {
+  return sanitizePattern(value, /^[a-z0-9:_-]{1,120}$/i);
+}
+
+function sanitizeIdentityId(value: unknown): string {
+  return sanitizePattern(value, /^[a-z0-9:_-]{1,180}$/i);
+}
+
+function sanitizeProofId(value: unknown): string {
+  return sanitizePattern(value, /^[a-z0-9:_-]{1,180}$/i);
+}
+
+function sanitizeChannelId(value: unknown): string {
+  return sanitizePattern(value, /^[a-z0-9:_-]{1,180}$/i);
 }
 
 function sanitizeSubjectId(value: unknown): string {
@@ -796,13 +1713,17 @@ function sanitizeGrantId(value: unknown): string {
   return sanitizePattern(value, /^[a-z0-9:_-]{1,180}$/i);
 }
 
+function sanitizeBundleId(value: unknown): string {
+  return sanitizePattern(value, /^[a-z0-9_.:-]{1,120}$/i);
+}
+
 function sanitizeCapabilityId(value: unknown): string {
-  return sanitizePattern(value, /^[a-z0-9_.-]{1,120}$/i);
+  return sanitizePattern(value, /^[a-z0-9_.:-]{1,120}$/i);
 }
 
 function sanitizePattern(value: unknown, pattern: RegExp): string {
   if (typeof value !== "string") return "";
-  const cleaned = sanitizeText(value, "", 200);
+  const cleaned = sanitizeText(value, "", 240);
   return pattern.test(cleaned) ? cleaned : "";
 }
 
@@ -824,6 +1745,38 @@ function redactSecretish(value: string): string {
     .replace(/\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g, "<redacted-github-token>")
     .replace(/\bxox[baprs]-[A-Za-z0-9-]{20,}\b/g, "<redacted-slack-token>")
     .replace(/\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, "<redacted-jwt>");
+}
+
+function compactRecord(value: Record<string, string | undefined>): Record<string, string> | undefined {
+  const out = Object.fromEntries(Object.entries(value).filter(([, item]) => Boolean(item))) as Record<string, string>;
+  return Object.keys(out).length ? out : undefined;
+}
+
+function mergeUniqueById<T extends { id: string }>(base: T[], additions: T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const item of [...base, ...additions]) {
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    out.push(item);
+  }
+  return out;
+}
+
+function catalogCapabilityIds(catalog: CapabilityCatalogGroup[]): string[] {
+  return catalog.flatMap((groupItem) => groupItem.children.map((child) => child.id));
+}
+
+function slackIdentityId(teamId: string, userId: string): string {
+  return `identity_slack_${teamId}_${userId}`;
+}
+
+function slackChannelId(teamId: string, channelId: string): string {
+  return `channel_slack_${teamId}_${channelId}`;
+}
+
+function slackWorkspaceChannelId(teamId: string): string {
+  return `channel_slack_${teamId}_workspace`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

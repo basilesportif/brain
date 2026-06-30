@@ -577,22 +577,27 @@ rollup; it still does not send Slack messages or change Slack runtime behavior.
 
 ### Phase 5 — capability and audit control plane
 
-Status as of 2026-06-30: the first Phase 5 slice is implemented as a separate
+Status as of 2026-06-30: the Phase 5 foundation is implemented as a separate
 Brain UI tab/section named **Capabilities**, distinct from Slack setup, Mission
-Control, Runtime Config, and Audit Log. It provides read-only/manual
-control-plane vocabulary before enforcement: a grouped capability catalog, a
-private local seed store for subjects/grants/audit shape, resource/action
-selectors, visible group-implies-child semantics, and audit event schema. No
-live Slack or `codex-chat` authorization behavior changes in this slice.
+Control, Runtime Config, and Audit Log. It remains non-enforcing and now stores
+schema v2: people/users, Telegram/Slack external identities, identity proofs,
+communication channels, subjects, owner/all bundle grants, grouped capability
+catalog semantics, and audit schema/storage metadata. Tim is seeded as
+`person_tim` with Telegram `user_id=253768951` / `chat_id=253768951`; Slack is
+modeled from signed-event telemetry when safely derivable. No live Telegram,
+Slack, or `codex-chat` authorization behavior changes in this slice.
 
 First MVP Brain UI surface:
 
 - read-only capability catalog grouped by family, for example Slack source
   context, cross-surface output, subagent/repo operations, and administration;
-- grant vocabulary for subject, capability ID, resource selector, action, source,
-  grantor, expiry/revocation, and reason;
-- audit vocabulary for grant proposals, grant/revoke decisions, observed checks,
-  denials, output sends, and admin changes;
+- people/users and external identity vocabulary for Telegram, Slack, and future
+  providers, with proof sources and possible communication channels;
+- grant vocabulary for subject, capability ID, bundle ID, resource selector,
+  action, source, grantor, expiry/revocation, and reason;
+- audit vocabulary for identity links/proofs, bundle grants, grant proposals,
+  grant/revoke decisions, observed checks, denials, output sends, and admin
+  changes;
 - clear read-only/manual labels until the model has been validated against real
   Slack/Telegram/admin workflows.
 
@@ -610,30 +615,38 @@ Constraints for Phase 5 startup:
 
 First implementation slice status:
 
-1. [x] Add/keep the Brain UI **Capabilities** tab with a read-only catalog and
-   grant vocabulary.
-2. [x] Add a read-only local/private catalog store schema and loader, with seed
-   data only; no grant writes and no runtime decisions. Default path:
+1. [x] Add/keep the Brain UI **Capabilities** tab with a read-only catalog,
+   people/users, communications identities, proof metadata, and grant
+   vocabulary.
+2. [x] Add a read-only local/private store schema v2 and loader/migrator, with
+   seed data only; no grant/link writes and no runtime decisions. Default path:
    `/home/tim/.brain/control-plane/capabilities.json`.
-3. [x] Define the first audit event shape (`capability.catalog.viewed`,
-   `capability.grant.proposed`, `capability.check.observed`) with redacted
-   metadata and correlation IDs. The schema is persisted in the private store;
-   append-only grant mutation audit writes remain disabled until grant writes
-   exist.
-4. [x] Wire tests around no-secret rendering, grouped Project grant inheritance,
-   read-only API behavior, and no live enforcement paths.
+3. [x] Seed `person_tim` / Tim, link Telegram `253768951`, model Slack identity
+   support, and grant Tim all catalog capabilities through a visible owner/all
+   bundle expansion.
+4. [x] Define the first audit event shape (`identity.link.seeded`,
+   `identity.proof.observed`, `capability.bundle.granted`,
+   `capability.catalog.viewed`, `capability.grant.proposed`,
+   `capability.check.observed`) with redacted metadata and correlation IDs. The
+   schema is persisted in the private store; append-only mutation audit writes
+   remain disabled until writes exist.
+5. [x] Wire tests around no-secret rendering, schema seeding/migration, Tim
+   Telegram identity link, Tim effective all-capabilities grant, UI/API output
+   shape, grouped Project grant inheritance, read-only behavior, and no live
+   enforcement paths.
 
 Concrete next options:
 
-1. Validate the first catalog vocabulary against real Projects, Slack, CRM,
-   Calendar, Todos, Finance, and Health workflows.
-2. Add explicit admin-only grant proposal/apply/revoke APIs with confirmation
-   dialogs, non-secret diff previews, and append-only audit records.
+1. Add explicit admin-only person create/update and identity link/unlink APIs
+   with confirmation dialogs, non-secret diff previews, and append-only audit
+   records.
+2. Add explicit admin-only grant proposal/apply/revoke APIs for bundles, groups,
+   and child capabilities.
 3. Import `codex-chat` runtime capability-check observations before enforcement.
-4. Design bundles/roles that expand into ordinary per-capability grants, rather
-   than bypassing the model.
-5. Only after review, wire `codex-chat` runtime tools/output sends to
-   fail-closed capability checks.
+4. Validate the catalog and identity model against real Projects, Slack, CRM,
+   Calendar, Todos, Finance, and Health workflows.
+5. Only after review, wire Telegram/Slack/codex-chat runtime tools/output sends
+   to fail-closed capability checks.
 
 - [ ] Implement Brain-owned actor, bundle, grant, temporary approval, and
       revocation administration after the read-only model is validated.

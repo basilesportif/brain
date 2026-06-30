@@ -879,11 +879,13 @@ execution.
 
 ### Phase 4 — capability requirements, enforcement, and audit spine
 
-Status as of 2026-06-30: Brain control-plane Phase 5 has its first read-only
-slice: the separate Brain UI **Capabilities** tab, grouped catalog/store,
-subject/grant vocabulary, group-implies-child semantics, and audit-event shape.
-It remains non-enforcing and does not grant live permissions. Do not start full
-capability enforcement, temporary approval flows, or live admin grant management
+Status as of 2026-06-30: Brain control-plane Phase 5 has a non-enforcing
+foundation slice: the separate Brain UI **Capabilities** tab, store schema v2
+for people/users, Telegram/Slack identities, proofs, channels, subjects/grants,
+a visible Tim owner/all bundle expansion, grouped catalog semantics, and audit
+event shape. It remains non-enforcing and does not grant live permissions. Do
+not start full capability enforcement, temporary approval flows, or live admin
+grant management
 directly from the rough capability lists in this document. Continue dedicated
 planning/validation to capture all requirements and produce the canonical
 enforcement vocabulary, resource selector model, grant lifecycle, migration
@@ -947,11 +949,17 @@ extension rather than a hidden behavior in the first implementation.
 - [x] Add a separate Brain admin **Capabilities** tab/section placeholder for
       read-only catalog, grant vocabulary, audit event shape, and explicit
       no-enforcement constraints.
-- [x] Add the first Brain-owned read-only capability catalog/store/admin surface
+- [x] Add the Brain-owned non-enforcing capability catalog/store/admin surface
       with Projects, CRM, Calendar, Slack, Todos, Finance, Health, and
       capability-admin groups; Projects group grants visibly imply child project
       capabilities. This is validation vocabulary, not live enforcement.
+- [x] Add unified identity foundation rows for Tim, Telegram `253768951`,
+      Slack addable/observed/signed-event identity support, proof metadata,
+      communication channels, and a Tim owner/all bundle represented in the
+      effective grant view.
 - [ ] Define canonical capability IDs/descriptions for enforced runtime checks.
+- [ ] Add admin write APIs for person/identity links, bundle/group/capability
+      grants, revocations, and append-only mutation audit.
 - [ ] Define bundle semantics for common trust levels while preserving
       individual auditable grants.
 - [ ] Enforce checks at every runtime-owned tool call and output send.

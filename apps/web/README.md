@@ -15,17 +15,18 @@ Implemented now:
 - approved plan/deploy/restart operation APIs for `codex-chat.service`;
 - Slack settings presence/write APIs and Slack manifest rendering using Brain's
   public Events URL;
-- Phase 5 read-only Capabilities tab/API with grouped catalog, private local
-  subject/grant seed store, visible group-implies-child semantics, and audit
-  event schema (non-enforcing; no grant writes);
+- Phase 5 non-enforcing Capabilities tab/API with store schema v2 for
+  people/users, Telegram/Slack identities, proofs, channels, subjects, grants,
+  owner/all bundle expansion, grouped catalog semantics, and audit schema (no
+  grant/link writes; no runtime enforcement);
 - static generated page validation (`index.html`, static files only, no symlinks/path traversal);
 - secret-like filename/content checks;
 - TTL manifest entries and local runtime copy;
 - expired scratch page pruning.
 
-Not implemented yet: live capability grant management/enforcement, a full
-dashboard for user/channel mappings, remote generated-page copy support, and
-generated page promotion lifecycle beyond manifest status.
+Not implemented yet: live capability grant/link management or enforcement,
+channel-scoped approval flows, remote generated-page copy support, and generated
+page promotion lifecycle beyond manifest status.
 
 See `docs/brain-admin-service.md`, `docs/web-publisher.md`, and
 `plans/brain-control-plane.md`.

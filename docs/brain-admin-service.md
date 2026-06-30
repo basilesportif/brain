@@ -62,9 +62,10 @@ Routes:
 - `GET /api/admin/brain/slack/telemetry` — read-only Slack runtime telemetry summary from codex-chat state; redacted metadata only.
 - `GET /api/admin/brain/slack/manifest` — render the codex-chat-owned Slack manifest contract with Brain's public Events URL.
 - `GET /api/admin/brain/slack/manifest/download` — download the rendered manifest JSON.
-- `GET /api/admin/brain/capabilities` — read-only Phase 5 capability catalog,
-  private local subject/grant seed store metadata, group-implies-child grant
-  view, and audit event schema. No grant writes or runtime enforcement.
+- `GET /api/admin/brain/capabilities` — non-enforcing Phase 5 v2 capability
+  foundation: people/users, Telegram/Slack identities, proofs, channels,
+  private local subject/bundle/grant store metadata, group/bundle effective
+  view, and audit event schema. No grant/link writes or runtime enforcement.
 
 The service fails closed when Clerk keys or `CLERK_ALLOWED_EMAILS` are missing.
 Env values are write-only in API responses and audit records; responses expose
@@ -151,21 +152,34 @@ Implemented in this slice:
 - Brain-owned read-only catalog groups for Projects, CRM, Calendar, Slack,
   Todos, Finance placeholders, Health placeholders, and capability
   administration.
+- Store schema **v2** at `BRAIN_CAPABILITY_STORE_PATH` (default
+  `/home/tim/.brain/control-plane/capabilities.json`) with `people`, external
+  identities, identity proofs, communication channels, subjects, bundles,
+  grants, and audit schema/storage metadata. Schema v1 read-only
+  subject/grant stores are migrated forward while preserving their example
+  semantics.
+- Seeded `person_tim` / Tim as an active person with linked Telegram identity
+  `user_id=253768951` and `chat_id=253768951`, proof source
+  `telegram_allowlist_migration`.
+- Slack identity support in the same model. If codex-chat signed Slack event
+  telemetry exposes exactly one accepted Slack user/team pair, the store links
+  that identity to Tim with proof source `slack_signed_event`; otherwise the UI
+  shows addable or observed-unlinked Slack identity rows for admin review.
 - Stable capability IDs, labels, descriptions, actions, resource selectors, and
   group inheritance semantics. A top-level `projects` group grant visibly
   implies child project capabilities such as `projects.files.write` while
   preserving child rows/details.
-- Private local seed store at `BRAIN_CAPABILITY_STORE_PATH` (default
-  `/home/tim/.brain/control-plane/capabilities.json`) with separate subjects
-  such as current Brain admin, Slack workspace/user/channel placeholders, and a
-  codex-chat runtime placeholder.
-- Non-enforcing seed grants only. The UI is read-only; there is no POST grant
-  route, no live Slack behavior change, and no `codex-chat` authorization hook.
+- Non-enforcing owner/all bundle grant for Tim. The effective view expands the
+  bundle into ordinary group/child capabilities; it is not a runtime bypass.
+- Non-enforcing seed grants only. The UI is read-only; there is no POST grant or
+  identity-link route, no live Telegram/Slack behavior change, and no
+  `codex-chat` authorization hook.
 - Audit event schema persisted in the private store, including
-  `capability.catalog.viewed`, `capability.grant.proposed`, and
-  `capability.check.observed`. Append-only grant mutation audit records should
-  be written to `BRAIN_CAPABILITY_AUDIT_LOG` only after explicit grant writes
-  are implemented.
+  `identity.link.seeded`, `identity.proof.observed`,
+  `capability.bundle.granted`, `capability.catalog.viewed`,
+  `capability.grant.proposed`, and `capability.check.observed`. Append-only
+  link/grant mutation audit records should be written to
+  `BRAIN_CAPABILITY_AUDIT_LOG` only after explicit writes are implemented.
 
 Capability responses must not include secrets, Slack message bodies, raw health
 or finance data, tokens, cookies, or credential values.

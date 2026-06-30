@@ -228,7 +228,7 @@ async function handleAdminApi(request: IncomingMessage, response: ServerResponse
     return sendDownload(response, "brain.slack.manifest.json", manifest.text);
   }
   if (request.method === "GET" && url.pathname === "/api/admin/brain/capabilities") {
-    return sendJson(response, 200, await capabilityAdminSummary({ storePath: config.capabilityStorePath, auditLogPath: config.capabilityAuditLogPath, adminEmail }));
+    return sendJson(response, 200, await capabilityAdminSummary({ storePath: config.capabilityStorePath, auditLogPath: config.capabilityAuditLogPath, adminEmail, codexChatPath: config.codexChatPath }));
   }
   if (request.method === "POST" && url.pathname === "/api/admin/brain/codex-chat/operation") {
     const payload = await readJsonBody(request);
@@ -287,6 +287,7 @@ async function serviceSettings(config: BrainAdminServiceConfig) {
     slackCanary: await slackCanarySummary(config),
     openRouter: await openRouterSettingsSummary(config),
     capabilities: {
+      schemaVersion: 2,
       storePath: resolveEnvFilePath(config.capabilityStorePath),
       auditLogPath: resolveEnvFilePath(config.capabilityAuditLogPath),
       writesEnabled: false,
