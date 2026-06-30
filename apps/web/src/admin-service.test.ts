@@ -226,7 +226,8 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /View manifest JSON/);
   assert.match(html, /Draft only — codex-chat remains source of truth/);
   assert.match(html, /Confirm live operation/);
-  assert.match(html, /Review & confirm/);
+  assert.match(html, /<select[^>]*id="op"[^>]*>[\s\S]*<option value="restart" selected>restart<\/option>/);
+  assert.match(html, /Review & confirm restart/);
   assert.match(html, /Confirm Slack settings write/);
   assert.match(html, /Review & write Slack settings/);
   assert.match(html, /Read-only Slack telemetry/);
