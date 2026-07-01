@@ -14,7 +14,11 @@ function capabilityCount(): number {
   return CAPABILITY_CATALOG.reduce((sum, group) => sum + group.children.length, 0);
 }
 
-test("capability store v2 seeds Tim, Telegram identity, Slack signed-event identity, and owner/all grant", async () => {
+function activeCapabilityCount(): number {
+  return CAPABILITY_CATALOG.reduce((sum, group) => sum + group.children.filter((child) => child.status !== "placeholder").length, 0);
+}
+
+test("capability store v2 seeds Tim, Telegram identity, Slack signed-event identity, and expanded owner grants", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-cap-v2-"));
   try {
     const codexChatPath = path.join(root, "codex-chat");
@@ -62,28 +66,34 @@ test("capability store v2 seeds Tim, Telegram identity, Slack signed-event ident
     assert.ok(summary.identityProofs.some((proof) => proof.identityId === slack.id && proof.source === "slack_signed_event"));
     assert.ok(summary.communicationChannels.some((channel) => channel.provider === "slack" && channel.externalIds.channelId === "CTESTCHAN"));
 
-    const timGrant = summary.grants.find((grant) => grant.id === "grant_seed_tim_owner_all");
-    assert.ok(timGrant);
-    assert.equal(timGrant.subjectId, "person:person_tim");
-    assert.equal(timGrant.grantKind, "bundle");
-    assert.equal(timGrant.bundleId, "bundle.owner.all");
-    assert.equal(timGrant.enforcement, "non_enforcing");
+    const timGrants = summary.grants.filter((grant) => grant.subjectId === "person:person_tim");
+    assert.equal(timGrants.length, activeCapabilityCount());
+    assert.equal(timGrants.some((grant) => grant.grantKind === "bundle" || grant.capabilityId === "bundle.owner.all"), false);
+    assert.ok(timGrants.some((grant) => grant.id === "grant_seed_tim_owner_projects_files_write" && grant.capabilityId === "projects.files.write" && grant.grantKind === "capability" && grant.enforcement === "non_enforcing"));
+    assert.equal(timGrants.some((grant) => grant.capabilityId === "finance.summary.read" || grant.capabilityId === "health.record.read"), false);
 
     const effective = summary.effectiveByPerson.person_tim?.effective;
     assert.ok(effective);
-    assert.equal(effective.summary.allCapabilities, true);
-    assert.equal(effective.summary.effectiveCapabilityCount, capabilityCount());
+    assert.equal(effective.summary.allCapabilities, false);
+    assert.equal(effective.summary.allActiveCapabilities, true);
+    assert.equal(effective.summary.effectiveCapabilityCount, activeCapabilityCount());
+    assert.equal(effective.summary.effectiveActiveCapabilityCount, activeCapabilityCount());
+    assert.equal(effective.summary.totalCapabilityCount, capabilityCount());
+    assert.equal(effective.summary.placeholderCapabilityCount, capabilityCount() - activeCapabilityCount());
+    assert.equal(effective.summary.activeGrantCount, activeCapabilityCount());
     assert.equal(effective.byCapabilityId["projects.files.write"]?.effective, true);
-    assert.ok(effective.byCapabilityId["projects.files.write"]?.impliedByBundleIds.includes("bundle.owner.all"));
+    assert.ok(effective.byCapabilityId["projects.files.write"]?.directGrantIds.includes("grant_seed_tim_owner_projects_files_write"));
+    assert.equal(effective.byCapabilityId["finance.summary.read"]?.effective, false);
     assert.equal(summary.enforcement.enabled, false);
     assert.equal(summary.adminWriteModel.writesEnabled, false);
 
     const fileInfo = await stat(path.join(root, "capabilities.json"));
     assert.equal(`0${(fileInfo.mode & 0o777).toString(8)}`, "0600");
-    const stored = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8")) as { schemaVersion: number; people: unknown[]; grants: unknown[] };
+    const stored = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8")) as { schemaVersion: number; people: unknown[]; grants: Array<{ id?: string }> };
     assert.equal(stored.schemaVersion, 2);
     assert.ok(stored.people.length >= 1);
-    assert.ok(stored.grants.length >= 1);
+    assert.ok(stored.grants.length >= activeCapabilityCount());
+    assert.equal(stored.grants.some((grant) => grant.id === "grant_seed_tim_owner_all"), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -126,7 +136,8 @@ test("capability store migrates v1 read-only subjects and grants into v2", async
     assert.ok(summary.people.some((person) => person.id === "person_tim"));
     assert.ok(summary.subjects.some((subject) => subject.id === "slack:channel:TLEGACY:CLEGACY"));
     assert.ok(summary.grants.some((grant) => grant.id === "grant_legacy_slack_channel_read" && grant.enforcement === "non_enforcing"));
-    assert.ok(summary.grants.some((grant) => grant.id === "grant_seed_tim_owner_all"));
+    assert.equal(summary.grants.some((grant) => grant.id === "grant_seed_tim_owner_all"), false);
+    assert.ok(summary.grants.some((grant) => grant.id === "grant_seed_tim_owner_projects_files_write"));
 
     const stored = JSON.parse(await readFile(storePath, "utf8")) as { schemaVersion: number; legacyStoreIds?: string[]; notes: string[] };
     assert.equal(stored.schemaVersion, 2);

@@ -245,6 +245,9 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /data-compact-capability-catalog/);
   assert.match(html, /data-capability-group/);
   assert.match(html, /Source grant\/bundle/);
+  assert.match(html, /owner\/all expanded into rows/);
+  assert.match(html, /placeholders not granted/);
+  assert.match(html, /Effective active coverage/);
   assert.match(html, /Filter actor \(placeholder\)/);
   assert.match(html, /Dense audit schema\/feed preview/);
   assert.match(html, /data-compact-audit/);
@@ -347,7 +350,7 @@ test("brain admin capabilities API exposes v2 identities, grouped catalog, grant
         mode: string;
         writesEnabled: boolean;
         enforcement: { enabled: boolean; codexChatChanged: boolean };
-        catalog: { groups: Array<{ id: string; label: string; semantics: { impliedCapabilityIds: string[] }; children: Array<{ id: string; label: string }> }>; counts: { groups: number; capabilities: number } };
+        catalog: { groups: Array<{ id: string; label: string; semantics: { impliedCapabilityIds: string[] }; children: Array<{ id: string; label: string; status: string }> }>; counts: { groups: number; capabilities: number; activeCapabilities: number; placeholderCapabilities: number } };
         store: { path: string; mode?: string; seededThisRequest: boolean; migratedThisRequest: boolean };
         defaultSubjectId: string;
         defaultPersonId: string;
@@ -359,7 +362,7 @@ test("brain admin capabilities API exposes v2 identities, grouped catalog, grant
         grantBundles: Array<{ id: string; includes: { capabilityIds: string[] } }>;
         grants: Array<{ id: string; subjectId: string; capabilityId: string; grantKind: string; bundleId?: string; enforcement: string }>;
         effectiveBySubject: Record<string, { directGroupCapabilityIds: string[]; impliedCapabilityIds: string[]; byCapabilityId: Record<string, { effective: boolean; impliedByCapabilityIds: string[] }> }>;
-        effectiveByPerson: Record<string, { effective: { directBundleIds: string[]; summary: { allCapabilities: boolean; effectiveCapabilityCount: number; totalCapabilityCount: number }; byCapabilityId: Record<string, { effective: boolean; impliedByBundleIds: string[] }> } }>;
+        effectiveByPerson: Record<string, { effective: { directBundleIds: string[]; directCapabilityIds: string[]; summary: { activeGrantCount: number; allCapabilities: boolean; allActiveCapabilities: boolean; effectiveCapabilityCount: number; effectiveActiveCapabilityCount: number; totalCapabilityCount: number; activeCapabilityCount: number; placeholderCapabilityCount: number }; byCapabilityId: Record<string, { effective: boolean; directGrantIds: string[]; impliedByBundleIds: string[] }> } }>;
         adminWriteModel: { writesEnabled: boolean; plannedEndpoints: Array<{ path: string }> };
         audit: { writesEnabled: boolean; requiredFields: string[]; eventTypes: Array<{ type: string }>; sampleEvent: Record<string, unknown> };
       };
@@ -390,8 +393,12 @@ test("brain admin capabilities API exposes v2 identities, grouped catalog, grant
       assert.ok(payload.subjects.some((subject) => subject.id === "brain-admin:current" && subject.kind === "admin_user" && /tim\.galebach@gmail\.com/.test(subject.label)));
       assert.ok(payload.subjects.some((subject) => subject.id === "person:person_tim" && subject.kind === "person"));
       assert.ok(payload.subjects.some((subject) => subject.id === "slack:channel:T00000000:C00000000" && subject.kind === "slack_channel"));
-      assert.ok(payload.grantBundles.some((bundle) => bundle.id === "bundle.owner.all" && bundle.includes.capabilityIds.includes("projects.files.write")));
-      assert.ok(payload.grants.some((grant) => grant.id === "grant_seed_tim_owner_all" && grant.subjectId === "person:person_tim" && grant.capabilityId === "bundle.owner.all" && grant.grantKind === "bundle" && grant.bundleId === "bundle.owner.all" && grant.enforcement === "non_enforcing"));
+      assert.ok(payload.grantBundles.some((bundle) => bundle.id === "bundle.owner.all" && bundle.includes.capabilityIds.includes("projects.files.write") && !bundle.includes.capabilityIds.includes("finance.summary.read")));
+      const timGrants = payload.grants.filter((grant) => grant.subjectId === "person:person_tim");
+      assert.equal(timGrants.length, payload.catalog.counts.activeCapabilities);
+      assert.equal(timGrants.some((grant) => grant.id === "grant_seed_tim_owner_all" || grant.grantKind === "bundle" || grant.capabilityId === "bundle.owner.all"), false);
+      assert.ok(timGrants.some((grant) => grant.id === "grant_seed_tim_owner_projects_files_write" && grant.capabilityId === "projects.files.write" && grant.grantKind === "capability" && grant.enforcement === "non_enforcing"));
+      assert.equal(timGrants.some((grant) => grant.capabilityId === "finance.summary.read" || grant.capabilityId === "health.record.read"), false);
       assert.ok(payload.grants.some((grant) => grant.id === "grant_seed_current_admin_projects_group" && grant.capabilityId === "projects" && grant.grantKind === "group" && grant.enforcement === "non_enforcing"));
       assert.ok(payload.grants.some((grant) => grant.capabilityId === "slack.channel.read" && grant.grantKind === "capability"));
 
@@ -403,11 +410,17 @@ test("brain admin capabilities API exposes v2 identities, grouped catalog, grant
       assert.deepEqual(adminEffective.byCapabilityId["projects.files.write"].impliedByCapabilityIds, ["projects"]);
 
       const timEffective = payload.effectiveByPerson.person_tim.effective;
-      assert.ok(timEffective.directBundleIds.includes("bundle.owner.all"));
-      assert.equal(timEffective.summary.allCapabilities, true);
-      assert.equal(timEffective.summary.effectiveCapabilityCount, timEffective.summary.totalCapabilityCount);
+      assert.deepEqual(timEffective.directBundleIds, []);
+      assert.equal(timEffective.summary.allCapabilities, false);
+      assert.equal(timEffective.summary.allActiveCapabilities, true);
+      assert.equal(timEffective.summary.activeGrantCount, payload.catalog.counts.activeCapabilities);
+      assert.equal(timEffective.summary.effectiveCapabilityCount, payload.catalog.counts.activeCapabilities);
+      assert.equal(timEffective.summary.effectiveActiveCapabilityCount, payload.catalog.counts.activeCapabilities);
+      assert.equal(timEffective.summary.totalCapabilityCount, payload.catalog.counts.capabilities);
+      assert.equal(timEffective.summary.placeholderCapabilityCount, payload.catalog.counts.placeholderCapabilities);
       assert.equal(timEffective.byCapabilityId["projects.files.write"].effective, true);
-      assert.ok(timEffective.byCapabilityId["projects.files.write"].impliedByBundleIds.includes("bundle.owner.all"));
+      assert.ok(timEffective.byCapabilityId["projects.files.write"].directGrantIds.includes("grant_seed_tim_owner_projects_files_write"));
+      assert.equal(timEffective.byCapabilityId["finance.summary.read"].effective, false);
       assert.equal(payload.adminWriteModel.writesEnabled, false);
       assert.ok(payload.adminWriteModel.plannedEndpoints.some((endpoint) => /identity-links/.test(endpoint.path)));
 

@@ -212,8 +212,12 @@ export interface CapabilityEffectiveSubject {
   summary: {
     activeGrantCount: number;
     effectiveCapabilityCount: number;
+    effectiveActiveCapabilityCount: number;
     totalCapabilityCount: number;
+    activeCapabilityCount: number;
+    placeholderCapabilityCount: number;
     allCapabilities: boolean;
+    allActiveCapabilities: boolean;
     bundles: string[];
     enforcement: "non_enforcing";
   };
@@ -593,7 +597,7 @@ export async function capabilityAdminSummary(options: CapabilityAdminSummaryOpti
     nextOptions: [
       "Review Tim's seeded Telegram owner identity and any Slack signed-event identity observation before enabling writes.",
       "Add explicit admin-only person/identity link and unlink APIs with confirmation dialogs and append-only audit events.",
-      "Add grant proposal/apply/revoke APIs that write ordinary auditable grants or owner/all bundle assignments.",
+      "Add grant proposal/apply/revoke APIs that write ordinary auditable capability grants; keep owner/all as a catalog bundle convenience, not an opaque Tim grant row.",
       "Import codex-chat runtime capability-check observations before turning on enforcement.",
       "Only after review, wire Telegram/Slack runtimes, tools, and output sends to fail-closed capability checks.",
     ],
@@ -732,6 +736,7 @@ function defaultCapabilityStore(auditLogPath: string, observedSlack: ObservedSla
     notes: [
       "This Brain-local private store is the non-enforcing Phase 5 foundation for unified people, external identities, capabilities, grants, proofs, and audit shape.",
       "Grant/link writes are disabled; seed grants are non-enforcing and runtime authorization remains disconnected.",
+      "Tim owner/all seed is materialized as individual non-placeholder capability grants; placeholder finance/health capabilities are not granted until explicitly reviewed.",
       "Do not store tokens, secrets, Telegram or Slack message bodies, health details, or financial transaction payloads here.",
     ],
   };
@@ -946,13 +951,13 @@ function defaultGrantBundles(): CapabilityGrantBundle[] {
     {
       id: OWNER_ALL_BUNDLE_ID,
       label: "Owner / all capabilities",
-      description: "Non-enforcing owner bundle for Tim that expands to every current catalog group and child capability in the effective grant view.",
+      description: "Non-enforcing owner bundle catalog convenience. Tim's seed materializes this as individual active capability grants so review UIs do not hide access behind one opaque bundle row.",
       status: "active",
-      includes: { groupIds: CAPABILITY_CATALOG.map((item) => item.id), capabilityIds: catalogCapabilityIds(CAPABILITY_CATALOG) },
+      includes: { groupIds: activeCatalogGroupIds(CAPABILITY_CATALOG), capabilityIds: activeCatalogCapabilityIds(CAPABILITY_CATALOG) },
       semantics: {
         grantKind: "bundle",
         implies: "all_catalog_capabilities",
-        expansion: "The bundle is represented as ordinary effective group/child capabilities for review; it is not a runtime bypass and enforcement remains disabled.",
+        expansion: "The owner/all bundle is a catalog shortcut that currently expands to individual non-placeholder capability grant rows for Tim; placeholder finance/health capabilities are intentionally excluded until reviewed.",
         positiveGrantOnly: true,
       },
     },
@@ -961,21 +966,7 @@ function defaultGrantBundles(): CapabilityGrantBundle[] {
 
 function defaultCapabilityGrants(): CapabilityGrant[] {
   return [
-    {
-      id: "grant_seed_tim_owner_all",
-      subjectId: TIM_SUBJECT_ID,
-      capabilityId: OWNER_ALL_BUNDLE_ID,
-      grantKind: "bundle",
-      bundleId: OWNER_ALL_BUNDLE_ID,
-      resource: { kind: "global", id: "*", selectors: { scope: "*" } },
-      actions: ["read", "search", "write", "publish", "manage", "post", "audit", "propose"],
-      source: { kind: "bundle", id: "owner_all_seed" },
-      grantedBy: "system:admin_seed",
-      grantedAt: SEED_TIME,
-      status: "active",
-      reason: "Tim is seeded as owner with all current catalog capabilities for the non-enforcing foundation slice.",
-      enforcement: "non_enforcing",
-    },
+    ...timOwnerCapabilityGrants(),
     {
       id: "grant_seed_current_admin_projects_group",
       subjectId: CURRENT_ADMIN_SUBJECT_ID,
@@ -1019,6 +1010,31 @@ function defaultCapabilityGrants(): CapabilityGrant[] {
       enforcement: "non_enforcing",
     },
   ];
+}
+
+function timOwnerCapabilityGrants(): CapabilityGrant[] {
+  return CAPABILITY_CATALOG.flatMap((groupItem) => groupItem.children)
+    .filter((capabilityItem) => capabilityItem.status !== "placeholder")
+    .map((capabilityItem) => ({
+      id: `grant_seed_tim_owner_${capabilityItem.id.replace(/[^a-z0-9]+/gi, "_")}`,
+      subjectId: TIM_SUBJECT_ID,
+      capabilityId: capabilityItem.id,
+      grantKind: "capability" as const,
+      resource: { kind: "global", id: "*", selectors: ownerCapabilitySelectors(capabilityItem) },
+      actions: capabilityItem.actions,
+      source: { kind: "bundle" as const, id: "owner_all_seed_expanded" },
+      grantedBy: "system:admin_seed",
+      grantedAt: SEED_TIME,
+      status: "active" as const,
+      reason: "Tim owner/all seed expanded into this individual non-placeholder capability grant for transparent review; runtime enforcement remains disconnected.",
+      enforcement: "non_enforcing" as const,
+    }));
+}
+
+function ownerCapabilitySelectors(capabilityItem: CapabilityCatalogCapability): Record<string, string> {
+  const selectors: Record<string, string> = { scope: "owner_all" };
+  for (const selectorItem of capabilityItem.resourceSelectors) selectors[selectorItem.id] = "*";
+  return selectors;
 }
 
 function defaultAuditShape(auditLogPath: string): CapabilityAuditShape {
@@ -1106,7 +1122,9 @@ function ensureCoreSeed(store: CapabilityStore, fallback: CapabilityStore): { st
   store.subjects = merge(store.subjects, fallback.subjects);
   store.grantBundles = merge(store.grantBundles, fallback.grantBundles).map((bundle) => bundle.id === OWNER_ALL_BUNDLE_ID ? defaultGrantBundles()[0] ?? bundle : bundle);
   store.grants = merge(store.grants, fallback.grants);
-  const pruned = pruneSupersededPlaceholders(store);
+  const expanded = expandLegacyTimOwnerBundleGrant(store);
+  if (expanded.changed) changed = true;
+  const pruned = pruneSupersededPlaceholders(expanded.store);
   if (pruned !== store) changed = true;
   const tim = pruned.people.find((person) => person.id === TIM_PERSON_ID);
   if (tim) {
@@ -1117,6 +1135,27 @@ function ensureCoreSeed(store: CapabilityStore, fallback: CapabilityStore): { st
     }
   }
   return { store: pruned, changed };
+}
+
+function expandLegacyTimOwnerBundleGrant(store: CapabilityStore): { store: CapabilityStore; changed: boolean } {
+  const legacyGrantIds = new Set(store.grants
+    .filter((grant) => grant.subjectId === TIM_SUBJECT_ID && grant.grantKind === "bundle" && (grant.bundleId === OWNER_ALL_BUNDLE_ID || grant.capabilityId === OWNER_ALL_BUNDLE_ID))
+    .map((grant) => grant.id));
+  const required = timOwnerCapabilityGrants();
+  const beforeCount = store.grants.length;
+  const grants = mergeUniqueById(store.grants.filter((grant) => !legacyGrantIds.has(grant.id)), required);
+  const changed = legacyGrantIds.size > 0 || grants.length !== beforeCount;
+  if (!changed) return { store, changed: false };
+  const note = "Migrated legacy Tim owner/all bundle grant into individual non-placeholder capability grants; placeholder finance/health capabilities remain ungranted.";
+  return {
+    store: {
+      ...store,
+      grants,
+      updatedAt: SEED_TIME,
+      notes: store.notes.includes(note) ? store.notes : [...store.notes, note],
+    },
+    changed: true,
+  };
 }
 
 function pruneSupersededPlaceholders(store: CapabilityStore): CapabilityStore {
@@ -1404,8 +1443,8 @@ function buildEffectiveForSubject(subjectId: string, grants: CapabilityGrant[], 
       bundleEntry.effective = true;
       bundleEntry.directGrantIds.push(grant.id);
       bundleEntry.directBundleGrantIds.push(grant.id);
-      const groupIds = bundle.id === OWNER_ALL_BUNDLE_ID ? catalog.map((item) => item.id) : bundle.includes.groupIds;
-      const capabilityIds = new Set(bundle.id === OWNER_ALL_BUNDLE_ID ? catalogCapabilityIds(catalog) : bundle.includes.capabilityIds);
+      const groupIds = bundle.id === OWNER_ALL_BUNDLE_ID ? activeCatalogGroupIds(catalog) : bundle.includes.groupIds;
+      const capabilityIds = new Set(bundle.id === OWNER_ALL_BUNDLE_ID ? activeCatalogCapabilityIds(catalog) : bundle.includes.capabilityIds);
       for (const groupId of groupIds) {
         const groupItem = catalog.find((item) => item.id === groupId);
         const groupEntry = ensureEntry(groupId);
@@ -1413,7 +1452,7 @@ function buildEffectiveForSubject(subjectId: string, grants: CapabilityGrant[], 
         groupEntry.impliedByBundleGrantIds.push(grant.id);
         groupEntry.impliedByBundleIds.push(bundle.id);
         impliedGroupCapabilityIds.add(groupId);
-        if (groupItem) for (const child of groupItem.children) capabilityIds.add(child.id);
+        if (groupItem) for (const child of groupItem.children) if (child.status !== "placeholder") capabilityIds.add(child.id);
       }
       for (const capabilityId of capabilityIds) {
         const childEntry = ensureEntry(capabilityId);
@@ -1444,7 +1483,9 @@ function buildEffectiveForSubject(subjectId: string, grants: CapabilityGrant[], 
     }
   }
   const allCapabilityIds = catalogCapabilityIds(catalog);
+  const activeCapabilityIds = activeCatalogCapabilityIds(catalog);
   const effectiveCapabilityCount = allCapabilityIds.filter((capabilityId) => byCapabilityId[capabilityId]?.effective).length;
+  const effectiveActiveCapabilityCount = activeCapabilityIds.filter((capabilityId) => byCapabilityId[capabilityId]?.effective).length;
   return {
     subjectId,
     directGrantIds,
@@ -1458,8 +1499,12 @@ function buildEffectiveForSubject(subjectId: string, grants: CapabilityGrant[], 
     summary: {
       activeGrantCount: activeGrants.length,
       effectiveCapabilityCount,
+      effectiveActiveCapabilityCount,
       totalCapabilityCount: allCapabilityIds.length,
+      activeCapabilityCount: activeCapabilityIds.length,
+      placeholderCapabilityCount: allCapabilityIds.length - activeCapabilityIds.length,
       allCapabilities: effectiveCapabilityCount === allCapabilityIds.length,
+      allActiveCapabilities: effectiveActiveCapabilityCount === activeCapabilityIds.length,
       bundles: [...directBundleIds].sort(),
       enforcement: "non_enforcing",
     },
@@ -1765,6 +1810,14 @@ function mergeUniqueById<T extends { id: string }>(base: T[], additions: T[]): T
 
 function catalogCapabilityIds(catalog: CapabilityCatalogGroup[]): string[] {
   return catalog.flatMap((groupItem) => groupItem.children.map((child) => child.id));
+}
+
+function activeCatalogCapabilityIds(catalog: CapabilityCatalogGroup[]): string[] {
+  return catalog.flatMap((groupItem) => groupItem.children.filter((child) => child.status !== "placeholder").map((child) => child.id));
+}
+
+function activeCatalogGroupIds(catalog: CapabilityCatalogGroup[]): string[] {
+  return catalog.filter((groupItem) => groupItem.status !== "placeholder").map((groupItem) => groupItem.id);
 }
 
 function slackIdentityId(teamId: string, userId: string): string {

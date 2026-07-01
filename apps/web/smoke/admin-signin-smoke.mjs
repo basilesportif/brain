@@ -116,7 +116,7 @@ async function runAdminDashboardScenario(page, baseUrl, viewport) {
   await page.locator('[data-compact-capabilities-overview="true"]').waitFor({ state: 'detached', timeout: 5_000 });
   await page.locator(`${capNavScope} a[href="#cap-users"]`, { hasText: 'Users (1)' }).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator(`${capNavScope} a[href="#cap-identities"]`, { hasText: 'Identities (2)' }).waitFor({ state: 'visible', timeout: 5_000 });
-  await page.locator(`${capNavScope} a[href="#cap-grants"]`, { hasText: 'Grants (4)' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator(`${capNavScope} a[href="#cap-grants"]`, { hasText: 'Grants (25)' }).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator(`${capNavScope} a[href="#cap-catalog"]`, { hasText: 'Catalog (8/26)' }).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#capabilities-identities table[data-compact-identities="true"]', { hasText: 'Proof source' }).waitFor({ state: 'visible', timeout: 5_000 });
   const timUser = page.locator('#capabilities-people details[data-capability-user="person_tim"]');
@@ -130,7 +130,7 @@ async function runAdminDashboardScenario(page, baseUrl, viewport) {
   await projectsGroup.locator(':scope > summary').click();
   assert.equal(await projectsGroup.evaluate((element) => element.open), true);
   await projectsGroup.locator('tbody tr', { hasText: 'Write project files' }).waitFor({ state: 'visible', timeout: 5_000 });
-  await projectsGroup.locator('td[data-label="Source grant / bundle"]', { hasText: 'bundle.owner.all' }).first().waitFor({ state: 'visible', timeout: 5_000 });
+  await projectsGroup.locator('td[data-label="Source grant / bundle"]', { hasText: 'direct projects.files.write' }).first().waitFor({ state: 'visible', timeout: 5_000 });
   if (viewport) {
     await page.locator('button[aria-label="Open admin section menu"]').click();
     await page.locator('#mobile-section-menu', { hasText: 'Capabilities & Users sections' }).waitFor({ state: 'visible', timeout: 5_000 });
