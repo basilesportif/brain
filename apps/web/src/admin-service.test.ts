@@ -222,6 +222,10 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /OpenRouter subagent model settings/);
   assert.match(html, /Review & write OpenRouter settings/);
   assert.match(html, /Confirm OpenRouter settings write/);
+  assert.match(html, /Main-loop model/);
+  assert.match(html, /Use OpenRouter GLM 5\.2/);
+  assert.match(html, /Switch back to Codex\/OpenAI/);
+  assert.match(html, /Confirm main-loop model switch/);
   assert.match(html, /Slack Details/);
   assert.match(html, /Manifest/);
   assert.match(html, /Capabilities &amp; Users/);
@@ -508,6 +512,80 @@ test("brain admin env API writes allowlisted keys as write-only presence metadat
 });
 
 
+
+test("brain admin main-loop model switch writes only CODEX_CHAT_CODEX selectors and keeps subagent settings separate", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-main-model-"));
+  try {
+    const cfg = config(root, { codexChatConfigFile: path.join(root, "codex-chat", "config", "codex-chat.toml") });
+    await mkdir(path.dirname(cfg.codexChatConfigFile ?? ""), { recursive: true });
+    await writeFile(cfg.codexChatConfigFile ?? "", `version = 1\n\n[codex]\nmodel = "gpt-5.5"\nprofile = ""\nserviceTier = "fast"\n\n[subagents]\ndefaultModel = "gpt-5.5"\ndefaultCodexProfile = ""\n`);
+    await withServer(cfg, authDeps(), async (baseUrl) => {
+      const summaryResponse = await fetch(`${baseUrl}/api/admin/brain/codex-chat/main-model`, { headers: authHeaders() });
+      assert.equal(summaryResponse.status, 200);
+      const summary = await summaryResponse.json() as { env: { envFile: string }; effective: { model: string; profile: string; modelProvider: string; serviceTierMode: string }; activePreset: string; openRouter: { apiKeyPresent: boolean } };
+      assert.equal(summary.effective.model, "gpt-5.5");
+      assert.equal(summary.activePreset, "codex-openai-default");
+      assert.equal(summary.openRouter.apiKeyPresent, false);
+
+      const keys = [
+        "CODEX_CHAT_CODEX_MODEL",
+        "CODEX_CHAT_CODEX_PROFILE",
+        "CODEX_CHAT_CODEX_MODEL_PROVIDER",
+        "CODEX_CHAT_CODEX_SERVICE_TIER",
+        "CODEX_CHAT_CODEX_SERVICE_TIER_MODE",
+      ];
+      const missingConfirmation = await fetch(`${baseUrl}/api/admin/brain/codex-chat/main-model`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ preset: "openrouter-glm-5.2" }),
+      });
+      assert.equal(missingConfirmation.status, 400);
+
+      const writeGlm = await fetch(`${baseUrl}/api/admin/brain/codex-chat/main-model`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ preset: "openrouter-glm-5.2", confirmation: { token: "brain-admin-main-loop-model-confirmed-v1", action: "codex-chat.main-loop-model.write", envFile: summary.env.envFile, preset: "openrouter-glm-5.2", keys } }),
+      });
+      assert.equal(writeGlm.status, 200);
+      const payload = await writeGlm.json() as { writtenKeys: string[]; restartRequired: boolean; scope: string; summary: { activePreset: string } };
+      assert.deepEqual(payload.writtenKeys, keys);
+      assert.equal(payload.restartRequired, true);
+      assert.equal(payload.scope, "main-loop-only; subagent settings unchanged");
+      assert.equal(payload.summary.activePreset, "openrouter-glm-5.2");
+
+      const envText = await readFile(path.join(root, "codex-chat.env"), "utf8");
+      assert.match(envText, /CODEX_CHAT_CODEX_MODEL='z-ai\/glm-5\.2'/);
+      assert.match(envText, /CODEX_CHAT_CODEX_PROFILE='openrouter'/);
+      assert.match(envText, /CODEX_CHAT_CODEX_MODEL_PROVIDER='openrouter'/);
+      assert.match(envText, /CODEX_CHAT_CODEX_SERVICE_TIER_MODE='omit'/);
+      assert.equal(envText.includes("CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL"), false);
+      assert.equal(envText.includes("OPENROUTER_API_KEY"), false);
+
+      const rollback = await fetch(`${baseUrl}/api/admin/brain/codex-chat/main-model`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ preset: "codex-openai-default", confirmation: { token: "brain-admin-main-loop-model-confirmed-v1", action: "codex-chat.main-loop-model.write", envFile: summary.env.envFile, preset: "codex-openai-default", keys } }),
+      });
+      assert.equal(rollback.status, 200);
+      const rollbackText = await readFile(path.join(root, "codex-chat.env"), "utf8");
+      assert.match(rollbackText, /CODEX_CHAT_CODEX_MODEL='gpt-5\.5'/);
+      assert.match(rollbackText, /CODEX_CHAT_CODEX_PROFILE=''/);
+      assert.match(rollbackText, /CODEX_CHAT_CODEX_MODEL_PROVIDER=''/);
+      assert.match(rollbackText, /CODEX_CHAT_CODEX_SERVICE_TIER_MODE='auto'/);
+
+      const configText = await readFile(cfg.codexChatConfigFile ?? "", "utf8");
+      assert.match(configText, /\[subagents\]/);
+      assert.doesNotMatch(configText, /defaultModel = "z-ai\/glm-5\.2"/);
+      const audit = await readFile(path.join(root, "audit.jsonl"), "utf8");
+      assert.match(audit, /codex-chat\.main_loop_model\.write/);
+      assert.match(audit, /main-loop-only/);
+      assert.equal(audit.includes("OPENROUTER_API_KEY"), false);
+      assert.equal(audit.includes("sk-or-"), false);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("brain admin OpenRouter settings write env, codex profile, and codex-chat config without echoing the key", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-openrouter-"));

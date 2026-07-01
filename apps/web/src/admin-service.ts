@@ -19,6 +19,14 @@ const SLACK_ENV_KEYS = [
   "SLACK_BOT_TOKEN",
   "SLACK_APP_TOKEN",
 ] as const;
+const MAIN_LOOP_MODEL_ENV_KEYS = [
+  "CODEX_CHAT_CODEX_MODEL",
+  "CODEX_CHAT_CODEX_PROFILE",
+  "CODEX_CHAT_CODEX_MODEL_PROVIDER",
+  "CODEX_CHAT_CODEX_SERVICE_TIER",
+  "CODEX_CHAT_CODEX_SERVICE_TIER_MODE",
+] as const;
+
 const OPENROUTER_ENV_KEYS = [
   "OPENROUTER_API_KEY",
   "CODEX_CHAT_SUBAGENTS_BACKEND",
@@ -33,6 +41,7 @@ const OPENROUTER_ENV_KEYS = [
 const DEFAULT_ENV_KEYS = [
   "CODEX_CHAT_API_ENABLED",
   ...SLACK_ENV_KEYS,
+  ...MAIN_LOOP_MODEL_ENV_KEYS,
   ...OPENROUTER_ENV_KEYS,
   "TELEGRAM_BOT_TOKEN",
   "OPENAI_API_KEY",
@@ -43,6 +52,7 @@ const MAX_BODY_BYTES = 128 * 1024;
 const LIVE_OPERATION_CONFIRMATION_TOKEN = "brain-admin-live-operation-confirmed-v1";
 const SLACK_SETTINGS_CONFIRMATION_TOKEN = "brain-admin-slack-settings-confirmed-v1";
 const OPENROUTER_SETTINGS_CONFIRMATION_TOKEN = "brain-admin-openrouter-settings-confirmed-v1";
+const MAIN_LOOP_MODEL_CONFIRMATION_TOKEN = "brain-admin-main-loop-model-confirmed-v1";
 
 export interface BrainAdminServiceConfig {
   enabled: boolean;
@@ -196,6 +206,13 @@ async function handleAdminApi(request: IncomingMessage, response: ServerResponse
     const payload = await readJsonBody(request);
     return handleEnvWrite(response, config, adminEmail, payload);
   }
+  if (request.method === "GET" && url.pathname === "/api/admin/brain/codex-chat/main-model") {
+    return sendJson(response, 200, await mainLoopModelSummary(config));
+  }
+  if (request.method === "POST" && url.pathname === "/api/admin/brain/codex-chat/main-model") {
+    const payload = await readJsonBody(request);
+    return handleMainLoopModelWrite(response, config, adminEmail, payload);
+  }
   if (request.method === "GET" && url.pathname === "/api/admin/brain/openrouter/settings") {
     return sendJson(response, 200, await openRouterSettingsSummary(config));
   }
@@ -285,6 +302,7 @@ async function serviceSettings(config: BrainAdminServiceConfig) {
     },
     slack: await slackSettingsSummary(config),
     slackCanary: await slackCanarySummary(config),
+    mainLoopModel: await mainLoopModelSummary(config),
     openRouter: await openRouterSettingsSummary(config),
     capabilities: {
       schemaVersion: 2,
@@ -718,6 +736,206 @@ function sanitizeCanaryFreeform(value: unknown): string | undefined {
 }
 
 
+type MainLoopPresetId = "codex-openai-default" | "openrouter-glm-5.2";
+
+const MAIN_LOOP_PRESETS: Record<MainLoopPresetId, { label: string; description: string; updates: Record<(typeof MAIN_LOOP_MODEL_ENV_KEYS)[number], string>; requiresOpenRouter: boolean }> = {
+  "codex-openai-default": {
+    label: "Codex/OpenAI subscription default",
+    description: "Rollback preset: main loop uses the normal Codex/OpenAI subscription profile with fast tier auto-enabled.",
+    requiresOpenRouter: false,
+    updates: {
+      CODEX_CHAT_CODEX_MODEL: "gpt-5.5",
+      CODEX_CHAT_CODEX_PROFILE: "",
+      CODEX_CHAT_CODEX_MODEL_PROVIDER: "",
+      CODEX_CHAT_CODEX_SERVICE_TIER: "fast",
+      CODEX_CHAT_CODEX_SERVICE_TIER_MODE: "auto",
+    },
+  },
+  "openrouter-glm-5.2": {
+    label: "OpenRouter GLM 5.2",
+    description: "Main-loop preset for OpenRouter z-ai/glm-5.2. Requires OPENROUTER_API_KEY in the codex-chat env and an openrouter Codex profile/provider config.",
+    requiresOpenRouter: true,
+    updates: {
+      CODEX_CHAT_CODEX_MODEL: "z-ai/glm-5.2",
+      CODEX_CHAT_CODEX_PROFILE: "openrouter",
+      CODEX_CHAT_CODEX_MODEL_PROVIDER: "openrouter",
+      CODEX_CHAT_CODEX_SERVICE_TIER: "fast",
+      CODEX_CHAT_CODEX_SERVICE_TIER_MODE: "omit",
+    },
+  },
+};
+
+async function mainLoopModelSummary(config: BrainAdminServiceConfig) {
+  const env = await envValueSummary(config, MAIN_LOOP_MODEL_ENV_KEYS);
+  const envValues = await readEnvSelectedValues(config.codexChatEnvFile, MAIN_LOOP_MODEL_ENV_KEYS);
+  const configFile = config.codexChatConfigFile ? await codexChatMainLoopConfigSummary(config.codexChatConfigFile) : { configured: false as const };
+  const cfg = configFile.configured ? configFile.codex : {};
+  const selectors = [
+    mainLoopSelector("model", "CODEX_CHAT_CODEX_MODEL", envValues, cfg.model, "gpt-5.5"),
+    mainLoopSelector("profile", "CODEX_CHAT_CODEX_PROFILE", envValues, cfg.profile, ""),
+    mainLoopSelector("modelProvider", "CODEX_CHAT_CODEX_MODEL_PROVIDER", envValues, cfg.modelProvider, ""),
+    mainLoopSelector("serviceTier", "CODEX_CHAT_CODEX_SERVICE_TIER", envValues, cfg.serviceTier, "fast"),
+    mainLoopSelector("serviceTierMode", "CODEX_CHAT_CODEX_SERVICE_TIER_MODE", envValues, cfg.serviceTierMode, "auto"),
+  ];
+  const effective = Object.fromEntries(selectors.map((selector) => [selector.name, selector.value]));
+  const activePreset = classifyMainLoopPreset(effective);
+  const openRouterKeyPresent = Boolean((await readEnvKeyPresence(config.codexChatEnvFile, ["OPENROUTER_API_KEY"])).OPENROUTER_API_KEY);
+  const openRouterProfile = await codexProfileMetadata(config.codexHomePath, "openrouter");
+  return {
+    values: "main-loop selectors are non-secret; provider API keys are presence-only and never exposed",
+    scope: "codex-chat main loop only; subagent defaults/overrides are separate OpenRouter settings",
+    env,
+    configFile,
+    selectors,
+    effective,
+    activePreset,
+    restartRequiredForChanges: true,
+    presets: Object.entries(MAIN_LOOP_PRESETS).map(([id, preset]) => ({ id, label: preset.label, description: preset.description, updates: preset.updates, requiresOpenRouter: preset.requiresOpenRouter })),
+    openRouter: {
+      keyEnv: "OPENROUTER_API_KEY",
+      apiKeyPresent: openRouterKeyPresent,
+      codexProfile: openRouterProfile,
+      readiness: openRouterKeyPresent && openRouterProfile.present ? "ready" : "needs OpenRouter key/profile before GLM can run",
+    },
+    rollback: "Select codex-openai-default, confirm the write, then restart codex-chat.service.",
+  };
+}
+
+async function handleMainLoopModelWrite(response: ServerResponse, config: BrainAdminServiceConfig, adminEmail: string, payload: Record<string, unknown>): Promise<void> {
+  const presetId = typeof payload.preset === "string" ? payload.preset.trim() as MainLoopPresetId : "" as MainLoopPresetId;
+  const preset = MAIN_LOOP_PRESETS[presetId];
+  if (!preset) return sendJson(response, 400, { error: "unsupported_main_loop_model_preset", supported: Object.keys(MAIN_LOOP_PRESETS) });
+  const envFile = resolveEnvFilePath(config.codexChatEnvFile);
+  const keys = [...MAIN_LOOP_MODEL_ENV_KEYS];
+  const confirmation = parseMainLoopModelConfirmation(payload.confirmation);
+  if (!confirmation
+    || confirmation.token !== MAIN_LOOP_MODEL_CONFIRMATION_TOKEN
+    || confirmation.action !== "codex-chat.main-loop-model.write"
+    || confirmation.envFile !== envFile
+    || confirmation.preset !== presetId
+    || !sameStringSet(confirmation.keys, keys)) {
+    return sendJson(response, 400, {
+      error: "confirmation_required",
+      required: { token: MAIN_LOOP_MODEL_CONFIRMATION_TOKEN, action: "codex-chat.main-loop-model.write", envFile, preset: presetId, keys },
+    });
+  }
+
+  await writeMergedEnvFile(config.codexChatEnvFile, preset.updates, "Brain codex-chat main-loop model switcher");
+  await appendAudit(config, {
+    action: "codex-chat.main_loop_model.write",
+    adminEmail,
+    preset: presetId,
+    envFile,
+    keys,
+    values: "redacted non-secret selectors; no provider API keys handled by this action",
+    scope: "main-loop-only",
+  });
+  return sendJson(response, 200, {
+    ok: true,
+    preset: presetId,
+    envFile,
+    writtenKeys: keys,
+    values: "non-secret selectors redacted in audit; no API keys written",
+    presence: await readEnvKeyPresence(config.codexChatEnvFile, keys),
+    restartRequired: true,
+    rollbackPreset: "codex-openai-default",
+    scope: "main-loop-only; subagent settings unchanged",
+    summary: await mainLoopModelSummary(config),
+  });
+}
+
+function parseMainLoopModelConfirmation(value: unknown): { token?: string; action?: string; envFile?: string; preset?: string; keys: string[] } | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  return {
+    token: typeof record.token === "string" ? record.token : undefined,
+    action: typeof record.action === "string" ? record.action : undefined,
+    envFile: typeof record.envFile === "string" ? record.envFile : undefined,
+    preset: typeof record.preset === "string" ? record.preset : undefined,
+    keys: Array.isArray(record.keys) ? record.keys.filter((key): key is string => typeof key === "string") : [],
+  };
+}
+
+function mainLoopSelector(name: string, envKey: string, envValues: Record<string, { present: boolean; value: string }>, configValue: string | undefined, defaultValue: string) {
+  const envValue = envValues[envKey];
+  if (envValue?.present) return { name, envKey, value: envValue.value, source: "env" };
+  if (configValue !== undefined) return { name, envKey, value: configValue, source: "config" };
+  return { name, envKey, value: defaultValue, source: "default" };
+}
+
+function classifyMainLoopPreset(effective: Record<string, unknown>): MainLoopPresetId | "custom" {
+  const model = String(effective.model ?? "");
+  const profile = String(effective.profile ?? "");
+  const provider = String(effective.modelProvider ?? "");
+  const tierMode = String(effective.serviceTierMode ?? "");
+  if (model === "z-ai/glm-5.2" && profile === "openrouter" && provider === "openrouter" && tierMode === "omit") return "openrouter-glm-5.2";
+  if (model === "gpt-5.5" && !profile && !provider && (tierMode === "auto" || !tierMode)) return "codex-openai-default";
+  return "custom";
+}
+
+async function codexChatMainLoopConfigSummary(filePath: string): Promise<{ configured: boolean; path: string; codex: Record<string, string | undefined> }> {
+  const resolved = resolveEnvFilePath(filePath);
+  const text = await readTextIfPresent(resolved);
+  return {
+    configured: Boolean(text),
+    path: resolved,
+    codex: {
+      model: parseTomlStringValueAllowEmpty(readTomlValue(text, "codex", "model")),
+      profile: parseTomlStringValueAllowEmpty(readTomlValue(text, "codex", "profile")),
+      modelProvider: parseTomlStringValueAllowEmpty(readTomlValue(text, "codex", "modelProvider")),
+      serviceTier: parseTomlStringValueAllowEmpty(readTomlValue(text, "codex", "serviceTier")),
+      serviceTierMode: parseTomlStringValueAllowEmpty(readTomlValue(text, "codex", "serviceTierMode")),
+    },
+  };
+}
+
+async function envValueSummary(config: BrainAdminServiceConfig, keysToRead: readonly string[]) {
+  const envFile = resolveEnvFilePath(config.codexChatEnvFile);
+  const selected = await readEnvSelectedValues(envFile, keysToRead);
+  const keys = keysToRead.map((key) => ({ key, present: Boolean(selected[key]?.present), secret: SECRETISH_RE.test(key), value: selected[key]?.present ? (SECRETISH_RE.test(key) ? "redacted" : selected[key]?.value ?? "") : null }));
+  return { envFile, allowedKeys: [...keysToRead], keys };
+}
+
+async function readEnvSelectedValues(filePath: string, keys: readonly string[]): Promise<Record<string, { present: boolean; value: string }>> {
+  const wanted = new Set(keys);
+  const text = await readTextIfPresent(resolveEnvFilePath(filePath));
+  const out: Record<string, { present: boolean; value: string }> = {};
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+    const key = match?.[1];
+    if (!key || !wanted.has(key)) continue;
+    out[key] = { present: true, value: parseEnvValueLiteral(match?.[2] ?? "") };
+  }
+  return out;
+}
+
+function parseEnvValueLiteral(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.startsWith("'") && trimmed.endsWith("'")) return trimmed.slice(1, -1).replaceAll(`'"'"'`, "'");
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      return typeof parsed === "string" ? parsed : trimmed.slice(1, -1);
+    } catch {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
+}
+
+function parseTomlStringValueAllowEmpty(value: string | null): string | undefined {
+  if (value === null) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return typeof parsed === "string" ? parsed : undefined;
+  } catch {
+    return /^[A-Za-z0-9_./~-]+$/.test(trimmed) ? trimmed : undefined;
+  }
+}
+
+
 async function openRouterSettingsSummary(config: BrainAdminServiceConfig) {
   const env = await envPresenceSummary(config, OPENROUTER_ENV_KEYS);
   const codexProfile = await codexProfileMetadata(config.codexHomePath, "openrouter");
@@ -966,7 +1184,7 @@ interface OpenRouterSettingsInput {
 
 function parseOpenRouterSettingsPayload(payload: Record<string, unknown>): OpenRouterSettingsInput {
   const apiKey = typeof payload.apiKey === "string" ? payload.apiKey.trim() : "";
-  const model = stringField(payload.model, "model", "anthropic/claude-sonnet-4.5");
+  const model = stringField(payload.model, "model", "z-ai/glm-5.2");
   const codexProfile = stringField(payload.codexProfile, "codexProfile", "openrouter");
   const modelProvider = stringField(payload.modelProvider, "modelProvider", "openrouter");
   const serviceTierMode = stringField(payload.serviceTierMode, "serviceTierMode", "omit");

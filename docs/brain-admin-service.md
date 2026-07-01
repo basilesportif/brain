@@ -56,6 +56,8 @@ Routes:
 - `GET /api/admin/brain/settings` — Brain instance paths, local codex-chat host/IP/path/service, repo-registry read-only context, and operation settings.
 - `GET /api/admin/brain/codex-chat/env` — codex-chat env key presence only.
 - `POST /api/admin/brain/codex-chat/env` — write allowlisted env/config keys.
+- `GET /api/admin/brain/codex-chat/main-model` — read current main-loop model/provider/profile/tier selectors from the codex-chat env/config sources that Brain can safely inspect.
+- `POST /api/admin/brain/codex-chat/main-model` — write non-secret `CODEX_CHAT_CODEX_*` main-loop selector presets (Codex/OpenAI rollback or OpenRouter GLM 5.2); restart is required.
 - `POST /api/admin/brain/codex-chat/operation` — plan/deploy/restart operations.
 - `GET /api/admin/brain/slack/settings` — explicit Slack env key presence and public Events URL.
 - `POST /api/admin/brain/slack/settings` — write Slack signing secret, bot token, optional app token, enabled flag, and URL/path env keys as write-only values.
@@ -107,6 +109,34 @@ checkout `/home/tim/pkg/tim/codex-chat`, local env
 `/home/tim/.config/codex-chat/env`, local config
 `/home/tim/pkg/tim/codex-chat/config/codex-chat.toml`, and local
 `codex-chat.service`.
+
+
+## Main-loop model switcher
+
+The **Deploy / Restart** panel includes a main-loop model switcher for
+`codex-chat.service`. It is separate from the OpenRouter subagent settings:
+
+- Main-loop selectors written by Brain: `CODEX_CHAT_CODEX_MODEL`,
+  `CODEX_CHAT_CODEX_PROFILE`, `CODEX_CHAT_CODEX_MODEL_PROVIDER`,
+  `CODEX_CHAT_CODEX_SERVICE_TIER`, and
+  `CODEX_CHAT_CODEX_SERVICE_TIER_MODE`.
+- Subagent settings remain under `CODEX_CHAT_SUBAGENTS_*` and the
+  `[subagents]` config section. The main-loop switcher does not write those
+  keys.
+- API keys are not part of this switcher. OpenRouter readiness is shown as
+  presence-only metadata for `OPENROUTER_API_KEY` and the user-level Codex
+  profile file.
+- Changes are audited as `codex-chat.main_loop_model.write` with values
+  redacted and require a `codex-chat.service` restart to take effect.
+
+Presets:
+
+- **Codex/OpenAI subscription default**: `gpt-5.5`, empty profile/provider,
+  `serviceTier=fast`, `serviceTierMode=auto`. This is the rollback path.
+- **OpenRouter GLM 5.2**: `z-ai/glm-5.2`, profile/provider `openrouter`,
+  `serviceTier=fast`, `serviceTierMode=omit`. Requires the existing
+  OpenRouter key/profile setup; configure those in the OpenRouter section if
+  readiness is not green.
 
 ## Slack setup ownership
 
