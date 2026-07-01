@@ -99,22 +99,25 @@ async function runAdminDashboardScenario(page, baseUrl, viewport) {
   await page.locator('#app-area-capabilities-users').click();
   await page.locator('#admin-shell[data-app-area="capabilities-users"]').waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#app-area-capabilities-users[aria-pressed="true"]').waitFor({ state: 'visible', timeout: 5_000 });
-  await page.locator('#cap-overview').waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#cap-users').waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#overview').waitFor({ state: 'hidden', timeout: 5_000 });
   const capNavScope = viewport ? '#mobile-section-menu' : '.side[data-app-area="capabilities-users"]';
   if (viewport) {
     await page.locator('button[aria-label="Open admin section menu"]').click();
     await page.locator('#mobile-section-menu', { hasText: 'Capabilities & Users sections' }).waitFor({ state: 'visible', timeout: 5_000 });
   }
-  await page.locator(`${capNavScope} a[href="#cap-overview"]`).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator(`${capNavScope} a[href="#cap-overview"]`).waitFor({ state: 'detached', timeout: 5_000 });
   await page.locator(`${capNavScope} a[href="#cap-users"]`).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator(`${capNavScope} a[href="#cap-identities"]`).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator(`${capNavScope} a[href="#cap-grants"]`).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator(`${capNavScope} a[href="#cap-catalog"]`).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator(`${capNavScope} a[href="#cap-audit"]`).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#capabilities-status', { hasText: 'V2 identity/capability store loaded' }).waitFor({ state: 'visible', timeout: 5_000 });
-  await page.locator('[data-compact-capabilities-overview="true"]').waitFor({ state: 'visible', timeout: 5_000 });
-  await page.locator('#cap-metric-people', { hasText: '1' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('[data-compact-capabilities-overview="true"]').waitFor({ state: 'detached', timeout: 5_000 });
+  await page.locator(`${capNavScope} a[href="#cap-users"]`, { hasText: 'Users (1)' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator(`${capNavScope} a[href="#cap-identities"]`, { hasText: 'Identities (2)' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator(`${capNavScope} a[href="#cap-grants"]`, { hasText: 'Grants (4)' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator(`${capNavScope} a[href="#cap-catalog"]`, { hasText: 'Catalog (8/26)' }).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#capabilities-identities table[data-compact-identities="true"]', { hasText: 'Proof source' }).waitFor({ state: 'visible', timeout: 5_000 });
   const timUser = page.locator('#capabilities-people details[data-capability-user="person_tim"]');
   await timUser.waitFor({ state: 'visible', timeout: 5_000 });
@@ -137,7 +140,7 @@ async function runAdminDashboardScenario(page, baseUrl, viewport) {
   await page.locator('#app-area-control-plane').click();
   await page.locator('#admin-shell[data-app-area="control-plane"]').waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#overview').waitFor({ state: 'visible', timeout: 5_000 });
-  await page.locator('#cap-overview').waitFor({ state: 'hidden', timeout: 5_000 });
+  await page.locator('#cap-users').waitFor({ state: 'hidden', timeout: 5_000 });
 
   await page.locator('#mode-title').filter({ hasText: /Slack setup wizard: Slack (setup required|partially configured)/ }).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#slack-setup').waitFor({ state: 'visible', timeout: 5_000 });
