@@ -957,12 +957,20 @@ extension rather than a hidden behavior in the first implementation.
       Slack addable/observed/signed-event identity support, proof metadata,
       communication channels, and a Tim owner/all bundle represented in the
       effective grant view.
+- [x] Enable the first `codex-chat` Slack fail-closed run gate against the
+      read-only Brain capability store: resolve Slack `team_id + user_id` to a
+      linked Brain person/external identity before context hydration or Codex,
+      allow Tim's seeded Slack identity (`T0BCF7LBNNB` / `U0BDR0E1KJL`), and
+      deny unknown Slack users with a short source-thread permission response.
+      Initial runtime requirement is `assistant.run` when present in the store,
+      otherwise the current `slack.source.read` catalog grant.
 - [ ] Define canonical capability IDs/descriptions for enforced runtime checks.
 - [ ] Add admin write APIs for person/identity links, bundle/group/capability
       grants, revocations, and append-only mutation audit.
 - [ ] Define bundle semantics for common trust levels while preserving
       individual auditable grants.
-- [ ] Enforce checks at every runtime-owned tool call and output send.
+- [ ] Enforce granular checks at every runtime-owned tool call and output send,
+      with project/resource selectors and temporary channel/thread approvals.
 - [ ] Add audit records for grants, checks, tool calls, outputs, and denials.
 - [ ] Add temporary capability flow for chat/channel-scoped approvals.
 - [ ] Replace long-term JSON capability state with a real durable store plan and
