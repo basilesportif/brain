@@ -223,9 +223,13 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /Review & write OpenRouter settings/);
   assert.match(html, /Confirm OpenRouter settings write/);
   assert.match(html, /Main-loop model/);
-  assert.match(html, /Use OpenRouter GLM 5\.2/);
-  assert.match(html, /Switch back to Codex\/OpenAI/);
+  assert.match(html, /id="main-model-preset"/);
+  assert.match(html, /OpenRouter GLM 5\.2/);
+  assert.match(html, /Codex\/OpenAI subscription default/);
+  assert.match(html, /Save changes \/ Apply model preset/);
+  assert.match(html, /id="main-model-preset-status"/);
   assert.match(html, /Confirm main-loop model switch/);
+  assert.equal(html.includes('Switch main-loop model'), false);
   assert.match(html, /Slack Details/);
   assert.match(html, /Manifest/);
   assert.match(html, /Capabilities &amp; Users/);

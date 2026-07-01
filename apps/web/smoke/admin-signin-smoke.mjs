@@ -160,6 +160,18 @@ async function runAdminDashboardScenario(page, baseUrl, viewport) {
   await page.locator('#mission-title', { hasText: 'Mission Control' }).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#mission').waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#deploy-title', { hasText: 'Deploy / Restart' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#main-model-preset').waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#main-model-apply', { hasText: 'Save changes / Apply model preset' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#main-model-preset-status', { hasText: 'Current active preset' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#main-model-preset-status', { hasText: 'Pending selection' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#main-model-preset-status', { hasText: 'Restart required after save' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#main-model-preset').selectOption('openrouter-glm-5.2');
+  await page.locator('#main-model-apply').click();
+  await page.locator('#main-model-confirm-modal').waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#main-model-confirm-summary', { hasText: 'OpenRouter GLM 5.2' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#main-model-confirm-summary', { hasText: 'codex-chat restart required' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#main-model-confirm-modal button:has-text("Cancel")').click();
+  await page.locator('#main-model-confirm-modal').waitFor({ state: 'hidden', timeout: 5_000 });
   await page.locator('#op-approval').waitFor({ state: 'detached', timeout: 5_000 });
   await page.locator('#slack-approval').waitFor({ state: 'detached', timeout: 5_000 });
   await page.locator('summary:has-text("Update Slack settings")').click();
