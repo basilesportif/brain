@@ -11,12 +11,27 @@ export interface CapabilityResourceSelector {
   examples: string[];
 }
 
+export interface CapabilityResourceScopeMetadata {
+  resourceKind: "global" | "project" | string;
+  selectorId?: string;
+  grantResourceIdPrefix?: string;
+  wildcardGrantResourceId?: string;
+  specificGrantResourceExample?: string;
+  labels: {
+    global: string;
+    wildcard: string;
+    specific: string;
+  };
+  description: string;
+}
+
 export interface CapabilityCatalogCapability {
   id: string;
   label: string;
   description: string;
   actions: string[];
   resourceSelectors: CapabilityResourceSelector[];
+  resourceScope: CapabilityResourceScopeMetadata;
   status: "active" | "placeholder";
   sensitivity: "standard" | "high";
 }
@@ -28,6 +43,7 @@ export interface CapabilityCatalogGroup {
   status: "active" | "placeholder";
   grantable: true;
   resourceSelectors: CapabilityResourceSelector[];
+  resourceScope: CapabilityResourceScopeMetadata;
   semantics: {
     grantKind: "group";
     implies: "all_children";
@@ -36,6 +52,13 @@ export interface CapabilityCatalogGroup {
     positiveGrantOnly: true;
   };
   children: CapabilityCatalogCapability[];
+}
+
+export interface CapabilityProjectResourceOption {
+  id: string;
+  name: string;
+  status: string;
+  resourceScope: string;
 }
 
 export type CapabilityIdentityProvider = "telegram" | "slack" | "clerk" | "system" | "unknown";
@@ -265,6 +288,13 @@ export interface CapabilityAdminSummary {
       placeholderCapabilities: number;
     };
   };
+  projectResources: {
+    sourcePath?: string;
+    loaded: boolean;
+    count: number;
+    projects: CapabilityProjectResourceOption[];
+    error?: string;
+  };
   store: {
     path: string;
     present: boolean;
@@ -298,6 +328,7 @@ export interface CapabilityAdminSummaryOptions {
   auditLogPath: string;
   adminEmail: string;
   codexChatPath?: string;
+  workspacePath?: string;
 }
 
 interface ReadStoreResult {
@@ -337,8 +368,38 @@ const TIM_TELEGRAM_CHANNEL_ID = "channel_telegram_private_253768951";
 const TIM_TELEGRAM_PROOF_ID = "proof_tim_telegram_allowlist_migration";
 const OWNER_ALL_BUNDLE_ID = "bundle.owner.all";
 
+const GLOBAL_RESOURCE_SCOPE: CapabilityResourceScopeMetadata = {
+  resourceKind: "global",
+  wildcardGrantResourceId: "global:*",
+  labels: {
+    global: "Global",
+    wildcard: "All resources",
+    specific: "Specific resource",
+  },
+  description: "Global capability scope. Grants use global:* when no narrower resource boundary is modeled yet.",
+};
+
+const PROJECT_RESOURCE_SCOPE: CapabilityResourceScopeMetadata = {
+  resourceKind: "project",
+  selectorId: "projectId",
+  grantResourceIdPrefix: "project:",
+  wildcardGrantResourceId: "project:*",
+  specificGrantResourceExample: "project:pj_1234567890abcdef",
+  labels: {
+    global: "Global project catalog",
+    wildcard: "All projects",
+    specific: "Specific project",
+  },
+  description: "Project granularity is modeled by generic project capability IDs plus grant resource ids project:* or project:<projectId>; per-project capability IDs are not generated.",
+};
+
+const PROJECT_CAPABILITY_ID_MIGRATIONS: Record<string, string> = {
+  "projects.project.read": "projects.read",
+  "projects.project.write": "projects.write",
+};
+
 const projectSelectors = [
-  selector("projectId", "Project", "project", true, "Stable project/resource id, not a free-form prompt label.", ["brain", "codex-chat", "assistant-agent-logic"]),
+  selector("projectId", "Project", "project", true, "Stable workspace project id. Use * for all projects; specific grants are resource-scoped as project:<projectId>.", ["*", "pj_47da1852cb41f0e3"]),
   selector("repoAlias", "Repo alias", "repo", false, "Repo-registry alias when the capability is tied to a checkout.", ["brain", "codex-chat"]),
   selector("path", "Path prefix", "path", false, "Optional path prefix for narrower file/project operations.", ["plans/", "apps/web/"]),
 ];
@@ -356,12 +417,13 @@ const catalogGroups = [
     description: "Top-level project capability group. A group grant visibly implies every project child capability in this catalog, including writing project files, tasks, and artifacts.",
     status: "active",
     resourceSelectors: projectSelectors,
+    resourceScope: PROJECT_RESOURCE_SCOPE,
     children: [
-      capability("projects.project.read", "Read project context", "Read project metadata, plans, docs, and non-secret repository context.", ["read", "search"], projectSelectors),
-      capability("projects.project.write", "Write project state", "Create or update project plans, docs, and tracked project metadata.", ["write"], projectSelectors),
-      capability("projects.files.write", "Write project files", "Edit files in a project checkout when the runtime/user has an approved workspace scope.", ["write"], projectSelectors),
-      capability("projects.tasks.write", "Write project tasks", "Create, update, or close project task/checklist items.", ["write"], projectSelectors),
-      capability("projects.artifacts.publish", "Publish project artifacts", "Stage or publish generated artifacts that are attached to a project.", ["write", "publish"], projectSelectors),
+      capability("projects.read", "Read project context", "Read project metadata, plans, docs, and non-secret repository context.", ["read", "search"], projectSelectors, "active", "standard", PROJECT_RESOURCE_SCOPE),
+      capability("projects.write", "Write project state", "Create or update project plans, docs, and tracked project metadata.", ["write"], projectSelectors, "active", "standard", PROJECT_RESOURCE_SCOPE),
+      capability("projects.files.write", "Write project files", "Edit files in a project checkout when the runtime/user has an approved workspace scope.", ["write"], projectSelectors, "active", "standard", PROJECT_RESOURCE_SCOPE),
+      capability("projects.tasks.write", "Write project tasks", "Create, update, or close project task/checklist items.", ["write"], projectSelectors, "active", "standard", PROJECT_RESOURCE_SCOPE),
+      capability("projects.artifacts.publish", "Publish project artifacts", "Stage or publish generated artifacts that are attached to a project.", ["write", "publish"], projectSelectors, "active", "standard", PROJECT_RESOURCE_SCOPE),
     ],
   }),
   group({
@@ -537,6 +599,7 @@ export async function capabilityAdminSummary(options: CapabilityAdminSummaryOpti
   const storePath = resolveEnvFilePath(options.storePath);
   const auditLogPath = resolveEnvFilePath(options.auditLogPath);
   const observedSlack = await deriveObservedSlackState(options.codexChatPath);
+  const projectResources = await readWorkspaceProjectResources(options.workspacePath);
   const { store, seededThisRequest, migratedThisRequest, parseError } = await readOrSeedCapabilityStore(storePath, auditLogPath, observedSlack);
   const metadata = await capabilityStoreMetadata(storePath);
   const subjects = store.subjects.map((subject) => subject.id === CURRENT_ADMIN_SUBJECT_ID
@@ -569,6 +632,7 @@ export async function capabilityAdminSummary(options: CapabilityAdminSummaryOpti
         placeholderCapabilities: placeholderCount,
       },
     },
+    projectResources,
     store: {
       path: storePath,
       present: metadata.present,
@@ -616,13 +680,15 @@ function capability(
   resourceSelectors: CapabilityResourceSelector[],
   status: "active" | "placeholder" = "active",
   sensitivity: "standard" | "high" = "standard",
+  resourceScope: CapabilityResourceScopeMetadata = GLOBAL_RESOURCE_SCOPE,
 ): CapabilityCatalogCapability {
-  return { id, label, description, actions, resourceSelectors, status, sensitivity };
+  return { id, label, description, actions, resourceSelectors, resourceScope, status, sensitivity };
 }
 
-function group(input: Omit<CapabilityCatalogGroup, "grantable" | "semantics">): CapabilityCatalogGroup {
+function group(input: Omit<CapabilityCatalogGroup, "grantable" | "semantics" | "resourceScope"> & { resourceScope?: CapabilityResourceScopeMetadata }): CapabilityCatalogGroup {
   return {
     ...input,
+    resourceScope: input.resourceScope ?? GLOBAL_RESOURCE_SCOPE,
     grantable: true,
     semantics: {
       grantKind: "group",
@@ -736,7 +802,7 @@ function defaultCapabilityStore(auditLogPath: string, observedSlack: ObservedSla
     notes: [
       "This Brain-local private store is the non-enforcing Phase 5 foundation for unified people, external identities, capabilities, grants, proofs, and audit shape.",
       "Grant/link writes are disabled; seed grants are non-enforcing and runtime authorization remains disconnected.",
-      "Tim owner/all seed is materialized as individual non-placeholder capability grants; placeholder finance/health capabilities are not granted until explicitly reviewed.",
+      "Tim owner/all seed is materialized as individual non-placeholder capability grants; generic project capabilities are broadly scoped with resource id project:* rather than per-project capability ids.",
       "Do not store tokens, secrets, Telegram or Slack message bodies, health details, or financial transaction payloads here.",
     ],
   };
@@ -972,7 +1038,7 @@ function defaultCapabilityGrants(): CapabilityGrant[] {
       subjectId: CURRENT_ADMIN_SUBJECT_ID,
       capabilityId: "projects",
       grantKind: "group",
-      resource: { kind: "project", id: "*", selectors: { projectId: "*", repoAlias: "*" } },
+      resource: projectGrantResource("*"),
       actions: ["read", "search", "write", "publish", "manage"],
       source: { kind: "seed", id: "phase-5-read-only-slice" },
       grantedBy: "system:seed",
@@ -1020,7 +1086,7 @@ function timOwnerCapabilityGrants(): CapabilityGrant[] {
       subjectId: TIM_SUBJECT_ID,
       capabilityId: capabilityItem.id,
       grantKind: "capability" as const,
-      resource: { kind: "global", id: "*", selectors: ownerCapabilitySelectors(capabilityItem) },
+      resource: ownerCapabilityResource(capabilityItem),
       actions: capabilityItem.actions,
       source: { kind: "bundle" as const, id: "owner_all_seed_expanded" },
       grantedBy: "system:admin_seed",
@@ -1029,6 +1095,26 @@ function timOwnerCapabilityGrants(): CapabilityGrant[] {
       reason: "Tim owner/all seed expanded into this individual non-placeholder capability grant for transparent review; runtime enforcement remains disconnected.",
       enforcement: "non_enforcing" as const,
     }));
+}
+
+function ownerCapabilityResource(capabilityItem: CapabilityCatalogCapability): CapabilityGrant["resource"] {
+  if (capabilityItem.resourceScope.resourceKind === "project") return projectGrantResource("*", capabilityItem);
+  return { kind: "global", id: "global:*", selectors: ownerCapabilitySelectors(capabilityItem) };
+}
+
+function projectGrantResource(projectId: string, capabilityItem?: CapabilityCatalogCapability): CapabilityGrant["resource"] {
+  const normalizedProjectId = projectId === "*" ? "*" : sanitizeProjectId(projectId);
+  const selectors: Record<string, string> = { projectId: normalizedProjectId || "*" };
+  if (capabilityItem) {
+    for (const selectorItem of capabilityItem.resourceSelectors) {
+      if (selectorItem.id === "projectId") continue;
+      selectors[selectorItem.id] = "*";
+    }
+  } else {
+    selectors.repoAlias = "*";
+  }
+  selectors.resourceScope = projectResourceId(selectors.projectId);
+  return { kind: "project", id: projectResourceId(selectors.projectId), selectors };
 }
 
 function ownerCapabilitySelectors(capabilityItem: CapabilityCatalogCapability): Record<string, string> {
@@ -1052,7 +1138,7 @@ function defaultAuditShape(auditLogPath: string): CapabilityAuditShape {
       subject: { subjectId: TIM_SUBJECT_ID, kind: "person", personId: TIM_PERSON_ID },
       identity: { identityId: TIM_TELEGRAM_IDENTITY_ID, provider: "telegram" },
       capabilityId: OWNER_ALL_BUNDLE_ID,
-      resource: { kind: "global", id: "*", selectors: { scope: "*" } },
+      resource: { kind: "project", id: "project:*", selectors: { projectId: "*", resourceScope: "project:*" } },
       action: "identity.link.seeded",
       decision: "not_enforced",
       reason: "admin-seeded non-enforcing identity/capability foundation",
@@ -1122,6 +1208,9 @@ function ensureCoreSeed(store: CapabilityStore, fallback: CapabilityStore): { st
   store.subjects = merge(store.subjects, fallback.subjects);
   store.grantBundles = merge(store.grantBundles, fallback.grantBundles).map((bundle) => bundle.id === OWNER_ALL_BUNDLE_ID ? defaultGrantBundles()[0] ?? bundle : bundle);
   store.grants = merge(store.grants, fallback.grants);
+  const projectMigrated = migrateProjectCapabilityGrantRows(store);
+  if (projectMigrated.changed) changed = true;
+  store = projectMigrated.store;
   const expanded = expandLegacyTimOwnerBundleGrant(store);
   if (expanded.changed) changed = true;
   const pruned = pruneSupersededPlaceholders(expanded.store);
@@ -1135,6 +1224,44 @@ function ensureCoreSeed(store: CapabilityStore, fallback: CapabilityStore): { st
     }
   }
   return { store: pruned, changed };
+}
+
+function migrateProjectCapabilityGrantRows(store: CapabilityStore): { store: CapabilityStore; changed: boolean } {
+  let changed = false;
+  const seenIds = new Set<string>();
+  const grants: CapabilityGrant[] = [];
+  for (const grant of store.grants) {
+    const nextCapabilityId = canonicalCapabilityId(grant.capabilityId);
+    const next: CapabilityGrant = {
+      ...grant,
+      capabilityId: nextCapabilityId,
+      resource: normalizeGrantResourceForCapability(grant.resource, nextCapabilityId),
+    };
+    if (next.capabilityId !== grant.capabilityId || next.resource.id !== grant.resource.id || next.resource.kind !== grant.resource.kind) changed = true;
+    if (grant.id === "grant_seed_tim_owner_projects_project_read") {
+      next.id = "grant_seed_tim_owner_projects_read";
+      changed = true;
+    } else if (grant.id === "grant_seed_tim_owner_projects_project_write") {
+      next.id = "grant_seed_tim_owner_projects_write";
+      changed = true;
+    }
+    if (seenIds.has(next.id)) {
+      changed = true;
+      continue;
+    }
+    seenIds.add(next.id);
+    grants.push(next);
+  }
+  const note = "Migrated project capability grants to generic capability ids with resource-scoped project:* / project:<projectId> grant resources.";
+  return {
+    store: changed ? {
+      ...store,
+      grants,
+      updatedAt: SEED_TIME,
+      notes: store.notes.includes(note) ? store.notes : [...store.notes, note],
+    } : store,
+    changed,
+  };
 }
 
 function expandLegacyTimOwnerBundleGrant(store: CapabilityStore): { store: CapabilityStore; changed: boolean } {
@@ -1342,7 +1469,7 @@ function normalizeGrants(value: unknown, fallback: CapabilityGrant[]): Capabilit
     if (!isRecord(item)) continue;
     const id = sanitizeGrantId(item.id);
     const subjectId = sanitizeSubjectId(item.subjectId);
-    const capabilityId = sanitizeCapabilityId(item.capabilityId);
+    const capabilityId = canonicalCapabilityId(sanitizeCapabilityId(item.capabilityId));
     if (!id || !subjectId || !capabilityId) continue;
     const grantKind = item.grantKind === "bundle" ? "bundle" : item.grantKind === "group" ? "group" : "capability";
     const grant: CapabilityGrant = {
@@ -1350,7 +1477,7 @@ function normalizeGrants(value: unknown, fallback: CapabilityGrant[]): Capabilit
       subjectId,
       capabilityId,
       grantKind,
-      resource: normalizeGrantResource(item.resource),
+      resource: normalizeGrantResourceForCapability(item.resource, capabilityId),
       actions: normalizeStringArray(item.actions, 20),
       source: normalizeGrantSource(item.source),
       grantedBy: sanitizeSubjectId(item.grantedBy) || "unknown",
@@ -1613,7 +1740,7 @@ function defaultAdminWriteModel(): CapabilityAdminWriteModel {
     mutationShapes: {
       linkIdentity: { personId: TIM_PERSON_ID, provider: "telegram|slack", providerUserId: "external user id", proofSource: "admin_seed|slack_signed_event" },
       grantBundle: { subjectId: TIM_SUBJECT_ID, grantKind: "bundle", bundleId: OWNER_ALL_BUNDLE_ID, resource: "global:*" },
-      grantCapability: { subjectId: "person:...", grantKind: "capability|group", capabilityId: "projects.files.write", resource: "selector map" },
+      grantCapability: { subjectId: "person:...", grantKind: "capability|group", capabilityId: "projects.files.write", resource: "project:* or project:<projectId>" },
       revokeGrant: { grantId: "grant_...", reason: "admin-reviewed reason" },
     },
   };
@@ -1647,6 +1774,34 @@ async function readTextIfPresent(filePath: string): Promise<string> {
   }
 }
 
+async function readWorkspaceProjectResources(workspacePath?: string): Promise<CapabilityAdminSummary["projectResources"]> {
+  if (!workspacePath) return { loaded: false, count: 0, projects: [] };
+  const sourcePath = path.join(resolveEnvFilePath(workspacePath), "data", "projects.json");
+  try {
+    const raw = await readTextIfPresent(sourcePath);
+    if (!raw) return { sourcePath, loaded: false, count: 0, projects: [] };
+    const parsed = JSON.parse(raw) as unknown;
+    const rows = isRecord(parsed) && Array.isArray(parsed.projects) ? parsed.projects : [];
+    const projects = rows
+      .filter(isRecord)
+      .map((project) => {
+        const id = sanitizeProjectId(project.id);
+        if (!id) return undefined;
+        return {
+          id,
+          name: sanitizeText(project.name, id, 180),
+          status: sanitizeText(project.status, "active", 60),
+          resourceScope: projectResourceId(id),
+        } satisfies CapabilityProjectResourceOption;
+      })
+      .filter((item): item is CapabilityProjectResourceOption => Boolean(item))
+      .sort((a, b) => `${a.status === "archived" ? "1" : "0"}:${a.name}`.localeCompare(`${b.status === "archived" ? "1" : "0"}:${b.name}`));
+    return { sourcePath, loaded: true, count: projects.length, projects };
+  } catch (error) {
+    return { sourcePath, loaded: false, count: 0, projects: [], error: error instanceof Error ? sanitizeText(error.message, "unreadable projects store", 220) : "unreadable projects store" };
+  }
+}
+
 function normalizeGrantResource(value: unknown): CapabilityGrant["resource"] {
   if (!isRecord(value)) return { kind: "unknown", id: "unknown", selectors: {} };
   return {
@@ -1654,6 +1809,23 @@ function normalizeGrantResource(value: unknown): CapabilityGrant["resource"] {
     id: sanitizeText(value.id, "unknown", 160),
     selectors: normalizeStringRecord(value.selectors) ?? {},
   };
+}
+
+function normalizeGrantResourceForCapability(value: unknown, capabilityId: string): CapabilityGrant["resource"] {
+  const resource = normalizeGrantResource(value);
+  if (!isProjectCapabilityId(capabilityId) && capabilityId !== "projects") return resource;
+  const rawProjectId = resource.selectors.projectId || (resource.id.startsWith("project:") ? resource.id.slice("project:".length) : resource.id === "*" ? "*" : "");
+  const projectId = rawProjectId === "*" ? "*" : sanitizeProjectId(rawProjectId);
+  if (projectId) return projectGrantResource(projectId);
+  return projectGrantResource("*");
+}
+
+function canonicalCapabilityId(capabilityId: string): string {
+  return PROJECT_CAPABILITY_ID_MIGRATIONS[capabilityId] ?? capabilityId;
+}
+
+function isProjectCapabilityId(capabilityId: string): boolean {
+  return capabilityId === "projects" || capabilityId.startsWith("projects.");
 }
 
 function normalizeGrantSource(value: unknown): CapabilityGrant["source"] {
@@ -1764,6 +1936,14 @@ function sanitizeBundleId(value: unknown): string {
 
 function sanitizeCapabilityId(value: unknown): string {
   return sanitizePattern(value, /^[a-z0-9_.:-]{1,120}$/i);
+}
+
+function sanitizeProjectId(value: unknown): string {
+  return sanitizePattern(value, /^[a-z0-9_-]{1,120}$/i);
+}
+
+function projectResourceId(projectId: string): string {
+  return `project:${projectId || "*"}`;
 }
 
 function sanitizePattern(value: unknown, pattern: RegExp): string {

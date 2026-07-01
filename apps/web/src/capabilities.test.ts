@@ -36,12 +36,21 @@ test("capability store v2 seeds Tim, Telegram identity, Slack signed-event ident
     };
     await writeJson(path.join(telemetryDir, "summary.json"), { schemaVersion: 1, updatedAt: accepted.observedAt, lastAcceptedEvent: accepted });
     await writeFile(path.join(telemetryDir, "2026-06-30.jsonl"), `${JSON.stringify(accepted)}\n`);
+    const workspacePath = path.join(root, "workspace");
+    await writeJson(path.join(workspacePath, "data/projects.json"), {
+      version: 1,
+      projects: [
+        { id: "pj_travel", name: "Work/Business Travel", status: "active" },
+        { id: "pj_archived", name: "Old Project", status: "archived" },
+      ],
+    });
 
     const summary = await capabilityAdminSummary({
       storePath: path.join(root, "capabilities.json"),
       auditLogPath: path.join(root, "capability-audit.jsonl"),
       adminEmail: "tim.galebach@gmail.com",
       codexChatPath,
+      workspacePath,
     });
 
     assert.equal(summary.schemaVersion, 2);
@@ -70,7 +79,13 @@ test("capability store v2 seeds Tim, Telegram identity, Slack signed-event ident
     assert.equal(timGrants.length, activeCapabilityCount());
     assert.equal(timGrants.some((grant) => grant.grantKind === "bundle" || grant.capabilityId === "bundle.owner.all"), false);
     assert.ok(timGrants.some((grant) => grant.id === "grant_seed_tim_owner_projects_files_write" && grant.capabilityId === "projects.files.write" && grant.grantKind === "capability" && grant.enforcement === "non_enforcing"));
+    assert.ok(timGrants.some((grant) => grant.id === "grant_seed_tim_owner_projects_read" && grant.capabilityId === "projects.read" && grant.resource.id === "project:*"));
+    assert.equal(timGrants.some((grant) => grant.capabilityId === "projects.project.read" || grant.capabilityId === "projects.project.write"), false);
     assert.equal(timGrants.some((grant) => grant.capabilityId === "finance.summary.read" || grant.capabilityId === "health.record.read"), false);
+    assert.equal(summary.catalog.groups.find((group) => group.id === "projects")?.children.some((child) => child.id === "projects.read" && child.resourceScope.wildcardGrantResourceId === "project:*"), true);
+    assert.equal(summary.projectResources.loaded, true);
+    assert.equal(summary.projectResources.count, 2);
+    assert.ok(summary.projectResources.projects.some((project) => project.name === "Work/Business Travel" && project.resourceScope === "project:pj_travel"));
 
     const effective = summary.effectiveByPerson.person_tim?.effective;
     assert.ok(effective);
@@ -81,6 +96,7 @@ test("capability store v2 seeds Tim, Telegram identity, Slack signed-event ident
     assert.equal(effective.summary.totalCapabilityCount, capabilityCount());
     assert.equal(effective.summary.placeholderCapabilityCount, capabilityCount() - activeCapabilityCount());
     assert.equal(effective.summary.activeGrantCount, activeCapabilityCount());
+    assert.equal(effective.byCapabilityId["projects.read"]?.effective, true);
     assert.equal(effective.byCapabilityId["projects.files.write"]?.effective, true);
     assert.ok(effective.byCapabilityId["projects.files.write"]?.directGrantIds.includes("grant_seed_tim_owner_projects_files_write"));
     assert.equal(effective.byCapabilityId["finance.summary.read"]?.effective, false);
@@ -125,6 +141,19 @@ test("capability store migrates v1 read-only subjects and grants into v2", async
         status: "example",
         reason: "legacy example",
         enforcement: "non_enforcing",
+      }, {
+        id: "grant_legacy_project_write",
+        subjectId: "person:person_tim",
+        capabilityId: "projects.project.write",
+        grantKind: "capability",
+        resource: { kind: "project", id: "*", selectors: { projectId: "*" } },
+        actions: ["write"],
+        source: { kind: "migration", id: "legacy-project" },
+        grantedBy: "system:seed",
+        grantedAt: "2026-06-29T00:00:00.000Z",
+        status: "active",
+        reason: "legacy project write",
+        enforcement: "non_enforcing",
       }],
       audit: { appendOnly: true, writesEnabled: false, path: path.join(root, "old-audit.jsonl"), values: "old", requiredFields: ["eventId"], eventTypes: [], sampleEvent: {} },
       notes: ["legacy"],
@@ -136,6 +165,8 @@ test("capability store migrates v1 read-only subjects and grants into v2", async
     assert.ok(summary.people.some((person) => person.id === "person_tim"));
     assert.ok(summary.subjects.some((subject) => subject.id === "slack:channel:TLEGACY:CLEGACY"));
     assert.ok(summary.grants.some((grant) => grant.id === "grant_legacy_slack_channel_read" && grant.enforcement === "non_enforcing"));
+    assert.ok(summary.grants.some((grant) => grant.id === "grant_legacy_project_write" && grant.capabilityId === "projects.write" && grant.resource.id === "project:*"));
+    assert.equal(summary.grants.some((grant) => grant.capabilityId === "projects.project.write"), false);
     assert.equal(summary.grants.some((grant) => grant.id === "grant_seed_tim_owner_all"), false);
     assert.ok(summary.grants.some((grant) => grant.id === "grant_seed_tim_owner_projects_files_write"));
 

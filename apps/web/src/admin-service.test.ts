@@ -9,6 +9,11 @@ import { renderBrainAdminDeniedPage, renderBrainAdminPage, renderBrainAdminSignI
 import { createBrainAdminServer, type BrainAdminServiceConfig, type BrainAdminServiceDeps } from "./admin-service.js";
 import { mergeEnvFileText } from "./env-file.js";
 
+async function writeJson(filePath: string, value: unknown): Promise<void> {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, `${JSON.stringify(value)}\n`);
+}
+
 function config(root: string, overrides: Partial<BrainAdminServiceConfig> = {}): BrainAdminServiceConfig {
   return {
     enabled: true,
@@ -341,6 +346,10 @@ test("brain admin settings identify the concrete local instance separately from 
 test("brain admin capabilities API exposes v2 identities, grouped catalog, grants, and audit shape", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-capabilities-"));
   try {
+    await writeJson(path.join(root, "workspace/data/projects.json"), {
+      version: 1,
+      projects: [{ id: "pj_travel", name: "Work/Business Travel", status: "active" }],
+    });
     await withServer(config(root), authDeps(), async (baseUrl) => {
       const response = await fetch(`${baseUrl}/api/admin/brain/capabilities`, { headers: authHeaders() });
       assert.equal(response.status, 200);
@@ -350,7 +359,8 @@ test("brain admin capabilities API exposes v2 identities, grouped catalog, grant
         mode: string;
         writesEnabled: boolean;
         enforcement: { enabled: boolean; codexChatChanged: boolean };
-        catalog: { groups: Array<{ id: string; label: string; semantics: { impliedCapabilityIds: string[] }; children: Array<{ id: string; label: string; status: string }> }>; counts: { groups: number; capabilities: number; activeCapabilities: number; placeholderCapabilities: number } };
+        catalog: { groups: Array<{ id: string; label: string; resourceScope: { wildcardGrantResourceId?: string }; semantics: { impliedCapabilityIds: string[] }; children: Array<{ id: string; label: string; status: string; resourceScope: { wildcardGrantResourceId?: string } }> }>; counts: { groups: number; capabilities: number; activeCapabilities: number; placeholderCapabilities: number } };
+        projectResources: { loaded: boolean; count: number; projects: Array<{ id: string; name: string; resourceScope: string }> };
         store: { path: string; mode?: string; seededThisRequest: boolean; migratedThisRequest: boolean };
         defaultSubjectId: string;
         defaultPersonId: string;
@@ -360,7 +370,7 @@ test("brain admin capabilities API exposes v2 identities, grouped catalog, grant
         communicationChannels: Array<{ provider: string; kind: string; externalIds: Record<string, string> }>;
         subjects: Array<{ id: string; kind: string; label: string }>;
         grantBundles: Array<{ id: string; includes: { capabilityIds: string[] } }>;
-        grants: Array<{ id: string; subjectId: string; capabilityId: string; grantKind: string; bundleId?: string; enforcement: string }>;
+        grants: Array<{ id: string; subjectId: string; capabilityId: string; grantKind: string; bundleId?: string; enforcement: string; resource: { kind: string; id: string; selectors: Record<string, string> } }>;
         effectiveBySubject: Record<string, { directGroupCapabilityIds: string[]; impliedCapabilityIds: string[]; byCapabilityId: Record<string, { effective: boolean; impliedByCapabilityIds: string[] }> }>;
         effectiveByPerson: Record<string, { effective: { directBundleIds: string[]; directCapabilityIds: string[]; summary: { activeGrantCount: number; allCapabilities: boolean; allActiveCapabilities: boolean; effectiveCapabilityCount: number; effectiveActiveCapabilityCount: number; totalCapabilityCount: number; activeCapabilityCount: number; placeholderCapabilityCount: number }; byCapabilityId: Record<string, { effective: boolean; directGrantIds: string[]; impliedByBundleIds: string[] }> } }>;
         adminWriteModel: { writesEnabled: boolean; plannedEndpoints: Array<{ path: string }> };
@@ -381,7 +391,14 @@ test("brain admin capabilities API exposes v2 identities, grouped catalog, grant
       assert.ok(projects);
       assert.equal(projects.label, "Projects");
       assert.ok(projects.semantics.impliedCapabilityIds.includes("projects.files.write"));
+      assert.ok(projects.semantics.impliedCapabilityIds.includes("projects.read"));
+      assert.equal(projects.resourceScope.wildcardGrantResourceId, "project:*");
+      assert.equal(projects.children.some((child) => child.id === "projects.project.read"), false);
+      assert.ok(projects.children.some((child) => child.id === "projects.read" && child.resourceScope.wildcardGrantResourceId === "project:*"));
       assert.ok(projects.children.some((child) => child.id === "projects.tasks.write"));
+      assert.equal(payload.projectResources.loaded, true);
+      assert.equal(payload.projectResources.count, 1);
+      assert.ok(payload.projectResources.projects.some((project) => project.name === "Work/Business Travel" && project.resourceScope === "project:pj_travel"));
 
       assert.equal(payload.defaultPersonId, "person_tim");
       assert.equal(payload.defaultSubjectId, "person:person_tim");
@@ -397,7 +414,9 @@ test("brain admin capabilities API exposes v2 identities, grouped catalog, grant
       const timGrants = payload.grants.filter((grant) => grant.subjectId === "person:person_tim");
       assert.equal(timGrants.length, payload.catalog.counts.activeCapabilities);
       assert.equal(timGrants.some((grant) => grant.id === "grant_seed_tim_owner_all" || grant.grantKind === "bundle" || grant.capabilityId === "bundle.owner.all"), false);
+      assert.ok(timGrants.some((grant) => grant.id === "grant_seed_tim_owner_projects_read" && grant.capabilityId === "projects.read" && grant.resource.id === "project:*"));
       assert.ok(timGrants.some((grant) => grant.id === "grant_seed_tim_owner_projects_files_write" && grant.capabilityId === "projects.files.write" && grant.grantKind === "capability" && grant.enforcement === "non_enforcing"));
+      assert.equal(timGrants.some((grant) => grant.capabilityId === "projects.project.read" || grant.capabilityId === "projects.project.write"), false);
       assert.equal(timGrants.some((grant) => grant.capabilityId === "finance.summary.read" || grant.capabilityId === "health.record.read"), false);
       assert.ok(payload.grants.some((grant) => grant.id === "grant_seed_current_admin_projects_group" && grant.capabilityId === "projects" && grant.grantKind === "group" && grant.enforcement === "non_enforcing"));
       assert.ok(payload.grants.some((grant) => grant.capabilityId === "slack.channel.read" && grant.grantKind === "capability"));

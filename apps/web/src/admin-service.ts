@@ -228,7 +228,7 @@ async function handleAdminApi(request: IncomingMessage, response: ServerResponse
     return sendDownload(response, "brain.slack.manifest.json", manifest.text);
   }
   if (request.method === "GET" && url.pathname === "/api/admin/brain/capabilities") {
-    return sendJson(response, 200, await capabilityAdminSummary({ storePath: config.capabilityStorePath, auditLogPath: config.capabilityAuditLogPath, adminEmail, codexChatPath: config.codexChatPath }));
+    return sendJson(response, 200, await capabilityAdminSummary({ storePath: config.capabilityStorePath, auditLogPath: config.capabilityAuditLogPath, adminEmail, codexChatPath: config.codexChatPath, workspacePath: config.workspacePath }));
   }
   if (request.method === "POST" && url.pathname === "/api/admin/brain/codex-chat/operation") {
     const payload = await readJsonBody(request);

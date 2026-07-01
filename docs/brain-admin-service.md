@@ -169,6 +169,12 @@ Implemented in this slice:
   group inheritance semantics. A top-level `projects` group grant visibly
   implies child project capabilities such as `projects.files.write` while
   preserving child rows/details.
+- Project-specific access is modeled as resource-scoped grants on generic
+  project capability IDs. Use `projects.read`, `projects.write`,
+  `projects.files.write`, `projects.tasks.write`, and
+  `projects.artifacts.publish` with `resource.id: "project:*"` for all
+  projects or `resource.id: "project:<projectId>"` for one project. Do not
+  generate per-project capability IDs.
 - Non-enforcing owner/all bundle grant for Tim. The effective view expands the
   bundle into ordinary group/child capabilities; it is not a runtime bypass.
 - Non-enforcing seed grants only. The UI is read-only; there is no POST grant or

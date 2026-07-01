@@ -131,6 +131,9 @@ async function runAdminDashboardScenario(page, baseUrl, viewport) {
   assert.equal(await projectsGroup.evaluate((element) => element.open), true);
   await projectsGroup.locator('tbody tr', { hasText: 'Write project files' }).waitFor({ state: 'visible', timeout: 5_000 });
   await projectsGroup.locator('td[data-label="Source grant / bundle"]', { hasText: 'direct projects.files.write' }).first().waitFor({ state: 'visible', timeout: 5_000 });
+  await projectsGroup.locator('text=Project resources').waitFor({ state: 'visible', timeout: 5_000 });
+  await projectsGroup.locator('tbody tr', { hasText: 'Work/Business Travel' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await projectsGroup.locator('td[data-label="files"]', { hasText: 'project:*' }).first().waitFor({ state: 'visible', timeout: 5_000 });
   if (viewport) {
     await page.locator('button[aria-label="Open admin section menu"]').click();
     await page.locator('#mobile-section-menu', { hasText: 'Capabilities & Users sections' }).waitFor({ state: 'visible', timeout: 5_000 });

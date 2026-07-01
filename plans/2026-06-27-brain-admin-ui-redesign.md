@@ -497,3 +497,14 @@ Slack wizard when setup is still incomplete.
   attempts, and display restart-required guidance.
 - [x] Plan/restart/deploy use the existing `/api/admin/brain/codex-chat/operation`
   contract with no weakened approval or redaction semantics.
+
+### 2026-07-01 capability modeling decision
+
+- [x] Project granularity stays in grant resource scopes, not capability IDs:
+  generic IDs such as `projects.read`, `projects.write`,
+  `projects.files.write`, `projects.tasks.write`, and
+  `projects.artifacts.publish` are granted with `project:*` or
+  `project:<projectId>` resources.
+- [x] The admin UI may present this as per-project coverage using read-only
+  workspace project names, but runtime enforcement remains disconnected in this
+  Brain slice.
