@@ -110,10 +110,27 @@ async function runAdminDashboardScenario(page, baseUrl, viewport) {
   await page.locator(`${capNavScope} a[href="#cap-users"]`).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator(`${capNavScope} a[href="#cap-identities"]`).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator(`${capNavScope} a[href="#cap-grants"]`).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator(`${capNavScope} a[href="#cap-catalog"]`).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator(`${capNavScope} a[href="#cap-audit"]`).waitFor({ state: 'visible', timeout: 5_000 });
   await page.locator('#capabilities-status', { hasText: 'V2 identity/capability store loaded' }).waitFor({ state: 'visible', timeout: 5_000 });
-  await page.locator('#capabilities-identities', { hasText: 'External identities' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('[data-compact-capabilities-overview="true"]').waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#cap-metric-people', { hasText: '1' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await page.locator('#capabilities-identities table[data-compact-identities="true"]', { hasText: 'Proof source' }).waitFor({ state: 'visible', timeout: 5_000 });
+  const timUser = page.locator('#capabilities-people details[data-capability-user="person_tim"]');
+  await timUser.waitFor({ state: 'visible', timeout: 5_000 });
+  assert.equal(await timUser.evaluate((element) => element.open), false);
+  await timUser.locator(':scope > summary').click();
+  await timUser.locator('text=Linked identities').waitFor({ state: 'visible', timeout: 5_000 });
+  const projectsGroup = page.locator('#capabilities-catalog details[data-capability-group="projects"]');
+  await projectsGroup.waitFor({ state: 'visible', timeout: 5_000 });
+  assert.equal(await projectsGroup.evaluate((element) => element.open), false);
+  await projectsGroup.locator(':scope > summary').click();
+  assert.equal(await projectsGroup.evaluate((element) => element.open), true);
+  await projectsGroup.locator('tbody tr', { hasText: 'Write project files' }).waitFor({ state: 'visible', timeout: 5_000 });
+  await projectsGroup.locator('td[data-label="Source grant / bundle"]', { hasText: 'bundle.owner.all' }).first().waitFor({ state: 'visible', timeout: 5_000 });
   if (viewport) {
+    await page.locator('button[aria-label="Open admin section menu"]').click();
+    await page.locator('#mobile-section-menu', { hasText: 'Capabilities & Users sections' }).waitFor({ state: 'visible', timeout: 5_000 });
     await page.locator(`${capNavScope} a[href="#cap-users"]`).click();
     await page.locator('#mobile-section-menu').waitFor({ state: 'hidden', timeout: 5_000 });
   }
