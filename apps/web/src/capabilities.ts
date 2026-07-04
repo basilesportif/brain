@@ -1172,7 +1172,11 @@ function normalizeCapabilityStore(value: unknown, auditLogPath: string, observed
     legacyStoreIds: Array.isArray(value.legacyStoreIds) ? normalizeStringArray(value.legacyStoreIds, 20) : undefined,
   };
   const ensured = ensureCoreSeed(store, fallback);
-  return { store: ensured.store, migrated: false, changed: ensured.changed };
+  return { store: ensured.store, migrated: false, changed: ensured.changed || hasNonEnforcingGrant(value.grants) };
+}
+
+function hasNonEnforcingGrant(value: unknown): boolean {
+  return Array.isArray(value) && value.some((item) => isRecord(item) && item.enforcement !== "enforcing");
 }
 
 function migrateCapabilityStoreV1(value: Record<string, unknown>, fallback: CapabilityStore): CapabilityStore {

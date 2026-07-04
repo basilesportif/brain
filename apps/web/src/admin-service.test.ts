@@ -6,7 +6,7 @@ import path from "node:path";
 import type http from "node:http";
 import { authorizeBrainAdminRequest, parseAdminAllowedEmails } from "./admin-auth.js";
 import { renderBrainAdminDeniedPage, renderBrainAdminPage, renderBrainAdminSignInPage } from "./admin-page.js";
-import { createBrainAdminServer, type BrainAdminServiceConfig, type BrainAdminServiceDeps } from "./admin-service.js";
+import { createBrainAdminServer, initializeBrainAdminCapabilityStore, type BrainAdminServiceConfig, type BrainAdminServiceDeps } from "./admin-service.js";
 import { mergeEnvFileText } from "./env-file.js";
 
 async function writeJson(filePath: string, value: unknown): Promise<void> {
@@ -105,6 +105,26 @@ test("brain admin auth parses allowlist and fails closed", async () => {
     await authorizeBrainAdminRequest({ headers: { authorization: "Bearer token" } } as never, { clerkPublishableKey: "", clerkSecretKey: "sk", clerkAllowedEmails: "tim.galebach@gmail.com" }, authDeps()),
     { ok: false, statusCode: 503, error: "admin_auth_not_configured" },
   );
+});
+
+test("brain admin startup normalizes stale grants to enforcing", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-cap-startup-"));
+  try {
+    const cfg = config(root);
+    await initializeBrainAdminCapabilityStore(cfg);
+
+    const staleStore = JSON.parse(await readFile(cfg.capabilityStorePath, "utf8")) as { grants: Array<Record<string, unknown>> };
+    staleStore.grants = staleStore.grants.map((grant) => ({ ...grant, enforcement: "non_enforcing" }));
+    await writeJson(cfg.capabilityStorePath, staleStore);
+
+    await initializeBrainAdminCapabilityStore(cfg);
+
+    const normalized = JSON.parse(await readFile(cfg.capabilityStorePath, "utf8")) as { grants: Array<{ enforcement?: string }> };
+    assert.ok(normalized.grants.length > 0);
+    assert.equal(normalized.grants.every((grant) => grant.enforcement === "enforcing"), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("brain admin page and API require Clerk allowlist auth", async () => {
