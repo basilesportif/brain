@@ -19,7 +19,7 @@ without repeating work.
 
 ### Progress (checkboxes are the source of truth for resume)
 
-- [ ] Step 1 — Brain backend: §6.1 status, §6.2 setup state, §6.4 env schema + validated writes
+- [x] Step 1 — Brain backend: §6.1 status, §6.2 setup state, §6.4 env schema + validated writes (Opus-implemented, Fable-reviewed: 10 review findings fixed; env-write approval gate retained until step 4)
 - [ ] Step 2 — Brain backend: §6.5 reads (summary, catalog, users, paginated audit, dry-run authorize)
 - [ ] Step 3 — Brain backend: §6.5 writes (store migration + backup, grant/identity mutations, impact preview, audit events)
 - [ ] Step 4 — Frontend: React/Vite app at `/admin-v2` (Home + Settings, then Setup, Users, Operations)
@@ -334,8 +334,10 @@ Wizard completion persists the flag; "Reconfigure" clears it.
   present in the env file.
 - Writes validate server-side and return field-level errors. Secret values stay
   write-only: API returns presence only, never values. The env-write approval-phrase
-  gate is dropped server-side in the same change (client confirm dialog replaces
-  it); the **operation** approval phrase is NOT dropped (§5.5).
+  gate is dropped server-side **only when the new React client (with its confirm
+  dialog) ships in step 4** — not in step 1, because the legacy console posts env
+  writes on a single click and would otherwise have no confirmation at all during
+  the transition. The **operation** approval phrase is NOT dropped (§5.5).
 - Longer term, codex-chat owns the env schema (`config.ts` zod schema is the real
   source of truth for which keys exist/are required); Brain's schema module is an
   interim measure until §6.7 lets codex-chat validate its own config writes. Keep

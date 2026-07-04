@@ -1,12 +1,13 @@
 import { spawn } from "node:child_process";
-import { appendFile, chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, open, readFile, rename, stat, writeFile } from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { authorizeBrainAdminRequest, isBrainAdminAuthConfigured, parseAdminAllowedEmails, type ClerkUserLookup, type VerifyClerkToken } from "./admin-auth.js";
 import { capabilityAdminSummary } from "./capabilities.js";
-import { envFileMetadata, readEnvKeyPresence, resolveEnvFilePath, writeMergedEnvFile } from "./env-file.js";
+import { envFileMetadata, expandHomePath, parseEnvKeys, readEnvKeyPresence, resolveEnvFilePath, writeMergedEnvFile } from "./env-file.js";
+import { buildEnvSchema, SECRETISH_RE, validateEnvUpdates, type EnvFieldError } from "./env-schema.js";
 import { renderBrainAdminDeniedPage, renderBrainAdminPage, renderBrainAdminSignInPage } from "./admin-page.js";
 
 const SLACK_EVENTS_BASE_URL = "https://brain.decisive-outcomes.com";
@@ -47,7 +48,6 @@ const DEFAULT_ENV_KEYS = [
   "OPENAI_API_KEY",
 ] as const;
 
-const SECRETISH_RE = /(SECRET|TOKEN|KEY|PASSWORD|COOKIE|SESSION|CREDENTIAL)/i;
 const MAX_BODY_BYTES = 128 * 1024;
 const LIVE_OPERATION_CONFIRMATION_TOKEN = "brain-admin-live-operation-confirmed-v1";
 const SLACK_SETTINGS_CONFIRMATION_TOKEN = "brain-admin-slack-settings-confirmed-v1";
@@ -86,8 +86,10 @@ export interface BrainAdminServiceConfig {
   slackEventsPath: string;
   slackAppId?: string;
   slackCanaryPath: string;
+  slackSetupStatePath: string;
   capabilityStorePath: string;
   capabilityAuditLogPath: string;
+  capabilityDecisionsDir: string;
 }
 
 export interface BrainAdminServiceDeps {
@@ -145,8 +147,10 @@ export function loadBrainAdminServiceConfig(env: NodeJS.ProcessEnv = process.env
     slackEventsPath: normalizeRoutePath(env.BRAIN_SLACK_EVENTS_PATH || SLACK_EVENTS_PATH),
     slackAppId: normalizeSlackAppId(env.BRAIN_SLACK_APP_ID || env.SLACK_APP_ID || env.CODEX_CHAT_SLACK_APP_ID || ""),
     slackCanaryPath: env.BRAIN_SLACK_CANARY_PATH || path.join(path.dirname(auditLogPath), "slack-canary.json"),
+    slackSetupStatePath: env.BRAIN_SLACK_SETUP_STATE_PATH || path.join(path.dirname(auditLogPath), "slack-setup.json"),
     capabilityStorePath,
     capabilityAuditLogPath,
+    capabilityDecisionsDir: env.BRAIN_CAPABILITY_DECISIONS_DIR || "capability_decisions",
   };
 }
 
@@ -195,6 +199,19 @@ async function handleAdminApi(request: IncomingMessage, response: ServerResponse
   }
   if (request.method === "GET" && url.pathname === "/api/admin/brain/health") {
     return sendJson(response, 200, await serviceHealth(config));
+  }
+  if (request.method === "GET" && url.pathname === "/api/admin/brain/status") {
+    return sendJson(response, 200, await brainStatus(config));
+  }
+  if (request.method === "GET" && url.pathname === "/api/admin/brain/env/schema") {
+    return sendJson(response, 200, await envSchemaResponse(config));
+  }
+  if (request.method === "GET" && url.pathname === "/api/admin/brain/slack/setup") {
+    return sendJson(response, 200, await slackSetupSummary(config));
+  }
+  if (request.method === "POST" && url.pathname === "/api/admin/brain/slack/setup") {
+    const payload = await readJsonBody(request);
+    return handleSlackSetupWrite(response, config, adminEmail, payload);
   }
   if (request.method === "GET" && url.pathname === "/api/admin/brain/settings") {
     return sendJson(response, 200, await serviceSettings(config));
@@ -317,6 +334,387 @@ async function serviceSettings(config: BrainAdminServiceConfig) {
 
 async function codexChatEnvSummary(config: BrainAdminServiceConfig) {
   return envPresenceSummary(config, config.allowedEnvKeys);
+}
+
+// --- §6.1 structured status endpoint -----------------------------------------
+
+type StatusComponentState = "ok" | "warn" | "error";
+
+interface StatusComponent {
+  id: "brain" | "slack" | "model" | "service" | "capability_enforcement";
+  state: StatusComponentState;
+  message: string;
+  lastChecked: string;
+  action?: { label: string; route: string };
+}
+
+async function brainStatus(config: BrainAdminServiceConfig): Promise<{ components: StatusComponent[] }> {
+  const now = new Date().toISOString();
+  // Each component builder is wrapped so an unexpected failure in one degrades
+  // only that component (state "error") instead of rejecting the whole endpoint.
+  const [brain, slack, model, service, enforcement] = await Promise.all([
+    safeStatusComponent("brain", now, () => brainStatusComponent(config, now)),
+    safeStatusComponent("slack", now, () => slackStatusComponent(config, now)),
+    safeStatusComponent("model", now, () => modelStatusComponent(config, now)),
+    safeStatusComponent("service", now, () => serviceStatusComponent(config, now)),
+    safeStatusComponent("capability_enforcement", now, () => capabilityEnforcementComponent(config, now)),
+  ]);
+  return { components: [brain, slack, model, service, enforcement] };
+}
+
+async function safeStatusComponent(id: StatusComponent["id"], now: string, build: () => StatusComponent | Promise<StatusComponent>): Promise<StatusComponent> {
+  try {
+    return await build();
+  } catch (error) {
+    return { id, state: "error", message: `Status check failed: ${briefStatusError(error)}`, lastChecked: now };
+  }
+}
+
+// Brief, single-line failure reason for a status component: no stack, no secrets.
+function briefStatusError(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException)?.code;
+  if (typeof code === "string" && code) return code;
+  const message = error instanceof Error ? error.message : String(error);
+  return (message.split("\n")[0] ?? "").slice(0, 120) || "unknown error";
+}
+
+function brainStatusComponent(config: BrainAdminServiceConfig, now: string): StatusComponent {
+  const configured = isBrainAdminAuthConfigured(config);
+  return {
+    id: "brain",
+    state: configured ? "ok" : "error",
+    message: configured
+      ? `Brain admin service is up (${config.instanceName}).`
+      : "Brain admin auth is not fully configured; the console is fail-closed.",
+    lastChecked: now,
+  };
+}
+
+async function slackStatusComponent(config: BrainAdminServiceConfig, now: string): Promise<StatusComponent> {
+  const action = { label: "Fix Slack setup", route: "/setup" };
+  const present = await readEnvKeyPresence(config.codexChatEnvFile, ["SLACK_SIGNING_SECRET", "SLACK_BOT_TOKEN"]);
+  const missing = ["SLACK_SIGNING_SECRET", "SLACK_BOT_TOKEN"].filter((key) => !present[key]);
+  if (missing.length > 0) {
+    return { id: "slack", state: "error", message: `Slack setup incomplete: missing ${missing.join(", ")}.`, lastChecked: now, action };
+  }
+  const setup = await readSlackSetupStore(config.slackSetupStatePath);
+  if (!setup.setupComplete) {
+    return { id: "slack", state: "warn", message: "Slack secrets are present but setup has not been marked complete.", lastChecked: now, action };
+  }
+  const telemetry = await slackTelemetrySummary(config);
+  const health = telemetry.health.state;
+  if (health === "degraded") {
+    return { id: "slack", state: "error", message: telemetry.health.summary, lastChecked: now, action };
+  }
+  if (health === "attention" || health === "stale" || health === "unknown") {
+    return { id: "slack", state: "warn", message: telemetry.health.summary, lastChecked: now, action };
+  }
+  return { id: "slack", state: "ok", message: "Slack is connected and recent telemetry looks healthy.", lastChecked: now };
+}
+
+async function modelStatusComponent(config: BrainAdminServiceConfig, now: string): Promise<StatusComponent> {
+  const summary = await mainLoopModelSummary(config);
+  const preset = summary.activePreset;
+  // Derive OpenRouter dependence the same way the summary classifies presets:
+  // either the active preset requires OpenRouter, or the effective main-loop
+  // provider is openrouter (covers a "custom" config that still runs OpenRouter).
+  const activePresetMeta = summary.presets.find((entry) => entry.id === preset);
+  const effectiveProvider = String(summary.effective.modelProvider ?? "").toLowerCase();
+  const needsOpenRouter = Boolean(activePresetMeta?.requiresOpenRouter) || effectiveProvider === "openrouter";
+  if (needsOpenRouter && summary.openRouter.readiness !== "ready") {
+    return {
+      id: "model",
+      state: "error",
+      message: `Main-loop preset ${preset} needs OpenRouter, but ${summary.openRouter.readiness}.`,
+      lastChecked: now,
+      action: { label: "Fix model settings", route: "/settings" },
+    };
+  }
+  if (preset === "custom") {
+    return { id: "model", state: "warn", message: "Main-loop model is a custom configuration (not a known preset).", lastChecked: now, action: { label: "Review model settings", route: "/settings" } };
+  }
+  return { id: "model", state: "ok", message: `Main-loop model preset: ${preset}.`, lastChecked: now };
+}
+
+async function serviceStatusComponent(config: BrainAdminServiceConfig, now: string): Promise<StatusComponent> {
+  const state = await readLastOperationState(config);
+  if (state.lastOperation && state.lastOperation.status !== 0) {
+    return {
+      id: "service",
+      state: "error",
+      message: `Last ${state.lastOperation.operation} of ${config.codexChatServiceName} failed (exit ${state.lastOperation.status ?? "unknown"}).`,
+      lastChecked: now,
+      action: { label: "Open operations", route: "/operations" },
+    };
+  }
+  if (state.restartPending) {
+    return {
+      id: "service",
+      state: "warn",
+      message: "Config changed since the last restart; restart codex-chat to apply.",
+      lastChecked: now,
+      action: { label: "Restart codex-chat", route: "/operations" },
+    };
+  }
+  return {
+    id: "service",
+    state: "ok",
+    message: state.lastOperation
+      ? `Last ${state.lastOperation.operation} of ${config.codexChatServiceName} succeeded.`
+      : "No recent service operations recorded.",
+    lastChecked: now,
+  };
+}
+
+async function capabilityEnforcementComponent(config: BrainAdminServiceConfig, now: string): Promise<StatusComponent> {
+  const status = await capabilityEnforcementStatus(config);
+  if (status.enforcementEnabled && (!status.storePresent || !status.storeValid)) {
+    const message = !status.storePresent
+      ? "Capability store is missing while enforcement is on; the assistant is fail-closed (down)."
+      : status.error
+        ? `Capability store is unreadable while enforcement is on (${status.error}); the assistant is fail-closed (down).`
+        : "Capability store is invalid while enforcement is on; the assistant is fail-closed (down).";
+    return {
+      id: "capability_enforcement",
+      state: "error",
+      message,
+      lastChecked: now,
+      action: { label: "Open operations", route: "/operations" },
+    };
+  }
+  if (!status.enforcementEnabled) {
+    return { id: "capability_enforcement", state: "warn", message: "Capability enforcement is disabled.", lastChecked: now };
+  }
+  const loaded = status.lastLoaded ? ` (loaded ${status.lastLoaded})` : "";
+  const denials = status.recentDenials === 1 ? "1 denial" : `${status.recentDenials} denials`;
+  return {
+    id: "capability_enforcement",
+    state: "ok",
+    message: `Enforcement on; store valid${loaded}; ${denials} in the last hour.`,
+    lastChecked: now,
+    action: status.recentDenials > 0 ? { label: `Review ${denials}`, route: "/operations" } : undefined,
+  };
+}
+
+async function readLastOperationState(config: BrainAdminServiceConfig): Promise<{ lastOperation?: { operation: string; status: number | null }; restartPending: boolean }> {
+  // The audit log is an append-only JSONL file; the last operation, last restart,
+  // and last config write we need all live at the tail. Read only the final
+  // window instead of the whole file so a long-lived log doesn't grow /status
+  // poll cost unbounded.
+  const raw = await readFileTail(resolveEnvFilePath(config.auditLogPath), AUDIT_TAIL_BYTES);
+  if (!raw) return { restartPending: false };
+  let lastOperation: { operation: string; status: number | null } | undefined;
+  let lastRestartAtMs = Number.NEGATIVE_INFINITY;
+  let lastConfigWriteAtMs = Number.NEGATIVE_INFINITY;
+  const writeActions = new Set(["codex-chat.env.write", "slack.settings.write", "openrouter.settings.write", "codex-chat.main_loop_model.write"]);
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let record: Record<string, unknown>;
+    try { record = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
+    const action = typeof record.action === "string" ? record.action : "";
+    const atMs = typeof record.at === "string" ? Date.parse(record.at) : NaN;
+    if (action === "codex-chat.operation.execute") {
+      const status = typeof record.status === "number" ? record.status : null;
+      lastOperation = { operation: typeof record.operation === "string" ? record.operation : "operation", status };
+      // A successful deploy restarts the service, so it clears restartPending
+      // just like a successful restart.
+      if ((record.operation === "restart" || record.operation === "deploy") && status === 0 && Number.isFinite(atMs)) lastRestartAtMs = atMs;
+    } else if (writeActions.has(action) && Number.isFinite(atMs)) {
+      lastConfigWriteAtMs = atMs;
+    }
+  }
+  return { lastOperation, restartPending: lastConfigWriteAtMs > lastRestartAtMs };
+}
+
+interface CapabilityEnforcementStatus {
+  enforcementEnabled: boolean;
+  storePresent: boolean;
+  storeValid: boolean;
+  lastLoaded?: string;
+  recentDenials: number;
+  error?: string;
+}
+
+async function capabilityEnforcementStatus(config: BrainAdminServiceConfig): Promise<CapabilityEnforcementStatus> {
+  const enforcementEnabled = await readEnforcementEnabled(config);
+  const storePath = resolveEnvFilePath(config.capabilityStorePath);
+  let storePresent = false;
+  let storeValid = false;
+  let lastLoaded: string | undefined;
+  try {
+    const info = await stat(storePath);
+    storePresent = true;
+    lastLoaded = info.mtime.toISOString();
+    const raw = await readFile(storePath, "utf8");
+    storeValid = isValidCapabilityStoreShape(raw);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      return { enforcementEnabled, storePresent, storeValid, lastLoaded, recentDenials: 0, error: (error as Error).message };
+    }
+  }
+  const recentDenials = await recentCapabilityDenialCount(config);
+  return { enforcementEnabled, storePresent, storeValid, lastLoaded, recentDenials };
+}
+
+async function readEnforcementEnabled(config: BrainAdminServiceConfig): Promise<boolean> {
+  // codex-chat owns this setting; it defaults to true (enforcement is live).
+  // Read an explicit override from codex-chat's config TOML when present.
+  const configFile = config.codexChatConfigFile ?? "";
+  if (!configFile) return true;
+  const text = await readTextIfPresent(resolveEnvFilePath(configFile));
+  // Accept both the [brain] section form and the top-level dotted form
+  // `brain.enforcementEnabled = false` (both are valid to codex-chat's TOML parser).
+  const raw = readTomlValue(text, "brain", "enforcementEnabled") ?? readTopLevelDottedTomlValue(text, "brain.enforcementEnabled");
+  if (raw === null) return true;
+  return !/^(false|0|no|off)$/i.test(raw.trim());
+}
+
+// Mirror codex-chat's `loadBrainCapabilityStore` schema check so Brain's "store
+// valid" verdict matches what the enforcer would accept.
+function isValidCapabilityStoreShape(raw: string): boolean {
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { return false; }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  const store = parsed as Record<string, unknown>;
+  return Array.isArray(store.grants) && Array.isArray(store.subjects) && Array.isArray(store.externalIdentities);
+}
+
+async function capabilityDecisionsDirPath(config: BrainAdminServiceConfig): Promise<string> {
+  // Mirror codexChatStateDir: a relative decisions dir (the codex-chat default
+  // "capability_decisions") is resolved under codex-chat's state dir; a "~"-home
+  // or absolute override is used as-is (with home expanded).
+  const configured = config.capabilityDecisionsDir;
+  if (configured.startsWith("~") || path.isAbsolute(expandHomePath(configured))) return resolveEnvFilePath(configured);
+  const stateDir = await codexChatStateDir(config);
+  return path.join(stateDir, configured);
+}
+
+async function recentCapabilityDenialCount(config: BrainAdminServiceConfig): Promise<number> {
+  const dir = await capabilityDecisionsDirPath(config);
+  const cutoffMs = Date.now() - 60 * 60_000;
+  // Decision records are written to per-day JSONL files (YYYY-MM-DD.jsonl); only
+  // today and yesterday can hold a decision from the last hour.
+  const now = new Date();
+  const days = [now, new Date(now.getTime() - 24 * 60 * 60_000)].map((date) => date.toISOString().slice(0, 10));
+  let count = 0;
+  for (const day of days) {
+    const text = await readTextIfPresent(path.join(dir, `${day}.jsonl`));
+    if (!text) continue;
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      let record: Record<string, unknown>;
+      try { record = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
+      if (record.allowed !== false) continue;
+      const checkedAtMs = typeof record.checkedAt === "string" ? Date.parse(record.checkedAt) : NaN;
+      if (Number.isFinite(checkedAtMs) && checkedAtMs >= cutoffMs) count += 1;
+    }
+  }
+  return count;
+}
+
+// --- §6.4 env schema response ------------------------------------------------
+
+async function envSchemaResponse(config: BrainAdminServiceConfig): Promise<ReturnType<typeof buildEnvSchema>> {
+  // Plan §6.4: return the bare schema array (no { envFile, schema } wrapper).
+  const envFile = resolveEnvFilePath(config.codexChatEnvFile);
+  const presentKeys = parseEnvKeys(await readTextIfPresent(envFile));
+  return buildEnvSchema(presentKeys);
+}
+
+// --- §6.2 Slack setup state --------------------------------------------------
+
+interface SlackSetupStore {
+  schemaVersion: 1;
+  setupComplete: boolean;
+  completedAt?: string;
+  completedBy?: string;
+  updatedAt?: string;
+}
+
+async function readSlackSetupStore(filePath: string): Promise<SlackSetupStore> {
+  const raw = await readTextIfPresent(resolveEnvFilePath(filePath));
+  if (!raw) return { schemaVersion: 1, setupComplete: false };
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return {
+      schemaVersion: 1,
+      setupComplete: parsed.setupComplete === true,
+      completedAt: typeof parsed.completedAt === "string" ? redactTelemetryText(parsed.completedAt) : undefined,
+      completedBy: typeof parsed.completedBy === "string" ? redactTelemetryText(parsed.completedBy) : undefined,
+      updatedAt: typeof parsed.updatedAt === "string" ? redactTelemetryText(parsed.updatedAt) : undefined,
+    };
+  } catch {
+    return { schemaVersion: 1, setupComplete: false };
+  }
+}
+
+async function writeSlackSetupStore(filePath: string, store: SlackSetupStore): Promise<void> {
+  const resolved = resolveEnvFilePath(filePath);
+  await mkdir(path.dirname(resolved), { recursive: true, mode: 0o700 });
+  const tmp = `${resolved}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmp, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+  await chmod(tmp, 0o600).catch(() => undefined);
+  await rename(tmp, resolved);
+}
+
+async function slackSetupSummary(config: BrainAdminServiceConfig) {
+  const store = await readSlackSetupStore(config.slackSetupStatePath);
+  const present = await readEnvKeyPresence(config.codexChatEnvFile, ["SLACK_SIGNING_SECRET", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"]);
+  const telemetry = await slackTelemetrySummary(config);
+  const steps = [
+    {
+      id: "public_url",
+      label: "Confirm public base URL + events path",
+      done: Boolean(config.slackEventsBaseUrl && config.slackEventsPath),
+    },
+    {
+      id: "secrets",
+      label: "Enter required Slack secrets",
+      done: Boolean(present.SLACK_SIGNING_SECRET) && Boolean(present.SLACK_BOT_TOKEN),
+    },
+    {
+      id: "install_app",
+      label: "Install the Slack app (manifest)",
+      done: Boolean(config.slackAppId) || Boolean(present.SLACK_APP_TOKEN),
+    },
+    {
+      id: "event_subscriptions",
+      label: "Configure Event Subscriptions + verify with a test event",
+      done: Boolean(telemetry.lastAcceptedEvent),
+    },
+    {
+      id: "restart",
+      label: "Restart codex-chat if needed",
+      done: store.setupComplete,
+    },
+  ];
+  return {
+    source: "brain-private-file",
+    path: resolveEnvFilePath(config.slackSetupStatePath),
+    values: "setup completion flag and derived per-step state only; no secrets or message bodies",
+    setupComplete: store.setupComplete,
+    completedAt: store.completedAt,
+    completedBy: store.completedBy,
+    updatedAt: store.updatedAt,
+    steps,
+    verification: {
+      lastAcceptedEvent: Boolean(telemetry.lastAcceptedEvent),
+      lastOutboundSuccess: Boolean(telemetry.lastOutboundSuccess),
+    },
+  };
+}
+
+async function handleSlackSetupWrite(response: ServerResponse, config: BrainAdminServiceConfig, adminEmail: string, payload: Record<string, unknown>): Promise<void> {
+  if (typeof payload.complete !== "boolean") {
+    return sendJson(response, 400, { error: "invalid_setup_state", expected: { complete: "boolean" } });
+  }
+  const now = new Date().toISOString();
+  const store: SlackSetupStore = payload.complete
+    ? { schemaVersion: 1, setupComplete: true, completedAt: now, completedBy: adminEmail, updatedAt: now }
+    : { schemaVersion: 1, setupComplete: false, updatedAt: now };
+  await writeSlackSetupStore(config.slackSetupStatePath, store);
+  await appendAudit(config, { action: "slack.setup.update", adminEmail, setupComplete: store.setupComplete, storePath: resolveEnvFilePath(config.slackSetupStatePath) });
+  return sendJson(response, 200, { ok: true, setup: await slackSetupSummary(config) });
 }
 
 async function slackSettingsSummary(config: BrainAdminServiceConfig) {
@@ -820,6 +1218,9 @@ async function handleMainLoopModelWrite(response: ServerResponse, config: BrainA
     });
   }
 
+  const fieldErrors = validateEnvUpdates(preset.updates);
+  if (fieldErrors.length > 0) return sendEnvValidationError(response, fieldErrors);
+
   await writeMergedEnvFile(config.codexChatEnvFile, preset.updates, "Brain codex-chat main-loop model switcher");
   await appendAudit(config, {
     action: "codex-chat.main_loop_model.write",
@@ -1000,6 +1401,9 @@ async function handleOpenRouterSettingsWrite(response: ServerResponse, config: B
   if (input.apiKey) updates.OPENROUTER_API_KEY = input.apiKey;
   if (input.backend) updates.CODEX_CHAT_SUBAGENTS_BACKEND = input.backend;
 
+  const fieldErrors = validateEnvUpdates(updates);
+  if (fieldErrors.length > 0) return sendEnvValidationError(response, fieldErrors);
+
   await writeMergedEnvFile(config.codexChatEnvFile, updates, "Brain OpenRouter settings");
   await writeOpenRouterCodexProfile(config.codexHomePath, input);
   if (config.codexChatConfigFile) await writeCodexChatProviderConfig(config.codexChatConfigFile, input);
@@ -1033,6 +1437,9 @@ async function envPresenceSummary(config: BrainAdminServiceConfig, keysToRead: r
 }
 
 async function handleEnvWrite(response: ServerResponse, config: BrainAdminServiceConfig, adminEmail: string, payload: Record<string, unknown>): Promise<void> {
+  // The still-live legacy console posts env writes on one click, so the
+  // approval-phrase gate stays until step 4 ships the React client's confirm
+  // dialog (plan §6.4), which then replaces this server-side check.
   const approval = typeof payload.approval === "string" ? payload.approval.trim() : "";
   if (approval !== "write env" && approval !== `write ${config.codexChatServiceName} env`) {
     return sendJson(response, 400, { error: "approval_required", expected: ["write env", `write ${config.codexChatServiceName} env`] });
@@ -1043,10 +1450,12 @@ async function handleEnvWrite(response: ServerResponse, config: BrainAdminServic
   for (const [key, value] of Object.entries(entries)) {
     if (!isEnvKey(key)) return sendJson(response, 400, { error: "invalid_env_key", key });
     if (!allowed.has(key)) return sendJson(response, 403, { error: "env_key_not_allowed", key, allowedKeys: config.allowedEnvKeys });
-    if (typeof value !== "string" || value.length === 0) return sendJson(response, 400, { error: "env_value_required", key });
+    if (typeof value !== "string") return sendJson(response, 400, { error: "env_value_required", key });
     updates[key] = value;
   }
   if (Object.keys(updates).length === 0) return sendJson(response, 400, { error: "no_entries" });
+  const fieldErrors = validateEnvUpdates(updates, { requireNonEmpty: true });
+  if (fieldErrors.length > 0) return sendEnvValidationError(response, fieldErrors);
   await writeMergedEnvFile(config.codexChatEnvFile, updates, "Brain control plane");
   await appendAudit(config, { action: "codex-chat.env.write", adminEmail, keys: Object.keys(updates), envFile: resolveEnvFilePath(config.codexChatEnvFile) });
   return sendJson(response, 200, { ok: true, envFile: resolveEnvFilePath(config.codexChatEnvFile), writtenKeys: Object.keys(updates), values: "write-only", presence: await readEnvKeyPresence(config.codexChatEnvFile, Object.keys(updates)), restartRequired: true });
@@ -1077,6 +1486,9 @@ async function handleSlackSettingsWrite(response: ServerResponse, config: BrainA
       required: { token: SLACK_SETTINGS_CONFIRMATION_TOKEN, action: "slack.settings.write", envFile, keys: writtenKeys },
     });
   }
+
+  const fieldErrors = validateEnvUpdates(updates, { requireNonEmpty: true });
+  if (fieldErrors.length > 0) return sendEnvValidationError(response, fieldErrors);
 
   await writeMergedEnvFile(config.codexChatEnvFile, updates, "Brain Slack settings");
   await appendAudit(config, { action: "slack.settings.write", adminEmail, keys: writtenKeys, envFile, values: "write-only" });
@@ -1329,6 +1741,16 @@ function readTomlValue(sourceText: string, section: string, key: string): string
   return keyMatch?.[1] ?? null;
 }
 
+// Read a top-level dotted key (e.g. `brain.enforcementEnabled = false`) defined
+// in the document preamble, before any [section] header (where a dotted key
+// binds from the TOML document root).
+function readTopLevelDottedTomlValue(sourceText: string, dottedKey: string): string | null {
+  const firstSection = sourceText.search(/^\s*\[[^\]]+\]\s*$/m);
+  const preamble = firstSection >= 0 ? sourceText.slice(0, firstSection) : sourceText;
+  const keyMatch = new RegExp(`^\\s*${escapeRegExp(dottedKey)}\\s*=\\s*(.+?)\\s*$`, "m").exec(preamble);
+  return keyMatch?.[1] ?? null;
+}
+
 function tomlValue(value: string | boolean | string[]): string {
   if (typeof value === "boolean") return value ? "true" : "false";
   if (Array.isArray(value)) return `[${value.map(tomlString).join(", ")}]`;
@@ -1349,6 +1771,36 @@ async function readTextIfPresent(filePath: string): Promise<string> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
     throw error;
+  }
+}
+
+// Bound how much of the append-only audit log we read on each /status poll.
+const AUDIT_TAIL_BYTES = 256 * 1024;
+
+// Read only the trailing window of a file. When the file is larger than the
+// window we start mid-file and drop the first (partial) line so callers only
+// parse whole lines. Missing files read as "".
+async function readFileTail(filePath: string, maxBytes: number): Promise<string> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(filePath, "r");
+    const { size } = await handle.stat();
+    const start = size > maxBytes ? size - maxBytes : 0;
+    const length = size - start;
+    if (length <= 0) return "";
+    const buffer = Buffer.allocUnsafe(length);
+    await handle.read(buffer, 0, length, start);
+    let text = buffer.toString("utf8");
+    if (start > 0) {
+      const newline = text.indexOf("\n");
+      text = newline >= 0 ? text.slice(newline + 1) : "";
+    }
+    return text;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+    throw error;
+  } finally {
+    await handle?.close();
   }
 }
 
@@ -1568,6 +2020,10 @@ function isSelfServiceTarget(config: BrainAdminServiceConfig): boolean {
 
 function firstHeader(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
+}
+
+function sendEnvValidationError(response: ServerResponse, fieldErrors: EnvFieldError[]): void {
+  sendJson(response, 400, { error: "validation_failed", fieldErrors });
 }
 
 function sendJson(response: ServerResponse, statusCode: number, body: unknown): void {

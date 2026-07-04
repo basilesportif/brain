@@ -47,8 +47,10 @@ function config(root: string, overrides: Partial<BrainAdminServiceConfig> = {}):
     slackEventsPath: "/api/slack/events",
     slackAppId: undefined,
     slackCanaryPath: path.join(root, "slack-canary.json"),
+    slackSetupStatePath: path.join(root, "slack-setup.json"),
     capabilityStorePath: path.join(root, "capabilities.json"),
     capabilityAuditLogPath: path.join(root, "capability-audit.jsonl"),
+    capabilityDecisionsDir: path.join(root, "codex-chat", "data", "state", "capability_decisions"),
     ...overrides,
   } as BrainAdminServiceConfig;
 }
@@ -939,6 +941,357 @@ test("brain admin links directly to Slack app settings when a non-secret app id 
       assert.equal(payload.slackAppId, "A0123456789");
       assert.equal(payload.appSettingsUrl, "https://api.slack.com/apps/A0123456789");
       assert.equal(JSON.stringify(payload).includes("xox"), false);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function healthyTelemetry(observedAt: string): unknown {
+  return {
+    schemaVersion: 1,
+    updatedAt: observedAt,
+    counters: { "inbound.accepted": 1, "outbound.success": 1 },
+    lastAcceptedEvent: { observedAt, direction: "inbound", outcome: "accepted", eventType: "app_mention", channelId: "C1", userId: "U1" },
+    lastOutboundSuccess: { observedAt, direction: "outbound", outcome: "success", channelId: "C1", threadTs: "1782000000.000100", outboundResultCount: 1 },
+  };
+}
+
+function validCapabilityStore(): unknown {
+  return { schemaVersion: 2, grants: [], subjects: [{ id: "person:person_tim", kind: "person" }], externalIdentities: [] };
+}
+
+test("brain admin status endpoint reports healthy components server-side", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-status-ok-"));
+  try {
+    const observedAt = new Date().toISOString();
+    await writeFile(path.join(root, "codex-chat.env"), "SLACK_SIGNING_SECRET='s'\nSLACK_BOT_TOKEN='xoxb-super-secret'\nCODEX_CHAT_BASE_URL='https://brain.example.test'\n");
+    await writeJson(path.join(root, "slack-setup.json"), { schemaVersion: 1, setupComplete: true });
+    await writeFileRecursive(path.join(root, "codex-chat", "data", "state", "slack_telemetry", "summary.json"), JSON.stringify(healthyTelemetry(observedAt)));
+    await writeJson(path.join(root, "capabilities.json"), validCapabilityStore());
+    const day = observedAt.slice(0, 10);
+    await writeFileRecursive(path.join(root, "codex-chat", "data", "state", "capability_decisions", `${day}.jsonl`),
+      `${JSON.stringify({ allowed: false, checkedAt: observedAt })}\n${JSON.stringify({ allowed: false, checkedAt: observedAt })}\n${JSON.stringify({ allowed: true, checkedAt: observedAt })}\n`);
+    // Use the relative default so decision-dir resolution under codex-chat's state dir is exercised.
+    await withServer(config(root, { capabilityDecisionsDir: "capability_decisions" }), authDeps(), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/brain/status`, { headers: authHeaders() });
+      assert.equal(res.status, 200);
+      const payload = await res.json() as { components: Array<{ id: string; state: string; message: string; lastChecked: string; action?: { label: string; route: string } }> };
+      const by = Object.fromEntries(payload.components.map((component) => [component.id, component]));
+      assert.deepEqual(payload.components.map((component) => component.id), ["brain", "slack", "model", "service", "capability_enforcement"]);
+      for (const component of payload.components) assert.match(component.lastChecked, /^\d{4}-\d{2}-\d{2}T/);
+      assert.equal(by.brain.state, "ok");
+      assert.equal(by.slack.state, "ok");
+      assert.equal(by.model.state, "ok");
+      assert.equal(by.service.state, "ok");
+      assert.equal(by.capability_enforcement.state, "ok");
+      assert.match(by.capability_enforcement.message, /Enforcement on/);
+      assert.match(by.capability_enforcement.message, /2 denials in the last hour/);
+      assert.equal(by.capability_enforcement.action?.route, "/operations");
+      assert.equal(JSON.stringify(payload).includes("xoxb-super-secret"), false);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain admin status endpoint reports unhealthy components server-side", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-status-bad-"));
+  try {
+    // Slack secrets missing; main-loop on OpenRouter preset with no key; capability store missing while enforcing; last restart failed.
+    await writeFile(path.join(root, "codex-chat.env"), "CODEX_CHAT_CODEX_MODEL='z-ai/glm-5.2'\nCODEX_CHAT_CODEX_PROFILE='openrouter'\nCODEX_CHAT_CODEX_MODEL_PROVIDER='openrouter'\nCODEX_CHAT_CODEX_SERVICE_TIER_MODE='omit'\n");
+    await writeFile(path.join(root, "audit.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), action: "codex-chat.operation.execute", operation: "restart", status: 1 })}\n`);
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/brain/status`, { headers: authHeaders() });
+      assert.equal(res.status, 200);
+      const payload = await res.json() as { components: Array<{ id: string; state: string; message: string; action?: { label: string; route: string } }> };
+      const by = Object.fromEntries(payload.components.map((component) => [component.id, component]));
+      assert.equal(by.slack.state, "error");
+      assert.match(by.slack.message, /missing/);
+      assert.equal(by.slack.action?.route, "/setup");
+      assert.equal(by.model.state, "error");
+      assert.match(by.model.message, /OpenRouter/);
+      assert.equal(by.service.state, "error");
+      assert.match(by.service.message, /failed/);
+      assert.equal(by.capability_enforcement.state, "error");
+      assert.match(by.capability_enforcement.message, /missing/);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain admin status reports enforcement disabled from codex-chat config override", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-status-enforce-off-"));
+  try {
+    const cfg = config(root, { codexChatConfigFile: path.join(root, "codex-chat", "config", "codex-chat.toml") });
+    await mkdir(path.dirname(cfg.codexChatConfigFile ?? ""), { recursive: true });
+    await writeFile(cfg.codexChatConfigFile ?? "", "version = 1\n\n[brain]\nenforcementEnabled = false\n");
+    await withServer(cfg, authDeps(), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/brain/status`, { headers: authHeaders() });
+      const payload = await res.json() as { components: Array<{ id: string; state: string; message: string }> };
+      const enforcement = payload.components.find((component) => component.id === "capability_enforcement");
+      assert.equal(enforcement?.state, "warn");
+      assert.match(enforcement?.message ?? "", /disabled/);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain admin status reports enforcement disabled from a top-level dotted config override", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-status-enforce-dotted-"));
+  try {
+    const cfg = config(root, { codexChatConfigFile: path.join(root, "codex-chat", "config", "codex-chat.toml") });
+    await mkdir(path.dirname(cfg.codexChatConfigFile ?? ""), { recursive: true });
+    // Dotted top-level form (valid to codex-chat's real TOML parser).
+    await writeFile(cfg.codexChatConfigFile ?? "", "version = 1\nbrain.enforcementEnabled = false\n");
+    await withServer(cfg, authDeps(), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/brain/status`, { headers: authHeaders() });
+      const payload = await res.json() as { components: Array<{ id: string; state: string; message: string }> };
+      const enforcement = payload.components.find((component) => component.id === "capability_enforcement");
+      assert.equal(enforcement?.state, "warn");
+      assert.match(enforcement?.message ?? "", /disabled/);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain admin status flags a custom main-loop model that needs OpenRouter without a key", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-status-custom-openrouter-"));
+  try {
+    // Custom config (not a known preset) but the effective provider is openrouter, with no OPENROUTER_API_KEY.
+    await writeFile(path.join(root, "codex-chat.env"), "CODEX_CHAT_CODEX_MODEL='some-custom-model'\nCODEX_CHAT_CODEX_MODEL_PROVIDER='openrouter'\n");
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/brain/status`, { headers: authHeaders() });
+      assert.equal(res.status, 200);
+      const payload = await res.json() as { components: Array<{ id: string; state: string; message: string; action?: { label: string; route: string } }> };
+      const model = payload.components.find((component) => component.id === "model");
+      assert.equal(model?.state, "error");
+      assert.match(model?.message ?? "", /OpenRouter/);
+      assert.equal(model?.action?.label, "Fix model settings");
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain admin status stays 200 when one component builder throws", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-status-component-error-"));
+  try {
+    // Point codexChatEnvFile at a directory so env reads fail with a non-ENOENT error (EISDIR).
+    const envDir = path.join(root, "codex-chat-env-dir");
+    await mkdir(envDir, { recursive: true });
+    await withServer(config(root, { codexChatEnvFile: envDir }), authDeps(), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/brain/status`, { headers: authHeaders() });
+      assert.equal(res.status, 200);
+      const payload = await res.json() as { components: Array<{ id: string; state: string; message: string }> };
+      const by = Object.fromEntries(payload.components.map((component) => [component.id, component]));
+      // The brain component does not touch the env file and stays intact.
+      assert.equal(by.brain.state, "ok");
+      // The slack component reads the env file and degrades to error, not a 500.
+      assert.equal(by.slack.state, "error");
+      assert.match(by.slack.message, /Status check failed/);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain admin status reports an unreadable capability store distinctly from an invalid one", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-status-store-unreadable-"));
+  try {
+    // Store path is a directory: stat succeeds (present) but reading fails (EISDIR).
+    await mkdir(path.join(root, "capabilities.json"), { recursive: true });
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/brain/status`, { headers: authHeaders() });
+      assert.equal(res.status, 200);
+      const payload = await res.json() as { components: Array<{ id: string; state: string; message: string }> };
+      const enforcement = payload.components.find((component) => component.id === "capability_enforcement");
+      assert.equal(enforcement?.state, "error");
+      assert.match(enforcement?.message ?? "", /unreadable/);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain admin status resolves a ~-home capability decisions dir override", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-status-decisions-home-"));
+  const previousHome = process.env.HOME;
+  try {
+    process.env.HOME = root;
+    const observedAt = new Date().toISOString();
+    await writeFile(path.join(root, "codex-chat.env"), "SLACK_SIGNING_SECRET='s'\nSLACK_BOT_TOKEN='xoxb-super-secret'\n");
+    await writeJson(path.join(root, "slack-setup.json"), { schemaVersion: 1, setupComplete: true });
+    await writeJson(path.join(root, "capabilities.json"), validCapabilityStore());
+    const day = observedAt.slice(0, 10);
+    // "~/decisions" must expand to <HOME>/decisions, not join under codex-chat's state dir.
+    await writeFileRecursive(path.join(root, "decisions", `${day}.jsonl`),
+      `${JSON.stringify({ allowed: false, checkedAt: observedAt })}\n`);
+    await withServer(config(root, { capabilityDecisionsDir: "~/decisions" }), authDeps(), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/brain/status`, { headers: authHeaders() });
+      assert.equal(res.status, 200);
+      const payload = await res.json() as { components: Array<{ id: string; state: string; message: string }> };
+      const enforcement = payload.components.find((component) => component.id === "capability_enforcement");
+      assert.equal(enforcement?.state, "ok");
+      assert.match(enforcement?.message ?? "", /1 denial in the last hour/);
+    });
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain admin status treats a successful deploy as clearing the pending restart", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-status-deploy-restart-"));
+  try {
+    await writeFile(path.join(root, "codex-chat.env"), "SLACK_SIGNING_SECRET='s'\nSLACK_BOT_TOKEN='xoxb-super-secret'\n");
+    await writeJson(path.join(root, "slack-setup.json"), { schemaVersion: 1, setupComplete: true });
+    await writeJson(path.join(root, "capabilities.json"), validCapabilityStore());
+    // Config write happened, then a successful deploy (which restarts the service) after it.
+    const writeAt = new Date(Date.now() - 60_000).toISOString();
+    const deployAt = new Date().toISOString();
+    await writeFile(path.join(root, "audit.jsonl"),
+      `${JSON.stringify({ at: writeAt, action: "codex-chat.env.write" })}\n${JSON.stringify({ at: deployAt, action: "codex-chat.operation.execute", operation: "deploy", status: 0 })}\n`);
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/brain/status`, { headers: authHeaders() });
+      const payload = await res.json() as { components: Array<{ id: string; state: string; message: string }> };
+      const service = payload.components.find((component) => component.id === "service");
+      assert.equal(service?.state, "ok");
+      assert.match(service?.message ?? "", /deploy/);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain admin slack setup state persists completion and derives per-step done state", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-slack-setup-"));
+  try {
+    const observedAt = new Date().toISOString();
+    await writeFile(path.join(root, "codex-chat.env"), "SLACK_SIGNING_SECRET='s'\nSLACK_BOT_TOKEN='xoxb-super-secret'\n");
+    await writeFileRecursive(path.join(root, "codex-chat", "data", "state", "slack_telemetry", "summary.json"), JSON.stringify(healthyTelemetry(observedAt)));
+    await withServer(config(root, { slackAppId: "A0123456789" }), authDeps(), async (baseUrl) => {
+      const initial = await fetch(`${baseUrl}/api/admin/brain/slack/setup`, { headers: authHeaders() });
+      assert.equal(initial.status, 200);
+      const initialPayload = await initial.json() as { setupComplete: boolean; steps: Array<{ id: string; done: boolean }>; verification: { lastAcceptedEvent: boolean } };
+      assert.equal(initialPayload.setupComplete, false);
+      const steps = Object.fromEntries(initialPayload.steps.map((step) => [step.id, step.done]));
+      assert.equal(steps.public_url, true);
+      assert.equal(steps.secrets, true);
+      assert.equal(steps.install_app, true);
+      assert.equal(steps.event_subscriptions, true);
+      assert.equal(steps.restart, false);
+      assert.equal(initialPayload.verification.lastAcceptedEvent, true);
+      assert.equal(JSON.stringify(initialPayload).includes("xoxb-super-secret"), false);
+
+      const invalid = await fetch(`${baseUrl}/api/admin/brain/slack/setup`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      assert.equal(invalid.status, 400);
+
+      const complete = await fetch(`${baseUrl}/api/admin/brain/slack/setup`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ complete: true }),
+      });
+      assert.equal(complete.status, 200);
+      const completePayload = await complete.json() as { setup: { setupComplete: boolean; completedBy?: string; steps: Array<{ id: string; done: boolean }> } };
+      assert.equal(completePayload.setup.setupComplete, true);
+      assert.equal(completePayload.setup.completedBy, "tim.galebach@gmail.com");
+      assert.equal(completePayload.setup.steps.find((step) => step.id === "restart")?.done, true);
+      assert.equal((await stat(path.join(root, "slack-setup.json"))).mode & 0o777, 0o600);
+
+      const reconfigure = await fetch(`${baseUrl}/api/admin/brain/slack/setup`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ complete: false }),
+      });
+      assert.equal(reconfigure.status, 200);
+      const after = await fetch(`${baseUrl}/api/admin/brain/slack/setup`, { headers: authHeaders() });
+      assert.equal((await after.json() as { setupComplete: boolean }).setupComplete, false);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain admin env schema exposes grouped metadata including an other group for unrecognized keys", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-env-schema-"));
+  try {
+    await writeFile(path.join(root, "codex-chat.env"), "SLACK_BOT_TOKEN='xoxb-super-secret'\nSOME_CUSTOM_FLAG='1'\nCUSTOM_API_TOKEN='shh'\n");
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/brain/env/schema`, { headers: authHeaders() });
+      assert.equal(res.status, 200);
+      // Plan §6.4: the endpoint returns the bare schema array (no wrapper object).
+      const payload = await res.json() as Array<{ key: string; group: string; required: boolean; secret: boolean; description: string }>;
+      assert.ok(Array.isArray(payload));
+      const by = Object.fromEntries(payload.map((entry) => [entry.key, entry]));
+      assert.equal(by.SLACK_BOT_TOKEN.group, "slack");
+      assert.equal(by.SLACK_BOT_TOKEN.secret, true);
+      assert.equal(by.SLACK_BOT_TOKEN.required, true);
+      assert.equal(by.CODEX_CHAT_BASE_URL.group, "slack");
+      assert.equal(by.CODEX_CHAT_CODEX_MODEL.group, "model");
+      assert.equal(by.OPENROUTER_API_KEY.group, "openrouter");
+      assert.equal(by.CODEX_CHAT_API_ENABLED.group, "feature_flags");
+      // Unrecognized keys present in the env file surface under the other group.
+      assert.equal(by.SOME_CUSTOM_FLAG.group, "other");
+      assert.equal(by.CUSTOM_API_TOKEN.group, "other");
+      assert.equal(by.CUSTOM_API_TOKEN.secret, true);
+      assert.equal(JSON.stringify(payload).includes("xoxb-super-secret"), false);
+      assert.equal(JSON.stringify(payload).includes("shh"), false);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain admin env write still requires the approval phrase and validates against the schema", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-env-validate-"));
+  try {
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      // The approval phrase is still required (the legacy console posts on one click).
+      const noApproval = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ entries: { CODEX_CHAT_BASE_URL: "https://brain.example.test", SLACK_BOT_TOKEN: "xoxb-super-secret" } }),
+      });
+      assert.equal(noApproval.status, 400);
+      assert.equal((await noApproval.json() as { error: string }).error, "approval_required");
+
+      // With the phrase, allowed writes succeed.
+      const write = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ approval: "write env", entries: { CODEX_CHAT_BASE_URL: "https://brain.example.test", SLACK_BOT_TOKEN: "xoxb-super-secret" } }),
+      });
+      assert.equal(write.status, 200);
+      const okPayload = await write.json() as { writtenKeys: string[] };
+      assert.deepEqual(okPayload.writtenKeys.sort(), ["CODEX_CHAT_BASE_URL", "SLACK_BOT_TOKEN"]);
+
+      // With the phrase, schema validation still returns field-level errors (bad URL format).
+      const invalid = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ approval: "write env", entries: { CODEX_CHAT_BASE_URL: "not-a-url" } }),
+      });
+      assert.equal(invalid.status, 400);
+      const invalidPayload = await invalid.json() as { error: string; fieldErrors: Array<{ key: string; code: string }> };
+      assert.equal(invalidPayload.error, "validation_failed");
+      assert.ok(invalidPayload.fieldErrors.some((fieldError) => fieldError.key === "CODEX_CHAT_BASE_URL" && fieldError.code === "invalid_format"));
+
+      // Empty required value is a field-level error.
+      const empty = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ approval: "write env", entries: { CODEX_CHAT_BASE_URL: "" } }),
+      });
+      assert.equal(empty.status, 400);
+      assert.ok((await empty.json() as { fieldErrors: Array<{ key: string; code: string }> }).fieldErrors.some((fieldError) => fieldError.code === "required"));
     });
   } finally {
     await rm(root, { recursive: true, force: true });
