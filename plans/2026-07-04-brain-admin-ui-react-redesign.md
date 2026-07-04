@@ -348,6 +348,32 @@ future remote Brain. Replace it:
 - Sequence this *after* the core §6.1–6.5 work — it's a real cross-repo change,
   not free, and the direct-disk path keeps working meanwhile.
 
+**Appendix — code sites to reroute (verified against current source):**
+
+- Core writer: `apps/web/src/env-file.ts:58` `writeMergedEnvFile()` — already
+  atomic (temp-file mode `0o600` → rename) but writes codex-chat's private env
+  file directly. All env writers funnel through it; it becomes the fallback-only
+  path.
+- The four env write handlers, each calling
+  `writeMergedEnvFile(config.codexChatEnvFile, …)`:
+  1. `handleMainLoopModelWrite` — write at `admin-service.ts:823`
+     (`POST /api/admin/brain/codex-chat/main-model`)
+  2. `handleOpenRouterSettingsWrite` — write at `admin-service.ts:1003`
+     (`POST /api/admin/brain/openrouter/settings`)
+  3. `handleEnvWrite` — write at `admin-service.ts:1050`
+     (`POST /api/admin/brain/codex-chat/env`)
+  4. `handleSlackSettingsWrite` — write at `admin-service.ts:1081`
+     (`POST /api/admin/brain/slack/settings`)
+- Two config writers with the same rationale (codex-chat/Codex should own these
+  writes + validation): `writeOpenRouterCodexProfile` (`admin-service.ts:1222`,
+  Codex profile under `codexHomePath`) and `writeCodexChatProviderConfig`
+  (`admin-service.ts:1245`, provider TOML at `config.codexChatConfigFile`).
+- `config.codexChatEnvFile` (default `/home/tim/.config/codex-chat/env`,
+  `admin-service.ts:134`) becomes a fallback pointer, not the default target.
+- Explicitly NOT rerouted: `handleOperation` (restart/deploy — Brain keeps owning
+  restart) and `writeSlackCanaryStore` (Brain's own store, being deleted per §7,
+  not migrated).
+
 ### 6.5 Capabilities API (Brain — critical, ASAP)
 
 **One canonical schema.** codex-chat's enforced runtime store is the source of
