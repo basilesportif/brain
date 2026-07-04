@@ -75,7 +75,9 @@ These are settled. Do not re-litigate them; build to them.
 9. **Structured status endpoint: approved.** Build it; the UI renders only it for
    health.
 10. **Env vars:** keep editable in the UI (they change over time), but backend must
-    tag secret/required and validate on write. Secrets stay write-only.
+    tag secret/required and validate on write. Secrets stay write-only. Writes move
+    from Brain touching codex-chat's env file on disk to a codex-chat-owned config
+    interface (§6.7), with direct-disk retained as a bootstrap fallback only.
 11. **Restart is the only lifecycle operation surfaced in the UI.** No deploy/rollback
     flows. (The server-side `codex-chat/operation` endpoint keeps its deploy support;
     the UI simply doesn't surface it.)
@@ -113,9 +115,10 @@ This plan touches both repos; the Brain/codex-chat boundary does not move:
   Brain reads at `<codex-chat>/data/state/slack_telemetry/summary.json` — plus the
   agent-only live tail endpoint on its loopback `api.ts` gateway. codex-chat
   exposes **no** grant write APIs and stays read-only against the store.
-- Brain continues to reach codex-chat out-of-band (env file, TOML config, telemetry
-  summary + capability decision files, systemd restart command) — the redesign adds
-  **no** new HTTP coupling to codex-chat's gateway.
+- Brain continues to reach codex-chat out-of-band (telemetry summary + capability
+  decision files, systemd restart command, and — until §6.7 lands — the env file) —
+  the redesign adds **no** new HTTP coupling to codex-chat's gateway. §6.7 replaces
+  the direct env-file writes with a codex-chat-owned local IPC command.
 - Cleanup: remove stale generated `dist/admin-*` artifacts in codex-chat that
   reference removed admin routes, so the new UI can never hit dead routes.
 
@@ -308,6 +311,42 @@ Wizard completion persists the flag; "Reconfigure" clears it.
   write-only: API returns presence only, never values. The env-write approval-phrase
   gate is dropped server-side in the same change (client confirm dialog replaces
   it); the **operation** approval phrase is NOT dropped (§5.5).
+- Longer term, codex-chat owns the env schema (`config.ts` zod schema is the real
+  source of truth for which keys exist/are required); Brain's schema module is an
+  interim measure until §6.7 lets codex-chat validate its own config writes. Keep
+  Brain's copy minimal and clearly marked as derived.
+
+### 6.7 codex-chat-owned config write interface (replaces direct-disk env writes)
+
+Brain today writes codex-chat's private storage directly: `admin-service.ts`
+hardcodes `/home/tim/.config/codex-chat/env` and merges the file format itself
+(`env-file.ts`). That couples Brain to another repo's on-disk format — the kind of
+boundary violation Brain's own README forbids — and assumes co-location, blocking a
+future remote Brain. Replace it:
+
+- **codex-chat** adds a config-management command on its existing local IPC socket
+  (`LocalIpcServer`, `src/ipc.ts`): `set-config { entries }` → validates against
+  codex-chat's own schema (`config.ts`), persists atomically to its own env store,
+  and returns `{ ok, fieldErrors?, restartRequired }`. Secrets transit the local
+  socket write-only and are never returned.
+- **Auth caveat:** the IPC socket currently has **no authentication** (socket file
+  permissions only), and the enforcement plan's Phase 6 mandates token-mapped IPC
+  auth. The config command must land behind that IPC authentication (or, at
+  minimum, strict socket ownership/permissions until Phase 6 lands) — a privileged
+  config writer on an unauthenticated socket would be a regression.
+- **Brain** calls this interface from `POST /api/admin/brain/codex-chat/env` (and
+  the model/OpenRouter writers) instead of touching the file. Brain still owns
+  restart via the existing operation path; the interface contract is "persist +
+  report restart-needed," since env changes only take effect on restart anyway.
+- **Direct-disk write is retained as a bootstrap/fallback only** — codex-chat can't
+  persist its own config when it isn't running yet. Clearly marked, not the
+  default.
+- Local IPC is deliberately preferred over a new HTTP route: codex-chat's
+  `ApiGateway` refuses non-loopback binding and is browser/Slack-facing; a
+  privileged config endpoint there would need new server-to-server auth. IPC is
+  the existing same-host privileged channel.
+- Sequence this *after* the core §6.1–6.5 work — it's a real cross-repo change,
+  not free, and the direct-disk path keeps working meanwhile.
 
 ### 6.5 Capabilities API (Brain — critical, ASAP)
 
@@ -421,8 +460,10 @@ the §6.5 rails.
 4. **Frontend:** new React/Vite app with Clerk auth at a parallel path
    (`/admin-v2`): Home + Settings first, then Setup, Users, Operations. Old console
    remains the default. Playwright smoke extends to the new app.
-5. **codex-chat:** §6.3 structured logging + agent tail endpoint (its own commit in
-   that repo; `pnpm test` + build there); remove stale `dist/admin-*` artifacts.
+5. **codex-chat:** §6.3 structured logging + agent tail endpoint, and §6.7 IPC
+   config command behind IPC auth (its own commits in that repo; `pnpm test` +
+   build there); remove stale `dist/admin-*` artifacts. Brain then reroutes env
+   writes to the IPC path, keeping direct-disk as the marked bootstrap fallback.
    Brain canary system still present (dual-write period).
 6. **Verify:** admin uses `/admin-v2` exclusively for a period; confirm every
    retained workflow (setup, secret write, restart, grant change with impact
@@ -445,7 +486,10 @@ These keep the console safe and maintainable as it grows to N users:
    (last-known-good retained). A write can never leave the store in a state that
    fail-closes the assistant.
 4. Secrets are write-only end to end: never echoed by the API, never prefilled,
-   never logged.
+   never logged — including across the §6.7 IPC boundary.
+5. codex-chat owns its own config/env and the capability schema; Brain
+   orchestrates, it does not reach into codex-chat's private storage (the marked
+   §6.7 bootstrap fallback excepted).
 
 ## 10. Out of scope (explicitly)
 
