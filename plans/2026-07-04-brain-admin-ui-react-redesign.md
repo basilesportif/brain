@@ -7,8 +7,9 @@ Status: plan; not implemented.
 
 Every implementation part of this plan is executed by a dispatched **Opus agent
 running at high reasoning effort**, one part at a time, scoped to a single
-sequencing step (§8) or a coherent slice of one. **Fable supervises**: it writes
-each dispatch brief, then reviews the resulting diff itself (correctness,
+sequencing step (§8) or a coherent slice of one. **Fable supervises and is the
+code reviewer**: it writes each dispatch brief, and after Opus finishes it runs
+a formal code review of the resulting diff (correctness, security/secret-echo,
 adherence to this plan's invariants in §9, tests, and the fail-closed safety
 rails in §6.5) before the work is committed. Fable fixes or re-dispatches
 anything the review rejects; nothing lands unreviewed. The same model applies to
