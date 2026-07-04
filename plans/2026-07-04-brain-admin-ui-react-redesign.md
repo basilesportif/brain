@@ -15,6 +15,17 @@ anything the review rejects; nothing lands unreviewed. The same model applies to
 the codex-chat-side steps (§6.3, §6.7). Progress is tracked with checkboxes
 added per step as work starts, so a crashed or limit-capped session can resume
 without repeating work.
+
+### Progress (checkboxes are the source of truth for resume)
+
+- [ ] Step 1 — Brain backend: §6.1 status, §6.2 setup state, §6.4 env schema + validated writes
+- [ ] Step 2 — Brain backend: §6.5 reads (summary, catalog, users, paginated audit, dry-run authorize)
+- [ ] Step 3 — Brain backend: §6.5 writes (store migration + backup, grant/identity mutations, impact preview, audit events)
+- [ ] Step 4 — Frontend: React/Vite app at `/admin-v2` (Home + Settings, then Setup, Users, Operations)
+- [ ] Step 5 — codex-chat: §6.3 structured logging + agent tail, §6.7 IPC config command; Brain reroutes env writes
+- [ ] Step 6 — Verify: all retained workflows end-to-end against live enforcement
+- [ ] Step 7 — Cut over `/admin` to the new app
+- [ ] Step 8 — Remove old console, canary store/endpoints, stale placeholder types
 Supersedes the UI direction of `plans/2026-06-27-brain-admin-ui-redesign.md` (that
 plan's implemented server-rendered console is the starting point being replaced).
 Security boundaries and write-only/presence-only semantics from that plan and
