@@ -2,6 +2,19 @@
 
 Date: 2026-07-04
 Status: plan; not implemented.
+
+## Execution model (how this plan is implemented)
+
+Every implementation part of this plan is executed by a dispatched **Opus agent
+running at high reasoning effort**, one part at a time, scoped to a single
+sequencing step (§8) or a coherent slice of one. **Fable supervises**: it writes
+each dispatch brief, then reviews the resulting diff itself (correctness,
+adherence to this plan's invariants in §9, tests, and the fail-closed safety
+rails in §6.5) before the work is committed. Fable fixes or re-dispatches
+anything the review rejects; nothing lands unreviewed. The same model applies to
+the codex-chat-side steps (§6.3, §6.7). Progress is tracked with checkboxes
+added per step as work starts, so a crashed or limit-capped session can resume
+without repeating work.
 Supersedes the UI direction of `plans/2026-06-27-brain-admin-ui-redesign.md` (that
 plan's implemented server-rendered console is the starting point being replaced).
 Security boundaries and write-only/presence-only semantics from that plan and
