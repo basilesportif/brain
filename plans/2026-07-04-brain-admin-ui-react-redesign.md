@@ -400,7 +400,9 @@ back up the pre-migration store.
   after a change. Highest-value single addition for operating a fail-closed
   system, and cheap because the decision logic exists.
 - **Refuse dangerous writes:** reject any write that would leave the store
-  schema-invalid; surface store-unreachable as an error, never a silent success.
+  schema-invalid or would self-lock-out the admin (revoking the admin's own
+  capability-admin access); surface store-unreachable as an error, never a
+  silent success.
   Append-only capability audit events for every mutation
   (`capability.grant.applied`, `capability.grant.revoked`, `identity.link.*` —
   vocabulary already defined in `AUDIT_EVENT_TYPES`).
