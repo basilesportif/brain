@@ -171,7 +171,7 @@ export interface CapabilityGrant {
   revokedAt?: string;
   status: "active" | "revoked" | "expired" | "example";
   reason: string;
-  enforcement: "non_enforcing";
+  enforcement: "enforcing";
 }
 
 export interface CapabilityAuditEventType {
@@ -242,7 +242,7 @@ export interface CapabilityEffectiveSubject {
     allCapabilities: boolean;
     allActiveCapabilities: boolean;
     bundles: string[];
-    enforcement: "non_enforcing";
+    enforcement: "enforcing";
   };
 }
 
@@ -459,7 +459,7 @@ const catalogGroups = [
   group({
     id: "slack",
     label: "Slack",
-    description: "Slack source-context and output-target capabilities. This catalog is observational only; codex-chat runtime authorization is not connected yet.",
+    description: "Slack source-context and output-target capabilities. codex-chat runtime authorization reads the Brain capability store for enforced decisions.",
     status: "active",
     resourceSelectors: slackSelectors,
     children: [
@@ -539,7 +539,7 @@ const AUDIT_EVENT_TYPES: CapabilityAuditEventType[] = [
   },
   {
     type: "capability.grant.proposed",
-    description: "A non-enforcing grant proposal was drafted for admin review.",
+    description: "An enforcing grant proposal was drafted for admin review.",
     decisionValues: ["proposed"],
   },
   {
@@ -554,8 +554,8 @@ const AUDIT_EVENT_TYPES: CapabilityAuditEventType[] = [
   },
   {
     type: "identity.link.seeded",
-    description: "A person/external identity link was seeded or migrated with proof metadata; non-enforcing in this slice.",
-    decisionValues: ["not_enforced", "linked"],
+    description: "A person/external identity link was seeded or migrated with proof metadata; enforcing in this slice.",
+    decisionValues: ["enforced", "linked"],
   },
   {
     type: "identity.proof.observed",
@@ -564,8 +564,8 @@ const AUDIT_EVENT_TYPES: CapabilityAuditEventType[] = [
   },
   {
     type: "capability.bundle.granted",
-    description: "A non-enforcing bundle grant was seeded or applied; effective view expands it into ordinary catalog capabilities.",
-    decisionValues: ["granted", "not_enforced"],
+    description: "An enforcing bundle grant was seeded or applied; effective view expands it into ordinary catalog capabilities.",
+    decisionValues: ["granted", "enforced"],
   },
   {
     type: "capability.check.observed",
@@ -613,7 +613,7 @@ export async function capabilityAdminSummary(options: CapabilityAdminSummaryOpti
     schemaVersion: 2,
     source: "brain-private-file",
     path: storePath,
-    values: "identity/capability foundation store; writes and runtime enforcement disabled; no secrets, tokens, message bodies, or runtime authorization decisions",
+    values: "identity/capability foundation store; writes disabled; runtime enforcement reads this store; no secrets, tokens, or message bodies",
     mode: "identity_capability_foundation",
     writesEnabled: false,
     enforcement: {
@@ -729,7 +729,7 @@ function defaultCapabilityStore(auditLogPath: string, observedSlack: ObservedSla
       source: "admin_seed",
       identityIds: identitySeed.externalIdentities.filter((identity) => identity.personId === TIM_PERSON_ID).map((identity) => identity.id),
       subjectIds: [TIM_SUBJECT_ID],
-      notes: ["Seeded as the owner/admin person for the non-enforcing Phase 5 identity/capability foundation."],
+      notes: ["Seeded as the owner/admin person for the enforcing Phase 5 identity/capability foundation."],
       createdAt: SEED_TIME,
       updatedAt: SEED_TIME,
     } satisfies CapabilityPerson,
@@ -800,8 +800,8 @@ function defaultCapabilityStore(auditLogPath: string, observedSlack: ObservedSla
     grants: defaultCapabilityGrants(),
     audit: defaultAuditShape(auditLogPath),
     notes: [
-      "This Brain-local private store is the non-enforcing Phase 5 foundation for unified people, external identities, capabilities, grants, proofs, and audit shape.",
-      "Grant/link writes are disabled; seed grants are non-enforcing and runtime authorization remains disconnected.",
+      "This Brain-local private store is the enforcing Phase 5 foundation for unified people, external identities, capabilities, grants, proofs, and audit shape.",
+      "Grant/link writes are disabled here; seed grants are enforcing and runtime authorization reads this store.",
       "Tim owner/all seed is materialized as individual non-placeholder capability grants; generic project capabilities are broadly scoped with resource id project:* rather than per-project capability ids.",
       "Do not store tokens, secrets, Telegram or Slack message bodies, health details, or financial transaction payloads here.",
     ],
@@ -1017,7 +1017,7 @@ function defaultGrantBundles(): CapabilityGrantBundle[] {
     {
       id: OWNER_ALL_BUNDLE_ID,
       label: "Owner / all capabilities",
-      description: "Non-enforcing owner bundle catalog convenience. Tim's seed materializes this as individual active capability grants so review UIs do not hide access behind one opaque bundle row.",
+      description: "Enforcing owner bundle catalog convenience. Tim's seed materializes this as individual active capability grants so review UIs do not hide access behind one opaque bundle row.",
       status: "active",
       includes: { groupIds: activeCatalogGroupIds(CAPABILITY_CATALOG), capabilityIds: activeCatalogCapabilityIds(CAPABILITY_CATALOG) },
       semantics: {
@@ -1045,7 +1045,7 @@ function defaultCapabilityGrants(): CapabilityGrant[] {
       grantedAt: SEED_TIME,
       status: "active",
       reason: "Seed grant that preserves the original top-level Projects group example semantics.",
-      enforcement: "non_enforcing",
+      enforcement: "enforcing",
     },
     {
       id: "grant_seed_current_admin_catalog_read",
@@ -1059,7 +1059,7 @@ function defaultCapabilityGrants(): CapabilityGrant[] {
       grantedAt: SEED_TIME,
       status: "active",
       reason: "Seed child-specific grant for reading the local capability catalog.",
-      enforcement: "non_enforcing",
+      enforcement: "enforcing",
     },
     {
       id: "grant_seed_slack_channel_read_example",
@@ -1073,7 +1073,7 @@ function defaultCapabilityGrants(): CapabilityGrant[] {
       grantedAt: SEED_TIME,
       status: "example",
       reason: "Example channel-scoped Slack grant shape only; not used by codex-chat runtime enforcement.",
-      enforcement: "non_enforcing",
+      enforcement: "enforcing",
     },
   ];
 }
@@ -1092,8 +1092,8 @@ function timOwnerCapabilityGrants(): CapabilityGrant[] {
       grantedBy: "system:admin_seed",
       grantedAt: SEED_TIME,
       status: "active" as const,
-      reason: "Tim owner/all seed expanded into this individual non-placeholder capability grant for transparent review; runtime enforcement remains disconnected.",
-      enforcement: "non_enforcing" as const,
+      reason: "Tim owner/all seed expanded into this individual non-placeholder capability grant for transparent review; runtime enforcement reads this store.",
+      enforcement: "enforcing" as const,
     }));
 }
 
@@ -1140,8 +1140,8 @@ function defaultAuditShape(auditLogPath: string): CapabilityAuditShape {
       capabilityId: OWNER_ALL_BUNDLE_ID,
       resource: { kind: "project", id: "project:*", selectors: { projectId: "*", resourceScope: "project:*" } },
       action: "identity.link.seeded",
-      decision: "not_enforced",
-      reason: "admin-seeded non-enforcing identity/capability foundation",
+      decision: "enforced",
+      reason: "admin-seeded enforcing identity/capability foundation",
       correlationId: "corr_phase5_identity_seed_example",
       redaction: { secretValuesLogged: false, payloadBodiesLogged: false },
     },
@@ -1484,7 +1484,7 @@ function normalizeGrants(value: unknown, fallback: CapabilityGrant[]): Capabilit
       grantedAt: sanitizeIso(item.grantedAt, SEED_TIME),
       status: sanitizeGrantStatus(item.status),
       reason: sanitizeText(item.reason, "", 500),
-      enforcement: "non_enforcing",
+      enforcement: "enforcing",
     };
     const bundleId = sanitizeBundleId(item.bundleId);
     if (bundleId) grant.bundleId = bundleId;
@@ -1633,7 +1633,7 @@ function buildEffectiveForSubject(subjectId: string, grants: CapabilityGrant[], 
       allCapabilities: effectiveCapabilityCount === allCapabilityIds.length,
       allActiveCapabilities: effectiveActiveCapabilityCount === activeCapabilityIds.length,
       bundles: [...directBundleIds].sort(),
-      enforcement: "non_enforcing",
+      enforcement: "enforcing",
     },
   };
 }
@@ -1734,7 +1734,7 @@ function defaultAdminWriteModel(): CapabilityAdminWriteModel {
     plannedEndpoints: [
       { method: "POST", path: "/api/admin/brain/capabilities/people", purpose: "Create a person/user with no runtime enforcement side effect." },
       { method: "POST", path: "/api/admin/brain/capabilities/identity-links", purpose: "Link an external Telegram/Slack/Clerk identity to a person with proof metadata." },
-      { method: "POST", path: "/api/admin/brain/capabilities/grants", purpose: "Apply a non-enforcing grant or bundle after explicit confirmation." },
+      { method: "POST", path: "/api/admin/brain/capabilities/grants", purpose: "Apply an enforcing grant or bundle after explicit confirmation." },
       { method: "DELETE", path: "/api/admin/brain/capabilities/grants/{grantId}", purpose: "Revoke or expire a grant with an append-only audit event." },
     ],
     mutationShapes: {

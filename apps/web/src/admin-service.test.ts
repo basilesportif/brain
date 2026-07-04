@@ -245,7 +245,7 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /id="cap-grants"/);
   assert.match(html, /id="cap-catalog"/);
   assert.match(html, /id="cap-audit"/);
-  assert.equal(html.includes("Counts and top facts for the non-enforcing capability foundation"), false);
+  assert.equal(html.includes("Counts and top facts for the enforcing capability foundation"), false);
   assert.equal(html.includes('data-compact-capabilities-overview="true"'), false);
   assert.equal(html.includes('cap-metric-people'), false);
   assert.match(html, /capSetNavLabel\('cap-users','Users \('/);
@@ -253,7 +253,7 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /Coverage subject/);
   assert.match(html, /Compact people rows/);
   assert.match(html, /External identity facts/);
-  assert.match(html, /Non-enforcing grants grouped by subject\/person/);
+  assert.match(html, /Enforcing grants grouped by subject\/person/);
   assert.match(html, /Capability groups are collapsed by default/);
   assert.match(html, /data-compact-capability-catalog/);
   assert.match(html, /data-capability-group/);
@@ -264,8 +264,8 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /Filter actor \(placeholder\)/);
   assert.match(html, /Dense audit schema\/feed preview/);
   assert.match(html, /data-compact-audit/);
-  assert.match(html, /Read-only \/ non-enforcing/);
-  assert.match(html, /codex-chat auth unchanged/);
+  assert.match(html, /Read-only \/ enforcing/);
+  assert.match(html, /codex-chat auth enforced/);
   assert.equal(html.includes("Users / People and communication identities"), false);
   assert.equal(html.includes("Future admin write API shape"), false);
   assert.match(html, /Runtime Config/);
@@ -423,10 +423,10 @@ test("brain admin capabilities API exposes v2 identities, grouped catalog, grant
       assert.equal(timGrants.length, payload.catalog.counts.activeCapabilities);
       assert.equal(timGrants.some((grant) => grant.id === "grant_seed_tim_owner_all" || grant.grantKind === "bundle" || grant.capabilityId === "bundle.owner.all"), false);
       assert.ok(timGrants.some((grant) => grant.id === "grant_seed_tim_owner_projects_read" && grant.capabilityId === "projects.read" && grant.resource.id === "project:*"));
-      assert.ok(timGrants.some((grant) => grant.id === "grant_seed_tim_owner_projects_files_write" && grant.capabilityId === "projects.files.write" && grant.grantKind === "capability" && grant.enforcement === "non_enforcing"));
+      assert.ok(timGrants.some((grant) => grant.id === "grant_seed_tim_owner_projects_files_write" && grant.capabilityId === "projects.files.write" && grant.grantKind === "capability" && grant.enforcement === "enforcing"));
       assert.equal(timGrants.some((grant) => grant.capabilityId === "projects.project.read" || grant.capabilityId === "projects.project.write"), false);
       assert.equal(timGrants.some((grant) => grant.capabilityId === "finance.summary.read" || grant.capabilityId === "health.record.read"), false);
-      assert.ok(payload.grants.some((grant) => grant.id === "grant_seed_current_admin_projects_group" && grant.capabilityId === "projects" && grant.grantKind === "group" && grant.enforcement === "non_enforcing"));
+      assert.ok(payload.grants.some((grant) => grant.id === "grant_seed_current_admin_projects_group" && grant.capabilityId === "projects" && grant.grantKind === "group" && grant.enforcement === "enforcing"));
       assert.ok(payload.grants.some((grant) => grant.capabilityId === "slack.channel.read" && grant.grantKind === "capability"));
 
       const adminEffective = payload.effectiveBySubject["brain-admin:current"];

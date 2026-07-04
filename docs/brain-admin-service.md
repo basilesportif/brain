@@ -64,10 +64,10 @@ Routes:
 - `GET /api/admin/brain/slack/telemetry` — read-only Slack runtime telemetry summary from codex-chat state; redacted metadata only.
 - `GET /api/admin/brain/slack/manifest` — render the codex-chat-owned Slack manifest contract with Brain's public Events URL.
 - `GET /api/admin/brain/slack/manifest/download` — download the rendered manifest JSON.
-- `GET /api/admin/brain/capabilities` — non-enforcing Phase 5 v2 capability
+- `GET /api/admin/brain/capabilities` — enforcing Phase 5 v2 capability
   foundation: people/users, Telegram/Slack identities, proofs, channels,
   private local subject/bundle/grant store metadata, group/bundle effective
-  view, and audit event schema. No grant/link writes or runtime enforcement.
+  view, and audit event schema. No grant/link writes are exposed by this route; runtime enforcement reads this store.
 
 The service fails closed when Clerk keys or `CLERK_ALLOWED_EMAILS` are missing.
 Env values are write-only in API responses and audit records; responses expose
@@ -205,11 +205,11 @@ Implemented in this slice:
   `projects.artifacts.publish` with `resource.id: "project:*"` for all
   projects or `resource.id: "project:<projectId>"` for one project. Do not
   generate per-project capability IDs.
-- Non-enforcing owner/all bundle grant for Tim. The effective view expands the
+- Enforcing owner/all bundle grant for Tim. The effective view expands the
   bundle into ordinary group/child capabilities; it is not a runtime bypass.
-- Non-enforcing seed grants only. The UI is read-only; there is no POST grant or
-  identity-link route, no live Telegram/Slack behavior change, and no
-  `codex-chat` authorization hook.
+- Enforcing seed grants only. The UI is read-only; there is no POST grant or
+  identity-link route exposed here; runtime Telegram/Slack authorization reads
+  this store.
 - Audit event schema persisted in the private store, including
   `identity.link.seeded`, `identity.proof.observed`,
   `capability.bundle.granted`, `capability.catalog.viewed`,
