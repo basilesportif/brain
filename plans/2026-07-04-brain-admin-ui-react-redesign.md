@@ -21,7 +21,7 @@ without repeating work.
 
 - [x] Step 1 — Brain backend: §6.1 status, §6.2 setup state, §6.4 env schema + validated writes (Opus-implemented, Fable-reviewed: 10 review findings fixed; env-write approval gate retained until step 4)
 - [x] Step 2 — Brain backend: §6.5 reads (summary, catalog, users, paginated audit, dry-run authorize) (Opus-implemented, Fable-reviewed: 10 findings fixed incl. anonymized synthetic fixture, dry-run parity, fail-closed store load, anchored audit cursor; dry-run verified against 4 real logged decisions)
-- [ ] Step 3 — Brain backend: §6.5 writes (store migration + backup, grant/identity mutations, impact preview, audit events)
+- [~] Step 3 — Brain backend: §6.5 writes (store migration + backup, grant/identity mutations, impact preview, audit events) — IN FLIGHT 2026-07-05: Opus implementing in this worktree (uncommitted working-tree changes = its output; Workflow run wf_88cb9ffd-8f3). Recovery if the session dies mid-step: the dirty working tree IS the work — inspect `git status`/`git diff`, read the agent report in `~/.claude/projects/-home-tim/77eaeb13-5b01-47ab-a93c-0113ec69c5b0/subagents/workflows/wf_88cb9ffd-8f3/journal.jsonl`, then run the Fable review cycle (code-review high on the diff → fix round → verify: `pnpm --filter @brain/web build && pnpm --filter @brain/web test`, 44 tests baseline before step 3) before committing. Live store /home/tim/.brain must never be touched by tests.
 - [ ] Step 4 — Frontend: React/Vite app at `/admin-v2` (Home + Settings, then Setup, Users, Operations)
 - [ ] Step 5 — codex-chat: §6.3 structured logging + agent tail, §6.7 IPC config command; Brain reroutes env writes
 - [ ] Step 6 — Verify: all retained workflows end-to-end against live enforcement
