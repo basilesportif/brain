@@ -9,6 +9,7 @@ import { renderBrainAdminDeniedPage, renderBrainAdminPage, renderBrainAdminSignI
 import { createBrainAdminServer, type BrainAdminServiceConfig, type BrainAdminServiceDeps } from "./admin-service.js";
 import { mergeEnvFileText } from "./env-file.js";
 import { LIVE_CAPABILITY_STORE_JSON } from "./capability-store.fixture.js";
+import { assertValidStore, CapabilityWriteError, commitMutation, migrateCapabilityStore, planMigration } from "./capability-store-write.js";
 
 async function writeJson(filePath: string, value: unknown): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true });
@@ -1670,6 +1671,596 @@ test("brain audit endpoint merges, filters, paginates, and never echoes secrets"
       assert.equal(raw.includes(fakeAppToken), false);
       assert.match(raw, /redacted-slack-token/);
     });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// --- §6.5 WRITES: mutations, impact preview, refusal rails, migration --------
+
+async function jsonRequest(baseUrl: string, method: string, route: string, body?: unknown): Promise<{ status: number; payload: any }> {
+  const res = await fetch(`${baseUrl}${route}`, {
+    method,
+    headers: { ...authHeaders(), "content-type": "application/json" },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  return { status: res.status, payload: await res.json() };
+}
+
+// A minimal single-admin store: one person with a linked Telegram identity whose
+// primary subject holds the sole capability-admin grant. Used for self-lockout.
+function soleAdminStore(): string {
+  return JSON.stringify({
+    schemaVersion: 2,
+    people: [{ id: "person_admin", displayName: "Admin", status: "active", personType: "human", primarySubjectId: "person:person_admin", identityIds: ["identity_telegram_900000009"], subjectIds: ["person:person_admin"] }],
+    externalIdentities: [{ id: "identity_telegram_900000009", provider: "telegram", providerUserId: "900000009", personId: "person_admin", status: "linked" }],
+    identityProofs: [],
+    subjects: [{ id: "person:person_admin", personId: "person_admin", kind: "person", status: "active" }],
+    grants: [{ id: "grant_admin_capadmin", subjectId: "person:person_admin", capabilityId: "capability.catalog.read", grantKind: "capability", resource: { selectors: {} }, actions: ["*"], status: "active", enforcement: "enforcing" }],
+  });
+}
+
+// A placeholder-laden store modeled on the plan §2 seed placeholders that the
+// migration must remove; plus one non-enforcing grant to convert. The linked
+// telegram identity 900000001 (7 zeros, not the exact zeroed placeholder token)
+// and person:person_alpha are REAL and must be retained. person_alpha holds a
+// capability-admin grant so the migrated store keeps an effective admin (the
+// migration self-lockout rail). system:codex-chat-runtime is NOT a zeroed-seed
+// placeholder and holds two ACTIVE enforcing grants the running assistant
+// depends on: both the subject and those grants must survive migration.
+function placeholderStore(): string {
+  return JSON.stringify({
+    schemaVersion: 2,
+    people: [{ id: "person_alpha", displayName: "Alpha", status: "active", personType: "human", primarySubjectId: "person:person_alpha", identityIds: ["identity_telegram_900000001", "identity_addable_x"], subjectIds: ["person:person_alpha"] }],
+    externalIdentities: [
+      { id: "identity_telegram_900000001", provider: "telegram", providerUserId: "900000001", personId: "person_alpha", status: "linked" },
+      { id: "identity_addable_x", provider: "slack", providerUserId: "U00000000", providerTeamId: "T00000000", status: "addable_placeholder" },
+    ],
+    identityProofs: [],
+    subjects: [
+      { id: "person:person_alpha", personId: "person_alpha", kind: "person", status: "active" },
+      { id: "slack:workspace:T00000000", kind: "slack_workspace" },
+      { id: "slack:user:T00000000:U00000000", kind: "slack_user" },
+      { id: "slack:channel:T00000000:C00000000", kind: "slack_channel" },
+      { id: "system:codex-chat-runtime", kind: "system" },
+    ],
+    grants: [
+      { id: "g_real", subjectId: "person:person_alpha", capabilityId: "projects.read", grantKind: "capability", resource: { selectors: {} }, actions: ["read"], status: "active", enforcement: "non_enforcing" },
+      { id: "g_admin", subjectId: "person:person_alpha", capabilityId: "capability.catalog.read", grantKind: "capability", resource: { selectors: {} }, actions: ["*"], status: "active", enforcement: "enforcing" },
+      { id: "g_example", subjectId: "slack:channel:T00000000:C00000000", capabilityId: "slack.channel.read", grantKind: "capability", resource: { selectors: {} }, actions: ["read"], status: "example", enforcement: "non_enforcing" },
+      { id: "g_runtime", subjectId: "system:codex-chat-runtime", capabilityId: "system.callback.enqueue", grantKind: "capability", resource: { selectors: {} }, actions: ["enqueue"], status: "active", enforcement: "enforcing" },
+      { id: "g_runtime_deliver", subjectId: "system:codex-chat-runtime", capabilityId: "subagents.result.deliver", grantKind: "capability", resource: { selectors: {} }, actions: ["*"], status: "active", enforcement: "enforcing" },
+    ],
+  });
+}
+
+test("brain capability writes round-trip create/link/grant/revoke visible in reads and dry-run", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-writes-"));
+  try {
+    await writeLiveStore(root);
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      // Create a person.
+      const created = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users", { displayName: "Beta Operator" });
+      assert.equal(created.status, 200);
+      const personId = created.payload.detail.personId as string;
+      assert.match(personId, /^person_/);
+
+      // Link a Telegram identity (synthetic id).
+      const linked = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/identities`, { provider: "telegram", externalId: "900000123" });
+      assert.equal(linked.status, 200);
+      assert.equal(linked.payload.detail.identityId, "identity_telegram_900000123");
+
+      // Grant a catalog GROUP (expands to children server-side).
+      const grantGroup = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/grants`, { groupId: "crm" });
+      assert.equal(grantGroup.status, 200);
+      assert.equal(grantGroup.payload.detail.expandedFromGroup, true);
+      assert.ok(grantGroup.payload.detail.grantIds.length >= 3);
+      // Impact preview shows the newly-allowed crm operations on the telegram surface.
+      assert.ok(grantGroup.payload.impact.summary.newlyAllowedCount > 0);
+
+      // Grant an INDIVIDUAL capability.
+      const grantOne = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/grants`, { capabilityId: "todos.item.read" });
+      assert.equal(grantOne.status, 200);
+      assert.equal(grantOne.payload.detail.expandedFromGroup, false);
+      assert.equal(grantOne.payload.detail.grantIds.length, 1);
+
+      // GET /users reflects the new person, identity, and granted groups.
+      const users = (await (await fetch(`${baseUrl}/api/admin/brain/users`, { headers: authHeaders() })).json()) as any;
+      const beta = users.people.find((p: any) => p.id === personId);
+      assert.ok(beta, "created person present");
+      assert.deepEqual(beta.identities.map((i: any) => i.provider), ["telegram"]);
+      assert.equal(beta.grants.byGroup.find((g: any) => g.id === "crm")?.granted, true);
+      assert.equal(beta.grants.byGroup.find((g: any) => g.id === "todos")?.granted, true);
+
+      // Dry-run authorize confirms the grant takes effect for the linked surface.
+      const check = await jsonRequest(baseUrl, "POST", "/api/admin/brain/capabilities/check", { actorId: "telegram:user:900000123", operation: "crm.contact.read", resource: {} });
+      assert.equal(check.payload.allowed, true);
+
+      // Revoke one crm grant (status change, not deletion) and confirm denial.
+      const grantId = grantGroup.payload.detail.grantIds[0] as string;
+      const capabilityId = grantGroup.payload.detail.grantedCapabilityIds[0] as string;
+      const revoke = await jsonRequest(baseUrl, "DELETE", `/api/admin/brain/users/${personId}/grants/${grantId}`);
+      assert.equal(revoke.status, 200);
+      assert.equal(revoke.payload.impact.summary.newlyDeniedCount > 0, true);
+      const afterRevoke = await jsonRequest(baseUrl, "POST", "/api/admin/brain/capabilities/check", { actorId: "telegram:user:900000123", operation: capabilityId, resource: {} });
+      assert.equal(afterRevoke.payload.allowed, false);
+      // History preserved: the grant row survives with status revoked.
+      const stored = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8"));
+      const revokedGrant = stored.grants.find((g: any) => g.id === grantId);
+      assert.ok(revokedGrant, "revoked grant row retained");
+      assert.equal(revokedGrant.status, "revoked");
+      assert.ok(revokedGrant.revokedAt);
+
+      // Unlink the identity denies that surface entirely.
+      const unlink = await jsonRequest(baseUrl, "DELETE", `/api/admin/brain/users/${personId}/identities/identity_telegram_900000123`);
+      assert.equal(unlink.status, 200);
+      const afterUnlink = await jsonRequest(baseUrl, "POST", "/api/admin/brain/capabilities/check", { actorId: "telegram:user:900000123", operation: "todos.item.read", resource: {} });
+      assert.equal(afterUnlink.payload.allowed, false);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain capability preview returns diffs without writing (store byte-identical)", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-preview-"));
+  try {
+    await writeLiveStore(root);
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const created = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users", { displayName: "Preview Person" });
+      const personId = created.payload.detail.personId as string;
+      await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/identities`, { provider: "telegram", externalId: "900000200" });
+
+      const before = await readFile(path.join(root, "capabilities.json"));
+      const preview = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/grants?preview=true`, { groupId: "calendar" });
+      assert.equal(preview.status, 200);
+      assert.equal(preview.payload.preview, true);
+      assert.ok(preview.payload.impact.summary.newlyAllowedCount > 0);
+      // Body-flag form also previews without writing.
+      const preview2 = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/grants`, { capabilityId: "calendar.event.read", preview: true });
+      assert.equal(preview2.payload.preview, true);
+
+      const after = await readFile(path.join(root, "capabilities.json"));
+      assert.ok(before.equals(after), "store bytes unchanged after preview");
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain capability write refuses self-lockout, concurrent modification, and unreachable store", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-refuse-"));
+  try {
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      // Store unreachable (no file yet) => 503, never a silent success.
+      const noStore = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users", { displayName: "X" });
+      assert.equal(noStore.status, 503);
+      assert.equal(noStore.payload.error, "capability_store_unavailable");
+
+      await writeFile(path.join(root, "capabilities.json"), soleAdminStore());
+
+      // Self-lockout: revoking the sole capability-admin grant is refused.
+      const lockGrant = await jsonRequest(baseUrl, "DELETE", "/api/admin/brain/users/person_admin/grants/grant_admin_capadmin");
+      assert.equal(lockGrant.status, 422);
+      assert.equal(lockGrant.payload.error, "self_lockout");
+
+      // Self-lockout: unlinking the admin's last identity is refused.
+      const lockIdentity = await jsonRequest(baseUrl, "DELETE", "/api/admin/brain/users/person_admin/identities/identity_telegram_900000009");
+      assert.equal(lockIdentity.status, 422);
+      assert.equal(lockIdentity.payload.error, "self_lockout");
+
+      // Neither refusal wrote: the store is untouched.
+      const stored = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8"));
+      assert.equal(stored.grants[0].status, "active");
+
+      // Concurrent modification: a stale expected hash is a retryable 409.
+      const conflict = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/person_admin/grants", { capabilityId: "todos.item.read", expectedStoreHash: "deadbeef" });
+      assert.equal(conflict.status, 409);
+      assert.equal(conflict.payload.error, "store_conflict");
+      assert.equal(conflict.payload.retryable, true);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain capability write refuses a schema-invalid resulting store before persisting", () => {
+  // A resulting store missing the required arrays fails-closed the assistant and
+  // must be refused by the write path's re-validation (invariant §9.3).
+  assert.throws(
+    () => assertValidStore({ people: [], externalIdentities: [], subjects: [] }),
+    (error: unknown) => error instanceof CapabilityWriteError && error.code === "store_would_be_invalid" && error.status === 422,
+  );
+});
+
+test("brain capability write retains last-known-good and timestamped backups", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-backup-"));
+  try {
+    await writeLiveStore(root);
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const created = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users", { displayName: "Backup Person" });
+      const personId = created.payload.detail.personId as string;
+      await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/grants`, { capabilityId: "todos.item.read" });
+
+      const lkg = await stat(path.join(root, "capabilities.json.lkg.json"));
+      assert.ok(lkg.isFile(), "last-known-good copy retained");
+      const backups = (await (await import("node:fs/promises")).readdir(root)).filter((name) => name.startsWith("capabilities.json.") && name.endsWith(".bak"));
+      assert.ok(backups.length >= 1, "timestamped backup retained");
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain capability write appends audit events into the merged audit feed without secrets", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-writeaudit-"));
+  try {
+    await writeLiveStore(root);
+    // A token-shaped literal assembled at runtime; it must never appear anywhere.
+    const fakeToken = ["xoxb", "9990001", "SYNTHETICSECRET"].join("-");
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const created = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users", { displayName: "Audit Person" });
+      const personId = created.payload.detail.personId as string;
+      await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/identities`, { provider: "telegram", externalId: "900000300" });
+      await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/grants`, { groupId: "crm" });
+
+      const feed = (await (await fetch(`${baseUrl}/api/admin/brain/audit?type=capability&limit=50`, { headers: authHeaders() })).json()) as any;
+      const actions = feed.rows.map((row: any) => row.action);
+      assert.ok(actions.includes("person.created"), "person.created event present");
+      assert.ok(actions.includes("identity.link.added"), "identity.link.added event present");
+      assert.ok(actions.includes("capability.grant.applied"), "capability.grant.applied event present");
+      const grantRow = feed.rows.find((row: any) => row.action === "capability.grant.applied");
+      assert.equal(grantRow.actor, "tim.galebach@gmail.com");
+      assert.equal(grantRow.type, "capability");
+
+      // The capability audit JSONL never contains a secret-shaped value.
+      const auditText = await readFile(path.join(root, "capability-audit.jsonl"), "utf8");
+      assert.equal(auditText.includes(fakeToken), false);
+      assert.equal(/xox[baprs]-/.test(auditText), false);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain capability store migration cleans placeholders, converts to enforcing, and is idempotent", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-migrate-"));
+  try {
+    const storePath = path.join(root, "capabilities.json");
+    await writeFile(storePath, placeholderStore());
+
+    // --dry-run computes changes but writes nothing.
+    const before = await readFile(storePath);
+    const dry = await migrateCapabilityStore({ storePath, dryRun: true });
+    assert.equal(dry.changed, true);
+    assert.ok(before.equals(await readFile(storePath)), "dry-run wrote nothing");
+
+    // Real migration removes the zeroed-seed slack placeholders and converts
+    // retained grants — but NEVER the codex-chat runtime subject or its active
+    // grants (its label says "placeholder" but the running assistant depends on
+    // its active enforcing grants).
+    const applied = await migrateCapabilityStore({ storePath });
+    assert.equal(applied.changed, true);
+    assert.deepEqual(applied.changes.removedSubjectIds.sort(), ["slack:channel:T00000000:C00000000", "slack:user:T00000000:U00000000", "slack:workspace:T00000000"]);
+    assert.equal(applied.changes.removedSubjectIds.includes("system:codex-chat-runtime"), false);
+    assert.deepEqual(applied.changes.removedIdentityIds, ["identity_addable_x"]);
+    assert.ok(applied.changes.removedGrantIds.includes("g_example"));
+    // The runtime subject's active grants are RETAINED (not cascade-deleted).
+    assert.equal(applied.changes.removedGrantIds.includes("g_runtime"), false);
+    assert.equal(applied.changes.removedGrantIds.includes("g_runtime_deliver"), false);
+    assert.deepEqual(applied.changes.convertedGrantIds, ["g_real"]);
+    assert.ok(applied.backup, "pre-migration backup written");
+
+    const migrated = JSON.parse(await readFile(storePath, "utf8"));
+    // Real synthetic data retained; placeholders gone; grant now enforcing.
+    assert.ok(migrated.people.find((p: any) => p.id === "person_alpha"));
+    assert.equal(migrated.people[0].identityIds.includes("identity_addable_x"), false);
+    assert.ok(migrated.externalIdentities.find((i: any) => i.id === "identity_telegram_900000001"));
+    // The codex-chat runtime subject and BOTH active enforcing grants survive.
+    assert.equal(migrated.subjects.some((s: any) => s.id === "system:codex-chat-runtime"), true);
+    const runtimeCallback = migrated.grants.find((g: any) => g.id === "g_runtime");
+    const runtimeDeliver = migrated.grants.find((g: any) => g.id === "g_runtime_deliver");
+    assert.ok(runtimeCallback && runtimeCallback.status === "active", "system.callback.enqueue grant retained");
+    assert.ok(runtimeDeliver && runtimeDeliver.status === "active", "subagents.result.deliver grant retained");
+    assert.equal(migrated.grants.find((g: any) => g.id === "g_real").enforcement, "enforcing");
+    // Migrated store stays canonical-schema valid.
+    assertValidStore(migrated);
+
+    // Second run is a no-op.
+    const again = await migrateCapabilityStore({ storePath });
+    assert.equal(again.changed, false);
+    assert.match(again.message, /nothing to do/);
+    // planMigration on the migrated store reports no changes.
+    const { changes } = planMigration(migrated);
+    assert.deepEqual(changes, { removedSubjectIds: [], removedGrantIds: [], removedIdentityIds: [], convertedGrantIds: [] });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Finding 1: a zeroed-seed slack subject that still holds an ACTIVE grant is a
+// live dependency, not a dead placeholder — it (and its grant) must be retained.
+test("brain migration retains a zeroed-seed subject that holds an active grant", () => {
+  const store = {
+    schemaVersion: 2,
+    people: [],
+    externalIdentities: [],
+    identityProofs: [],
+    subjects: [{ id: "slack:channel:T00000000:C00000000", kind: "slack_channel" }],
+    grants: [{ id: "g_live", subjectId: "slack:channel:T00000000:C00000000", capabilityId: "slack.channel.read", grantKind: "capability", resource: { selectors: { scope: "*" } }, actions: ["*"], status: "active", enforcement: "enforcing" }],
+  };
+  const { store: migrated, changes } = planMigration(store as never);
+  assert.equal(changes.removedSubjectIds.includes("slack:channel:T00000000:C00000000"), false);
+  assert.equal(changes.removedGrantIds.includes("g_live"), false);
+  assert.ok(migrated.subjects?.some((s) => s.id === "slack:channel:T00000000:C00000000"));
+  assert.ok(migrated.grants?.some((g) => g.id === "g_live"));
+});
+
+// Finding 2: exact-token matching — a real identity whose id/providerUserId
+// merely CONTAINS eight consecutive zeros (as a substring of a longer number) is
+// never mistaken for the zeroed seed placeholder and must be retained.
+test("brain migration keeps real identities that only contain eight zeros as a substring", () => {
+  const store = {
+    schemaVersion: 2,
+    people: [{ id: "person_x", displayName: "X", status: "active", personType: "human", primarySubjectId: "person:x", subjectIds: ["person:x"], identityIds: ["identity_telegram_5000000003"] }],
+    externalIdentities: [
+      { id: "identity_telegram_5000000003", provider: "telegram", providerUserId: "5000000003", personId: "person_x", status: "linked" },
+    ],
+    identityProofs: [],
+    subjects: [{ id: "person:x", personId: "person_x", kind: "person", status: "active" }],
+    grants: [{ id: "g_conv", subjectId: "person:x", capabilityId: "projects.read", grantKind: "capability", resource: { selectors: { projectId: "*" } }, actions: ["*"], status: "active", enforcement: "non_enforcing" }],
+  };
+  // Sanity: the providerUserId really does contain the 8-zero substring the old
+  // /0{8}/ rule would have (wrongly) matched.
+  assert.match("5000000003", /0{8}/);
+  const { store: migrated, changes } = planMigration(store as never);
+  assert.deepEqual(changes.removedIdentityIds, []);
+  assert.ok(migrated.externalIdentities?.some((i) => i.id === "identity_telegram_5000000003"));
+});
+
+// Finding 3: the migration self-lockout rail. Removing a genuinely-placeholder
+// identity (exact zeroed token) that happens to be the admin's only linked
+// surface would strip the last effective capability-admin — refuse instead.
+function migrationLockoutStore(): string {
+  return JSON.stringify({
+    schemaVersion: 2,
+    people: [{ id: "person_admin", displayName: "Admin", status: "active", personType: "human", primarySubjectId: "person:person_admin", identityIds: ["identity_slack_T00000000_U00000000"], subjectIds: ["person:person_admin"] }],
+    externalIdentities: [
+      { id: "identity_slack_T00000000_U00000000", provider: "slack", providerUserId: "U00000000", providerTeamId: "T00000000", personId: "person_admin", status: "linked" },
+    ],
+    identityProofs: [],
+    subjects: [{ id: "person:person_admin", personId: "person_admin", kind: "person", status: "active" }],
+    grants: [{ id: "g_admin", subjectId: "person:person_admin", capabilityId: "capability.catalog.read", grantKind: "capability", resource: { selectors: {} }, actions: ["*"], status: "active", enforcement: "enforcing" }],
+  });
+}
+
+test("brain migration refuses to strip the last capability-admin (lockout rail)", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-migrate-lockout-"));
+  try {
+    const storePath = path.join(root, "capabilities.json");
+    await writeFile(storePath, migrationLockoutStore());
+    const before = await readFile(storePath);
+    // Dry-run reports the refusal too (throws -> the CLI exits non-zero).
+    await assert.rejects(
+      () => migrateCapabilityStore({ storePath, dryRun: true }),
+      (error: unknown) => error instanceof CapabilityWriteError && error.code === "migration_would_lock_out_admins" && error.status === 422,
+    );
+    await assert.rejects(
+      () => migrateCapabilityStore({ storePath }),
+      (error: unknown) => error instanceof CapabilityWriteError && error.code === "migration_would_lock_out_admins",
+    );
+    assert.ok(before.equals(await readFile(storePath)), "store untouched on refusal");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Finding 4: a default-created grant carries the broad selector template for the
+// capability's group, so a live request with concrete resource keys is
+// authorized; an explicit selectors object is preserved verbatim.
+test("brain grant defaults broad selectors that cover concrete resource keys; explicit selectors preserved", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-selectors-"));
+  try {
+    await writeLiveStore(root);
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const created = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users", { displayName: "Selector Person" });
+      const personId = created.payload.detail.personId as string;
+      const subjectId = created.payload.detail.subjectId as string;
+      await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/identities`, { provider: "telegram", externalId: "900000400" });
+      await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/grants`, { groupId: "crm" });
+
+      // A live-shaped request carrying concrete resource keys is authorized by
+      // the default template ({ scope: "*", contactId: "*" } covers both keys).
+      const check = await jsonRequest(baseUrl, "POST", "/api/admin/brain/capabilities/check", { actorId: "telegram:user:900000400", operation: "crm.contact.read", resource: { scope: "workspace", contactId: "c_123" } });
+      assert.equal(check.payload.allowed, true);
+
+      // The impact preview carries the fixed empty-resource caveat.
+      const preview = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/grants?preview=true`, { capabilityId: "todos.item.read" });
+      assert.match(preview.payload.impact.previewCaveat as string, /empty resource/);
+
+      // Explicit narrower selectors are stored verbatim.
+      const grantNarrow = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/grants`, { capabilityId: "calendar.event.read", selectors: { calendarId: "cal_1" } });
+      const narrowId = grantNarrow.payload.detail.grantIds[0] as string;
+      const stored = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8"));
+      const narrow = stored.grants.find((g: any) => g.id === narrowId);
+      assert.deepEqual(narrow.resource.selectors, { calendarId: "cal_1" });
+      // The default crm grant on this new subject stores the broad template.
+      const crmGrant = stored.grants.find((g: any) => g.subjectId === subjectId && g.capabilityId === "crm.contact.read");
+      assert.deepEqual(crmGrant.resource.selectors, { scope: "*", contactId: "*" });
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Finding 5: an admin reachable only through a SUSPENDED subject never resolves
+// at runtime, so it must not count toward self-lockout. Revoking the sole
+// active-subject admin's grant is blocked with 422 even though a suspended-subject
+// "admin" grant still exists.
+function suspendedSubjectAdminStore(): string {
+  return JSON.stringify({
+    schemaVersion: 2,
+    people: [
+      { id: "person_real", displayName: "Real", status: "active", personType: "human", primarySubjectId: "person:real", identityIds: ["identity_telegram_900000501"], subjectIds: ["person:real"] },
+      { id: "person_susp", displayName: "Suspended", status: "active", personType: "human", primarySubjectId: "person:susp", identityIds: ["identity_telegram_900000502"], subjectIds: ["person:susp"] },
+    ],
+    externalIdentities: [
+      { id: "identity_telegram_900000501", provider: "telegram", providerUserId: "900000501", personId: "person_real", status: "linked" },
+      { id: "identity_telegram_900000502", provider: "telegram", providerUserId: "900000502", personId: "person_susp", status: "linked" },
+    ],
+    identityProofs: [],
+    subjects: [
+      { id: "person:real", personId: "person_real", kind: "person", status: "active" },
+      { id: "person:susp", personId: "person_susp", kind: "person", status: "suspended" },
+    ],
+    grants: [
+      { id: "g_real_admin", subjectId: "person:real", capabilityId: "capability.catalog.read", grantKind: "capability", resource: { selectors: {} }, actions: ["*"], status: "active", enforcement: "enforcing" },
+      { id: "g_susp_admin", subjectId: "person:susp", capabilityId: "capability.catalog.read", grantKind: "capability", resource: { selectors: {} }, actions: ["*"], status: "active", enforcement: "enforcing" },
+    ],
+  });
+}
+
+test("brain self-lockout counts only admins on active subjects", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-suspended-admin-"));
+  try {
+    await writeFile(path.join(root, "capabilities.json"), suspendedSubjectAdminStore());
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const revoke = await jsonRequest(baseUrl, "DELETE", "/api/admin/brain/users/person_real/grants/g_real_admin");
+      assert.equal(revoke.status, 422);
+      assert.equal(revoke.payload.error, "self_lockout");
+      // Nothing was written.
+      const stored = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8"));
+      assert.equal(stored.grants.find((g: any) => g.id === "g_real_admin").status, "active");
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Finding 6: two concurrent in-process mutations serialize via the module-level
+// mutation queue — both writes land instead of one silently clobbering the other.
+test("brain concurrent mutations serialize in-process without losing writes", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-concurrent-"));
+  try {
+    const storePath = path.join(root, "capabilities.json");
+    await writeFile(storePath, JSON.stringify({
+      schemaVersion: 2,
+      people: [{ id: "person_c", displayName: "Concurrent", status: "active", personType: "human", primarySubjectId: "person:c", identityIds: ["identity_telegram_900000601"], subjectIds: ["person:c"] }],
+      externalIdentities: [{ id: "identity_telegram_900000601", provider: "telegram", providerUserId: "900000601", personId: "person_c", status: "linked" }],
+      identityProofs: [],
+      subjects: [{ id: "person:c", personId: "person_c", kind: "person", status: "active" }],
+      grants: [{ id: "g_c_admin", subjectId: "person:c", capabilityId: "capability.catalog.read", grantKind: "capability", resource: { selectors: {} }, actions: ["*"], status: "active", enforcement: "enforcing" }],
+    }));
+    const [a, b] = await Promise.all([
+      commitMutation(storePath, { kind: "grant", personId: "person_c", target: "todos.item.read", adminEmail: "admin@example.test" }),
+      commitMutation(storePath, { kind: "grant", personId: "person_c", target: "calendar.event.read", adminEmail: "admin@example.test" }),
+    ]);
+    assert.equal(a.outcome.changed, true);
+    assert.equal(b.outcome.changed, true);
+    const stored = JSON.parse(await readFile(storePath, "utf8"));
+    assert.ok(stored.grants.some((g: any) => g.capabilityId === "todos.item.read"), "first concurrent write present");
+    assert.ok(stored.grants.some((g: any) => g.capabilityId === "calendar.event.read"), "second concurrent write present");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Finding 7: an audit-append failure after a SUCCESSFUL store write must not turn
+// the response into a 500 (which would prompt a duplicate-creating retry).
+test("brain mutation returns 200 with auditWriteFailed when the audit dir is unwritable", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-auditfail-"));
+  try {
+    await writeLiveStore(root);
+    // Make the capability audit path unwritable: its parent is a regular file, so
+    // mkdir of the log directory fails with ENOTDIR.
+    const blocker = path.join(root, "audit-blocker");
+    await writeFile(blocker, "not a directory");
+    const cfg = config(root, { capabilityAuditLogPath: path.join(blocker, "sub", "capability-audit.jsonl") });
+    await withServer(cfg, authDeps(), async (baseUrl) => {
+      const created = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users", { displayName: "Audit Fail Person" });
+      assert.equal(created.status, 200);
+      assert.equal(created.payload.ok, true);
+      assert.equal(created.payload.auditWriteFailed, true);
+      // The store write still landed.
+      const stored = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8"));
+      assert.ok(stored.people.some((p: any) => p.id === created.payload.detail.personId));
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Finding 8: an unknown individual capability id must be rejected (400) rather
+// than persisted as an enforcing junk grant.
+test("brain grant rejects an unknown capability id and leaves the store unchanged", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-unknown-cap-"));
+  try {
+    await writeLiveStore(root);
+    const before = await readFile(path.join(root, "capabilities.json"));
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const bad = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/person_alpha/grants", { capabilityId: "todos.read" });
+      assert.equal(bad.status, 400);
+      assert.equal(bad.payload.error, "unknown_capability");
+    });
+    const after = await readFile(path.join(root, "capabilities.json"));
+    assert.ok(before.equals(after), "store bytes unchanged after a rejected grant");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Finding 9: a malformed request body is a 400 client error, not a 500.
+test("brain user mutation rejects a malformed request body with 400 not 500", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-badbody-"));
+  try {
+    await writeLiveStore(root);
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const nonJson = await fetch(`${baseUrl}/api/admin/brain/users`, { method: "POST", headers: { ...authHeaders(), "content-type": "application/json" }, body: "not json at all" });
+      assert.equal(nonJson.status, 400);
+      assert.equal((await nonJson.json() as { error: string }).error, "invalid_body");
+      const arrayBody = await fetch(`${baseUrl}/api/admin/brain/users`, { method: "POST", headers: { ...authHeaders(), "content-type": "application/json" }, body: "[]" });
+      assert.equal(arrayBody.status, 400);
+      assert.equal((await arrayBody.json() as { error: string }).error, "invalid_body");
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Finding 10: a double revoke preserves the original revokedAt/reason and does
+// not rewrite the store (a no-op mutation skips the disk write).
+test("brain double revoke preserves original revocation and does not rewrite the store", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-double-revoke-"));
+  try {
+    const storePath = path.join(root, "capabilities.json");
+    await writeFile(storePath, JSON.stringify({
+      schemaVersion: 2,
+      people: [{ id: "person_r", displayName: "Revoker", status: "active", personType: "human", primarySubjectId: "person:r", identityIds: ["identity_telegram_900000701"], subjectIds: ["person:r"] }],
+      externalIdentities: [{ id: "identity_telegram_900000701", provider: "telegram", providerUserId: "900000701", personId: "person_r", status: "linked" }],
+      identityProofs: [],
+      subjects: [{ id: "person:r", personId: "person_r", kind: "person", status: "active" }],
+      grants: [
+        { id: "g_r_admin", subjectId: "person:r", capabilityId: "capability.catalog.read", grantKind: "capability", resource: { selectors: {} }, actions: ["*"], status: "active", enforcement: "enforcing" },
+        { id: "g_r_todo", subjectId: "person:r", capabilityId: "todos.item.read", grantKind: "capability", resource: { selectors: { scope: "*", listId: "*" } }, actions: ["*"], status: "active", enforcement: "enforcing" },
+      ],
+    }));
+
+    const first = await commitMutation(storePath, { kind: "revoke", personId: "person_r", grantId: "g_r_todo", adminEmail: "admin-one@example.test" });
+    assert.equal(first.outcome.changed, true);
+    const bytesAfterFirst = await readFile(storePath);
+    const revokedGrantFirst = JSON.parse(bytesAfterFirst.toString()).grants.find((g: any) => g.id === "g_r_todo");
+    assert.ok(revokedGrantFirst.revokedAt, "first revoke set revokedAt");
+    assert.match(revokedGrantFirst.reason, /admin-one@example\.test/);
+
+    // A second revoke by a different admin is a no-op: changed=false, no rewrite.
+    const second = await commitMutation(storePath, { kind: "revoke", personId: "person_r", grantId: "g_r_todo", adminEmail: "admin-two@example.test" });
+    assert.equal(second.outcome.changed, false);
+    assert.equal(second.outcome.detail.alreadyRevoked, true);
+    const bytesAfterSecond = await readFile(storePath);
+    assert.ok(bytesAfterFirst.equals(bytesAfterSecond), "second revoke did not rewrite the store");
+    const revokedGrantSecond = JSON.parse(bytesAfterSecond.toString()).grants.find((g: any) => g.id === "g_r_todo");
+    assert.equal(revokedGrantSecond.revokedAt, revokedGrantFirst.revokedAt);
+    assert.equal(revokedGrantSecond.reason, revokedGrantFirst.reason);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

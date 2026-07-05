@@ -236,6 +236,40 @@ export const CAPABILITY_GROUP_DEFINITIONS: CatalogGroupDefinition[] = [
   },
 ];
 
+// Per-group default broad resource selector templates, mirroring the live seed
+// conventions. When an admin grant supplies no explicit selectors, the grant is
+// stored with the template for the capability's group so it actually matches the
+// concrete resource keys the runtime sends (codex-chat's selectorsMatch requires
+// every concrete key to be covered — an empty selector set matches nothing).
+// Groups whose runtime resource keys are not yet known fall back to `{scope:"*"}`.
+export const CAPABILITY_GROUP_DEFAULT_SELECTORS: Record<string, Record<string, string>> = {
+  projects: { projectId: "*", repoAlias: "*", resourceScope: "*" },
+  crm: { scope: "*", contactId: "*" },
+  calendar: { scope: "*", calendarId: "*" },
+  slack: { scope: "*", teamId: "*", channelId: "*", threadTs: "*" },
+  todos: { scope: "*", listId: "*" },
+};
+
+const DEFAULT_SELECTOR_FALLBACK: Record<string, string> = { scope: "*" };
+
+// The catalog group id a capability id belongs to (its own id when it is itself
+// a group id, otherwise the group whose children include it).
+export function groupIdForCapability(capabilityId: string): string | undefined {
+  for (const definition of CAPABILITY_GROUP_DEFINITIONS) {
+    if (definition.id === capabilityId) return definition.id;
+    if (definition.capabilities.some((child) => child.id === capabilityId)) return definition.id;
+  }
+  return undefined;
+}
+
+// The default broad selector template for a capability id (fresh object per call
+// so callers can store it without sharing references).
+export function defaultSelectorsForCapability(capabilityId: string): Record<string, string> {
+  const groupId = groupIdForCapability(capabilityId);
+  const template = groupId ? CAPABILITY_GROUP_DEFAULT_SELECTORS[groupId] : undefined;
+  return { ...(template ?? DEFAULT_SELECTOR_FALLBACK) };
+}
+
 // The set of ids the catalog definition "maps": every group id (group-level
 // grants and bundle groupIds reference these, e.g. "projects") plus every child
 // capability id. Shared by the catalog and the per-user summary so both agree on

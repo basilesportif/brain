@@ -13,11 +13,13 @@
     "test": "node --test dist/**/*.test.js",
     "publish:page": "node dist/publish-page.js",
     "prune:pages": "node dist/prune-pages.js",
+    "migrate:capability-store": "node dist/migrate-capability-store.js",
     "start:admin": "node dist/brain-admin.js"
   },
   "bin": {
     "brain-web-publish-page": "./dist/publish-page.js",
     "brain-web-prune-pages": "./dist/prune-pages.js",
+    "brain-web-migrate-capability-store": "./dist/migrate-capability-store.js",
     "brain-web-admin": "./dist/brain-admin.js"
   },
   "dependencies": {

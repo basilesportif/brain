@@ -9,6 +9,7 @@ import { capabilityAdminSummary } from "./capabilities.js";
 import { actorContextFromExternalId, evaluateAuthorization, parseCapabilityStore, type CapabilityStore } from "./capability-store.js";
 import { buildCapabilityCatalog } from "./capability-catalog.js";
 import { buildAuditFeed, buildUsersResponse, type AuditOutcome, type AuditType } from "./capability-admin-reads.js";
+import { commitMutation, previewMutation, CapabilityWriteError, type MutationResult, type MutationSpec } from "./capability-store-write.js";
 import { envFileMetadata, expandHomePath, parseEnvKeys, readEnvKeyPresence, resolveEnvFilePath, writeMergedEnvFile } from "./env-file.js";
 import { buildEnvSchema, SECRETISH_RE, validateEnvUpdates, type EnvFieldError } from "./env-schema.js";
 import { renderBrainAdminDeniedPage, renderBrainAdminPage, renderBrainAdminSignInPage } from "./admin-page.js";
@@ -272,6 +273,18 @@ async function handleAdminApi(request: IncomingMessage, response: ServerResponse
   }
   if (request.method === "GET" && url.pathname === "/api/admin/brain/users") {
     return handleCapabilityUsers(response, config);
+  }
+  if (url.pathname === "/api/admin/brain/users" || url.pathname.startsWith("/api/admin/brain/users/")) {
+    try {
+      if (await handleCapabilityUserMutation(request, response, url, config, adminEmail)) return;
+    } catch (error) {
+      // A body-parse failure (invalid JSON / non-object / oversized) surfaces as
+      // a typed 400 rather than the generic 500 the top-level catch would send.
+      if (error instanceof CapabilityWriteError) {
+        return sendJson(response, error.status, { error: error.code, message: error.message, ...(error.details ?? {}) });
+      }
+      throw error;
+    }
   }
   if (request.method === "POST" && url.pathname === "/api/admin/brain/capabilities/check") {
     const payload = await readJsonBody(request);
@@ -779,6 +792,176 @@ async function handleCapabilityAudit(response: ServerResponse, config: BrainAdmi
     nextCursor: feed.nextOffset === null ? null : encodeAuditCursor(feed.nextOffset, feed.newestTimeMs),
     filters: { type: type ?? "both", outcome: outcome ?? null, actor: actor ?? null, operation: operation ?? null },
   });
+}
+
+// --- §6.5 capability WRITE endpoints (person/identity/grant mutations) --------
+//
+// Every mutation runs behind the write-path safety rails in
+// capability-store-write.ts: schema-validated atomic write, last-known-good +
+// timestamped backup, optimistic-concurrency (content-hash) conflict, impact
+// preview, and self-lockout refusal. `?preview=true` (or `preview:true` in the
+// body) returns the would-be decision diffs WITHOUT writing.
+
+// Read a JSON body but tolerate an empty body (DELETE with no payload), where
+// the write parameters come entirely from the path + query string.
+async function readJsonBodyOptional(request: IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buffer.length;
+    // A malformed/oversized/non-object body is a client error (400), not a 500.
+    if (total > MAX_BODY_BYTES) throw new CapabilityWriteError("invalid_body", 400, "Request body too large");
+    chunks.push(buffer);
+  }
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    throw new CapabilityWriteError("invalid_body", 400, "Request body must be valid JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new CapabilityWriteError("invalid_body", 400, "JSON body must be an object");
+  return parsed as Record<string, unknown>;
+}
+
+// Append a capability audit event to Brain's capability audit JSONL — the same
+// file the step-2 /audit feed already merges (config.capabilityAuditLogPath).
+// Never writes secret values.
+async function appendCapabilityAudit(config: BrainAdminServiceConfig, event: Record<string, unknown>): Promise<void> {
+  const filePath = resolveEnvFilePath(config.capabilityAuditLogPath);
+  await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const record = { at: new Date().toISOString(), ...event, secretValuesLogged: false };
+  await appendFile(filePath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+// Route the /api/admin/brain/users(/:id/...) write surface. Returns true when it
+// handled the request (so the caller stops); false when the path/method is not
+// a user-mutation route (letting the shared 404 handle it).
+async function handleCapabilityUserMutation(
+  request: IncomingMessage,
+  response: ServerResponse,
+  url: URL,
+  config: BrainAdminServiceConfig,
+  adminEmail: string,
+): Promise<boolean> {
+  const method = request.method ?? "GET";
+  const rest = url.pathname.slice("/api/admin/brain/users".length).replace(/^\//, "");
+  const segments = rest ? rest.split("/").map((segment) => decodeURIComponent(segment)) : [];
+
+  // POST /users — create a person.
+  if (segments.length === 0) {
+    if (method !== "POST") return false;
+    const body = await readJsonBodyOptional(request);
+    const spec: MutationSpec = { kind: "create_person", displayName: String((body.displayName as string) ?? ""), adminEmail };
+    await runMutation(response, config, url, body, spec);
+    return true;
+  }
+
+  const personId = segments[0];
+  // POST /users/:id/identities  |  DELETE /users/:id/identities/:identityId
+  if (segments[1] === "identities") {
+    if (segments.length === 2 && method === "POST") {
+      const body = await readJsonBodyOptional(request);
+      const spec: MutationSpec = {
+        kind: "link_identity",
+        personId,
+        provider: String((body.provider as string) ?? ""),
+        externalId: String((body.externalId as string) ?? (body.externalIdentifier as string) ?? ""),
+        teamId: optionalString(body.teamId),
+        adminEmail,
+      };
+      await runMutation(response, config, url, body, spec);
+      return true;
+    }
+    if (segments.length === 3 && method === "DELETE") {
+      const body = await readJsonBodyOptional(request);
+      const spec: MutationSpec = { kind: "unlink_identity", personId, identityId: segments[2], adminEmail };
+      await runMutation(response, config, url, body, spec);
+      return true;
+    }
+    return false;
+  }
+
+  // POST /users/:id/grants  |  DELETE /users/:id/grants/:grantId
+  if (segments[1] === "grants") {
+    if (segments.length === 2 && method === "POST") {
+      const body = await readJsonBodyOptional(request);
+      const target = optionalString(body.groupId) ?? optionalString(body.capabilityId) ?? optionalString(body.target) ?? "";
+      const selectors = body.selectors && typeof body.selectors === "object" && !Array.isArray(body.selectors) ? (body.selectors as Record<string, unknown>) : undefined;
+      const spec: MutationSpec = { kind: "grant", personId, target, selectors, adminEmail };
+      await runMutation(response, config, url, body, spec);
+      return true;
+    }
+    if (segments.length === 3 && method === "DELETE") {
+      const body = await readJsonBodyOptional(request);
+      const spec: MutationSpec = { kind: "revoke", personId, grantId: segments[2], adminEmail };
+      await runMutation(response, config, url, body, spec);
+      return true;
+    }
+    return false;
+  }
+
+  return false;
+}
+
+function isPreviewRequest(url: URL, body: Record<string, unknown>): boolean {
+  return url.searchParams.get("preview") === "true" || body.preview === true;
+}
+
+// Shared preview/commit runner: maps CapabilityWriteError to the right HTTP
+// status, appends a capability audit event on a successful (non-preview) write,
+// and never echoes secret values.
+async function runMutation(
+  response: ServerResponse,
+  config: BrainAdminServiceConfig,
+  url: URL,
+  body: Record<string, unknown>,
+  spec: MutationSpec,
+): Promise<void> {
+  const preview = isPreviewRequest(url, body);
+  const expectedHash = optionalString(body.expectedStoreHash) ?? url.searchParams.get("ifMatch") ?? undefined;
+  try {
+    let result: MutationResult;
+    if (preview) {
+      result = await previewMutation(resolveEnvFilePath(config.capabilityStorePath), spec);
+      return sendJson(response, 200, { ok: true, preview: true, impact: result.impact, detail: result.outcome.detail, storeHash: result.storeHash });
+    }
+    result = await commitMutation(resolveEnvFilePath(config.capabilityStorePath), spec, { expectedHash: expectedHash ?? undefined });
+    // Audit the successful mutation with its impact summary — never secrets. The
+    // store write already SUCCEEDED, so an audit-append failure must not turn a
+    // committed write into a 500 (which would prompt a retry that duplicates
+    // people/grants). Surface it as a non-fatal flag instead.
+    let auditWriteFailed = false;
+    try {
+      await appendCapabilityAudit(config, {
+        ...result.outcome.audit,
+        impact: result.impact.summary,
+      });
+    } catch (auditError) {
+      auditWriteFailed = true;
+      console.error("capability audit append failed after a successful store write", auditError);
+    }
+    return sendJson(response, 200, {
+      ok: true,
+      preview: false,
+      changed: result.outcome.changed,
+      impact: result.impact,
+      detail: result.outcome.detail,
+      storeHash: result.storeHash,
+      ...(auditWriteFailed ? { auditWriteFailed: true } : {}),
+    });
+  } catch (error) {
+    if (error instanceof CapabilityWriteError) {
+      return sendJson(response, error.status, { error: error.code, message: error.message, ...(error.details ?? {}) });
+    }
+    throw error;
+  }
 }
 
 // --- §6.4 env schema response ------------------------------------------------
