@@ -1,5 +1,6 @@
 packages:
   - "apps/*"
+  - "apps/web/ui"
   - "entrypoints/*"
   - "packages/*"
   - "packages/config/*"

@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
-import { appendFile, chmod, mkdir, open, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, open, readdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import { authorizeBrainAdminRequest, isBrainAdminAuthConfigured, parseAdminAllowedEmails, type ClerkUserLookup, type VerifyClerkToken } from "./admin-auth.js";
 import { capabilityAdminSummary } from "./capabilities.js";
 import { actorContextFromExternalId, evaluateAuthorization, parseCapabilityStore, type CapabilityStore } from "./capability-store.js";
@@ -42,6 +43,21 @@ const OPENROUTER_ENV_KEYS = [
   "CODEX_CHAT_SUBAGENTS_ALLOW_PROVIDER_OVERRIDE",
   "CODEX_CHAT_SUBAGENTS_ALLOWED_CODEX_PROFILES",
   "CODEX_CHAT_SUBAGENTS_ALLOWED_MODEL_PROVIDERS",
+] as const;
+// The exact key set the OpenRouter settings write governs (the confirmation
+// token pins this). Served verbatim to the client as `confirmationKeys` so the
+// client never recomputes the list; the actual written keys are a subset that
+// depends on whether an API key / backend is supplied (computed server-side).
+const OPENROUTER_SETTINGS_CONFIRMATION_KEYS = [
+  "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL",
+  "CODEX_CHAT_SUBAGENTS_DEFAULT_CODEX_PROFILE",
+  "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL_PROVIDER",
+  "CODEX_CHAT_SUBAGENTS_SERVICE_TIER_MODE",
+  "CODEX_CHAT_SUBAGENTS_ALLOW_PROVIDER_OVERRIDE",
+  "CODEX_CHAT_SUBAGENTS_ALLOWED_CODEX_PROFILES",
+  "CODEX_CHAT_SUBAGENTS_ALLOWED_MODEL_PROVIDERS",
+  "OPENROUTER_API_KEY",
+  "CODEX_CHAT_SUBAGENTS_BACKEND",
 ] as const;
 const DEFAULT_ENV_KEYS = [
   "CODEX_CHAT_API_ENABLED",
@@ -94,6 +110,9 @@ export interface BrainAdminServiceConfig {
   capabilityStorePath: string;
   capabilityAuditLogPath: string;
   capabilityDecisionsDir: string;
+  // Built React/Vite SPA assets served under `/admin-v2` (plan §6.6, §8 step 4).
+  // Defaults to the sibling `ui/dist` produced by `pnpm --filter @brain/web-ui build`.
+  adminV2Dir: string;
 }
 
 export interface BrainAdminServiceDeps {
@@ -155,7 +174,14 @@ export function loadBrainAdminServiceConfig(env: NodeJS.ProcessEnv = process.env
     capabilityStorePath,
     capabilityAuditLogPath,
     capabilityDecisionsDir: env.BRAIN_CAPABILITY_DECISIONS_DIR || "capability_decisions",
+    adminV2Dir: env.BRAIN_ADMIN_V2_DIR || defaultAdminV2Dir(),
   };
+}
+
+// The built SPA lives next to the compiled service: this module compiles to
+// `apps/web/dist/admin-service.js`, so the UI build output is `../ui/dist`.
+function defaultAdminV2Dir(): string {
+  return path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "ui", "dist");
 }
 
 export function createBrainAdminServer(config: BrainAdminServiceConfig = loadBrainAdminServiceConfig(), deps: BrainAdminServiceDeps = {}): http.Server {
@@ -182,6 +208,14 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
   if (request.method === "GET" && url.pathname === adminSignInPath(config.routePath)) {
     const redirectUrl = safeAdminReturnUrl(url.searchParams.get("redirect_url"), adminPublicUrlFromRequest(request, config));
     return sendHtml(response, 200, renderBrainAdminSignInPage(config, redirectUrl));
+  }
+
+  // New React/Vite console (plan §8 step 4). The SPA shell is served
+  // unauthenticated so Clerk can boot in the browser; every data API under
+  // `/api/admin/brain/*` stays fail-closed behind the server allowlist, so
+  // nothing is granted client-side. The legacy `/admin` console is untouched.
+  if (request.method === "GET" && (url.pathname === "/admin-v2" || url.pathname.startsWith("/admin-v2/"))) {
+    return serveAdminV2(response, url, config);
   }
 
   if (url.pathname.startsWith("/api/admin/brain/")) {
@@ -970,7 +1004,7 @@ async function envSchemaResponse(config: BrainAdminServiceConfig): Promise<Retur
   // Plan §6.4: return the bare schema array (no { envFile, schema } wrapper).
   const envFile = resolveEnvFilePath(config.codexChatEnvFile);
   const presentKeys = parseEnvKeys(await readTextIfPresent(envFile));
-  return buildEnvSchema(presentKeys);
+  return buildEnvSchema(presentKeys, config.allowedEnvKeys);
 }
 
 // --- §6.2 Slack setup state --------------------------------------------------
@@ -1539,6 +1573,9 @@ async function mainLoopModelSummary(config: BrainAdminServiceConfig) {
     selectors,
     effective,
     activePreset,
+    // Served verbatim so the client echoes it back in the confirmation instead
+    // of hand-mirroring the server's key list (fix).
+    confirmationKeys: [...MAIN_LOOP_MODEL_ENV_KEYS],
     restartRequiredForChanges: true,
     presets: Object.entries(MAIN_LOOP_PRESETS).map(([id, preset]) => ({ id, label: preset.label, description: preset.description, updates: preset.updates, requiresOpenRouter: preset.requiresOpenRouter })),
     openRouter: {
@@ -1689,9 +1726,50 @@ function parseTomlStringValueAllowEmpty(value: string | null): string | undefine
 }
 
 
+// The current (non-secret) OpenRouter subagent config the write manages. These
+// are config values, not secrets, so the summary exposes them and the form
+// initializes from them — an untouched form then round-trips current values
+// instead of clobbering them with hardcoded defaults (plan §5.3 / fix). The
+// OpenRouter API key is never included here; it stays presence-only.
+async function readOpenRouterCurrentConfig(config: BrainAdminServiceConfig): Promise<{
+  model: string;
+  codexProfile: string;
+  modelProvider: string;
+  serviceTierMode: string;
+  allowedCodexProfiles: string;
+  allowedModelProviders: string;
+  backend: string;
+}> {
+  const values = await readEnvSelectedValues(config.codexChatEnvFile, [
+    "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL",
+    "CODEX_CHAT_SUBAGENTS_DEFAULT_CODEX_PROFILE",
+    "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL_PROVIDER",
+    "CODEX_CHAT_SUBAGENTS_SERVICE_TIER_MODE",
+    "CODEX_CHAT_SUBAGENTS_ALLOWED_CODEX_PROFILES",
+    "CODEX_CHAT_SUBAGENTS_ALLOWED_MODEL_PROVIDERS",
+    "CODEX_CHAT_SUBAGENTS_BACKEND",
+  ]);
+  const pick = (key: string, fallback: string) => (values[key]?.present ? values[key]!.value : fallback);
+  return {
+    model: pick("CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL", "z-ai/glm-5.2"),
+    codexProfile: pick("CODEX_CHAT_SUBAGENTS_DEFAULT_CODEX_PROFILE", "openrouter"),
+    modelProvider: pick("CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL_PROVIDER", "openrouter"),
+    serviceTierMode: pick("CODEX_CHAT_SUBAGENTS_SERVICE_TIER_MODE", "omit"),
+    allowedCodexProfiles: pick("CODEX_CHAT_SUBAGENTS_ALLOWED_CODEX_PROFILES", ""),
+    allowedModelProviders: pick("CODEX_CHAT_SUBAGENTS_ALLOWED_MODEL_PROVIDERS", ""),
+    backend: pick("CODEX_CHAT_SUBAGENTS_BACKEND", ""),
+  };
+}
+
 async function openRouterSettingsSummary(config: BrainAdminServiceConfig) {
   const env = await envPresenceSummary(config, OPENROUTER_ENV_KEYS);
-  const codexProfile = await codexProfileMetadata(config.codexHomePath, "openrouter");
+  const current = await readOpenRouterCurrentConfig(config);
+  // The confirmation token pins the state the client READ, not the value being
+  // written: the profile path is the CURRENT profile's path (derived from the
+  // current codexProfile), so editing the profile field no longer breaks the
+  // confirmation (fix). The write recomputes this same current path to compare.
+  const currentProfilePath = codexProfilePath(config.codexHomePath, current.codexProfile);
+  const codexProfile = await codexProfileMetadata(config.codexHomePath, current.codexProfile);
   const codexChatConfig = config.codexChatConfigFile ? await codexChatProviderConfigSummary(config.codexChatConfigFile) : { configured: false };
   return {
     values: "write-only; presence only",
@@ -1699,6 +1777,9 @@ async function openRouterSettingsSummary(config: BrainAdminServiceConfig) {
     recommendedCodexProfile: "openrouter",
     recommendedModelProvider: "openrouter",
     recommendedServiceTierMode: "omit",
+    current,
+    profilePath: currentProfilePath,
+    confirmationKeys: [...OPENROUTER_SETTINGS_CONFIRMATION_KEYS],
     codexProfile,
     codexChatConfig,
     env,
@@ -1716,8 +1797,18 @@ async function handleOpenRouterSettingsWrite(response: ServerResponse, config: B
   }
   const confirmation = parseOpenRouterSettingsConfirmation(payload.confirmation);
   const envFile = resolveEnvFilePath(config.codexChatEnvFile);
-  const configFile = config.codexChatConfigFile ?? "";
-  const profilePath = codexProfilePath(config.codexHomePath, input.codexProfile);
+  // The path of the profile file actually written (derived from the submitted
+  // codexProfile). Distinct from the confirmation's profilePath, which pins the
+  // CURRENT profile the client read (below).
+  const writtenProfilePath = codexProfilePath(config.codexHomePath, input.codexProfile);
+  // Confirmation pins READ state: compare against the current profile path the
+  // GET summary served (derived from the current, pre-write config), NOT one
+  // recomputed from the submitted codexProfile — otherwise editing the profile
+  // field would 400 `confirmation_required` forever (fix). And compare the keys
+  // against the static governed set the summary advertises, not the conditional
+  // written subset, so the client can echo `confirmationKeys` verbatim (fix).
+  const current = await readOpenRouterCurrentConfig(config);
+  const currentProfilePath = codexProfilePath(config.codexHomePath, current.codexProfile);
   const writtenEnvKeys = [
     ...(input.apiKey ? ["OPENROUTER_API_KEY"] : []),
     "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL",
@@ -1729,15 +1820,21 @@ async function handleOpenRouterSettingsWrite(response: ServerResponse, config: B
     "CODEX_CHAT_SUBAGENTS_ALLOWED_MODEL_PROVIDERS",
     ...(input.backend ? ["CODEX_CHAT_SUBAGENTS_BACKEND"] : [])
   ];
+  // Accept the governed static key set the summary advertises (React client) OR
+  // the conditional written subset — the still-live legacy `/admin` console
+  // computes the latter client-side, and must keep working until the step-7
+  // cutover. The token/action/envFile/profilePath pins are unchanged either way.
+  const keysOk = sameStringSet(confirmation?.keys ?? [], [...OPENROUTER_SETTINGS_CONFIRMATION_KEYS])
+    || sameStringSet(confirmation?.keys ?? [], writtenEnvKeys);
   if (!confirmation
     || confirmation.token !== OPENROUTER_SETTINGS_CONFIRMATION_TOKEN
     || confirmation.action !== "openrouter.settings.write"
     || confirmation.envFile !== envFile
-    || confirmation.profilePath !== profilePath
-    || !sameStringSet(confirmation.keys, writtenEnvKeys)) {
+    || confirmation.profilePath !== currentProfilePath
+    || !keysOk) {
     return sendJson(response, 400, {
       error: "confirmation_required",
-      required: { token: OPENROUTER_SETTINGS_CONFIRMATION_TOKEN, action: "openrouter.settings.write", envFile, profilePath, keys: writtenEnvKeys }
+      required: { token: OPENROUTER_SETTINGS_CONFIRMATION_TOKEN, action: "openrouter.settings.write", envFile, profilePath: currentProfilePath, keys: [...OPENROUTER_SETTINGS_CONFIRMATION_KEYS] }
     });
   }
 
@@ -1764,7 +1861,7 @@ async function handleOpenRouterSettingsWrite(response: ServerResponse, config: B
     adminEmail,
     envFile,
     configFile: config.codexChatConfigFile ?? null,
-    profilePath,
+    profilePath: writtenProfilePath,
     keys: writtenEnvKeys,
     values: "write-only"
   });
@@ -1772,7 +1869,7 @@ async function handleOpenRouterSettingsWrite(response: ServerResponse, config: B
     ok: true,
     envFile,
     configFile: config.codexChatConfigFile ?? null,
-    profilePath,
+    profilePath: writtenProfilePath,
     writtenKeys: writtenEnvKeys,
     values: "write-only",
     presence: await readEnvKeyPresence(config.codexChatEnvFile, writtenEnvKeys),
@@ -1789,12 +1886,20 @@ async function envPresenceSummary(config: BrainAdminServiceConfig, keysToRead: r
 }
 
 async function handleEnvWrite(response: ServerResponse, config: BrainAdminServiceConfig, adminEmail: string, payload: Record<string, unknown>): Promise<void> {
-  // The still-live legacy console posts env writes on one click, so the
-  // approval-phrase gate stays until step 4 ships the React client's confirm
-  // dialog (plan §6.4), which then replaces this server-side check.
+  // Plan §6.4 / §8 step 4: env writes overwrite secrets in one request, so they
+  // stay behind a server-side confirmation gate (never a one-click overwrite
+  // from an arbitrary client). Accept EITHER an explicit `confirmed: true` — the
+  // React console (§5.3) sends this after its ConfirmDialog — OR the legacy
+  // approval phrase, so the still-live legacy `/admin` console keeps working
+  // until the step-7 cutover. Missing both → 400 `approval_required`, matching
+  // the confirmation-token contracts the Slack/OpenRouter/model endpoints
+  // enforce for these same keys. The separate operation/restart exact-approval
+  // contract (§5.5) is unaffected.
   const approval = typeof payload.approval === "string" ? payload.approval.trim() : "";
-  if (approval !== "write env" && approval !== `write ${config.codexChatServiceName} env`) {
-    return sendJson(response, 400, { error: "approval_required", expected: ["write env", `write ${config.codexChatServiceName} env`] });
+  const approvalPhraseOk = approval === "write env" || approval === `write ${config.codexChatServiceName} env`;
+  const confirmed = payload.confirmed === true;
+  if (!confirmed && !approvalPhraseOk) {
+    return sendJson(response, 400, { error: "approval_required", expected: ["write env", `write ${config.codexChatServiceName} env`], confirmedFlag: true });
   }
   const entries = parseEntries(payload.entries);
   const allowed = new Set(config.allowedEnvKeys);
@@ -2388,6 +2493,123 @@ function sendHtml(response: ServerResponse, statusCode: number, html: string): v
   response.statusCode = statusCode;
   response.setHeader("content-type", "text/html; charset=utf-8");
   response.end(html);
+}
+
+// --- §6.6 / §8 step 4: serve the built React SPA under /admin-v2 --------------
+
+// Serve the built React console under `/admin-v2` with SPA-history fallback.
+// Path-traversal safe: only files that resolve inside the build dir are served;
+// anything else falls back to the injected index.html. When the build output is
+// absent, returns a clear 503 page instead of crashing.
+async function serveAdminV2(response: ServerResponse, url: URL, config: BrainAdminServiceConfig): Promise<void> {
+  const dir = path.resolve(resolveEnvFilePath(config.adminV2Dir));
+  let indexHtml: string;
+  let realDir: string;
+  try {
+    indexHtml = await readFile(path.join(dir, "index.html"), "utf8");
+    // Realpath the build root so symlink containment (below) compares like with
+    // like; if the dir can't be realpathed, treat the console as unbuilt.
+    realDir = await realpath(dir);
+  } catch {
+    // The absolute build path is operator-only; log it server-side and keep it
+    // out of this unauthenticated response body (fix).
+    console.error(`[brain-admin] /admin-v2 build output missing or unreadable at ${dir}`);
+    return sendHtml(response, 503, adminV2NotBuiltPage());
+  }
+
+  const rawRel = url.pathname.slice("/admin-v2".length);
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(rawRel);
+  } catch {
+    return sendHtml(response, 400, adminV2ShellHtml(indexHtml, config));
+  }
+  const rel = decoded.replace(/^\/+/, "");
+  if (rel === "" || rel.includes("\0")) {
+    if (rel.includes("\0")) return sendJson(response, 400, { error: "bad_request" });
+    return sendAdminV2Shell(response, indexHtml, config);
+  }
+
+  const resolved = path.resolve(dir, rel);
+  if (resolved !== dir && !resolved.startsWith(dir + path.sep)) {
+    // Attempted escape from the build dir (lexical path traversal) — never serve it.
+    return sendJson(response, 403, { error: "forbidden" });
+  }
+
+  const realIndexPath = path.join(realDir, "index.html");
+  try {
+    // Realpath the target so a symlink inside dist pointing outside the build
+    // root is caught even though the lexical check above passed (fix). ENOENT
+    // (no such file) falls through to the SPA history fallback.
+    const real = await realpath(resolved);
+    if (real !== realDir && !real.startsWith(realDir + path.sep)) {
+      return sendJson(response, 403, { error: "forbidden" });
+    }
+    const info = await stat(real);
+    if (info.isFile()) {
+      // Any request resolving to index.html — directly or otherwise — goes
+      // through the injected, no-store shell path, never served raw/long-cached (fix).
+      if (real === realIndexPath) return sendAdminV2Shell(response, indexHtml, config);
+      const data = await readFile(real);
+      response.statusCode = 200;
+      response.setHeader("content-type", contentTypeForPath(resolved));
+      // Hashed assets are immutable; index.html is handled via the shell path above.
+      response.setHeader("cache-control", "public, max-age=86400");
+      response.end(data);
+      return;
+    }
+  } catch {
+    // Missing file → fall through to the SPA history fallback below.
+  }
+  return sendAdminV2Shell(response, indexHtml, config);
+}
+
+function sendAdminV2Shell(response: ServerResponse, indexHtml: string, config: BrainAdminServiceConfig): void {
+  response.statusCode = 200;
+  response.setHeader("content-type", "text/html; charset=utf-8");
+  response.setHeader("cache-control", "no-store");
+  response.end(adminV2ShellHtml(indexHtml, config));
+}
+
+// Inject the non-secret bootstrap config (publishable key + sign-in URL) into
+// the SPA shell so the browser can boot Clerk without a rebuild. The Clerk
+// publishable key is non-secret by definition; no secret ever crosses here.
+function adminV2ShellHtml(indexHtml: string, config: BrainAdminServiceConfig): string {
+  const uiConfig = { clerkPublishableKey: config.clerkPublishableKey, signInUrl: "/admin-v2" };
+  const json = JSON.stringify(uiConfig).replace(/</g, "\\u003c");
+  const snippet = `<script>window.__BRAIN_UI_CONFIG__=${json};</script>`;
+  if (indexHtml.includes("</head>")) return indexHtml.replace("</head>", `${snippet}</head>`);
+  return `${snippet}${indexHtml}`;
+}
+
+function contentTypeForPath(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  const map: Record<string, string> = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".map": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".txt": "text/plain; charset=utf-8",
+  };
+  return map[ext] ?? "application/octet-stream";
+}
+
+// Note: the build path is deliberately NOT in this body — this route is
+// unauthenticated, so the absolute server path is logged server-side instead.
+function adminV2NotBuiltPage(): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Brain console not built</title><style>body{font:16px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;margin:3rem auto;max-width:640px;padding:0 1rem;background:#08111f;color:#e8eef8}.card{border:1px solid #29405e;border-radius:16px;padding:24px;background:#0f1b2d}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#06101f;border:1px solid #253a57;border-radius:6px;padding:2px 6px}.muted{color:#99a8bd}</style></head><body><section class="card"><h1>Brain console is not built yet</h1><p>The <code>/admin-v2</code> React console has no build output.</p><p class="muted">Run <code>pnpm --filter @brain/web-ui build</code> (or <code>pnpm run build</code> from the repo root) to produce it, then reload. The legacy console remains available at <code>/admin</code>.</p></section></body></html>`;
 }
 
 function sendDownload(response: ServerResponse, filename: string, body: string): void {

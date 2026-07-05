@@ -19,6 +19,11 @@ export interface EnvKeySchemaEntry {
   group: EnvKeyGroup;
   required: boolean;
   secret: boolean;
+  // Whether the generic env-write endpoint (`POST /codex-chat/env`) will accept
+  // a write for this key. Derived from the service's allowed-key set so the UI
+  // renders non-writable rows read-only instead of offering an input that the
+  // server would 403. Set by `buildEnvSchema` (never hardcoded per key here).
+  writable: boolean;
   description: string;
   kind: EnvKeyKind;
   enumValues?: string[];
@@ -30,6 +35,10 @@ export interface EnvFieldError {
   message: string;
 }
 
+// The static schema is authored without `writable`; that flag depends on the
+// service's allowed-key set and is stamped per response by `buildEnvSchema`.
+export type EnvKeyBaseEntry = Omit<EnvKeySchemaEntry, "writable">;
+
 // Union of the env-schema and capability-admin-reads secretish heuristics: any
 // key name hinting at a secret is treated as one (presence-only, never echoed).
 export const SECRETISH_RE = /(SECRET|TOKEN|KEY|PASSWORD|COOKIE|SESSION|CREDENTIAL|SIGNATURE)/i;
@@ -38,7 +47,7 @@ const SERVICE_TIER_MODES = ["auto", "always", "omit"] as const;
 // Static schema for the keys the current admin UI hardcodes. Unrecognized keys
 // found in the env file are surfaced dynamically in the `other` group by
 // `buildEnvSchema` below.
-export const BRAIN_ENV_SCHEMA: EnvKeySchemaEntry[] = [
+export const BRAIN_ENV_SCHEMA: EnvKeyBaseEntry[] = [
   // Feature flags
   entry("CODEX_CHAT_API_ENABLED", "feature_flags", false, "Enable the codex-chat loopback HTTP gateway (audio ingest, agent tail).", "boolean"),
   entry("CODEX_CHAT_SLACK_ENABLED", "feature_flags", false, "Enable codex-chat's Slack entrypoint.", "boolean"),
@@ -71,18 +80,22 @@ export const BRAIN_ENV_SCHEMA: EnvKeySchemaEntry[] = [
 
 const SCHEMA_BY_KEY = new Map(BRAIN_ENV_SCHEMA.map((item) => [item.key, item]));
 
-function entry(key: string, group: EnvKeyGroup, required: boolean, description: string, kind: EnvKeyKind, enumValues?: string[]): EnvKeySchemaEntry {
+function entry(key: string, group: EnvKeyGroup, required: boolean, description: string, kind: EnvKeyKind, enumValues?: string[]): EnvKeyBaseEntry {
   return { key, group, required, secret: kind === "secret" || SECRETISH_RE.test(key), description, kind, enumValues };
 }
 
-export function envKeySchemaEntry(key: string): EnvKeySchemaEntry | undefined {
+export function envKeySchemaEntry(key: string): EnvKeyBaseEntry | undefined {
   return SCHEMA_BY_KEY.get(key);
 }
 
 // Build the full schema for a UI: the static entries plus an `other` group row
-// for every unrecognized key already present in the env file.
-export function buildEnvSchema(presentKeys: Iterable<string>): EnvKeySchemaEntry[] {
-  const schema = BRAIN_ENV_SCHEMA.map((item) => ({ ...item }));
+// for every unrecognized key already present in the env file. Each entry is
+// stamped `writable` from `allowedKeys` (the service's env-write allowlist) so
+// the UI can render non-writable rows read-only instead of offering an input
+// the server would reject with 403.
+export function buildEnvSchema(presentKeys: Iterable<string>, allowedKeys: Iterable<string> = []): EnvKeySchemaEntry[] {
+  const writableKeys = new Set(allowedKeys);
+  const schema: EnvKeySchemaEntry[] = BRAIN_ENV_SCHEMA.map((item) => ({ ...item, writable: writableKeys.has(item.key) }));
   const known = new Set(BRAIN_ENV_SCHEMA.map((item) => item.key));
   const extras = new Set<string>();
   for (const key of presentKeys) {
@@ -94,6 +107,7 @@ export function buildEnvSchema(presentKeys: Iterable<string>): EnvKeySchemaEntry
       group: "other",
       required: false,
       secret: SECRETISH_RE.test(key),
+      writable: writableKeys.has(key),
       description: "Unrecognized key present in the codex-chat env file; not managed by the Brain admin schema.",
       kind: SECRETISH_RE.test(key) ? "secret" : "string",
     });

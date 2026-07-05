@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type http from "node:http";
@@ -53,6 +53,7 @@ function config(root: string, overrides: Partial<BrainAdminServiceConfig> = {}):
     capabilityStorePath: path.join(root, "capabilities.json"),
     capabilityAuditLogPath: path.join(root, "capability-audit.jsonl"),
     capabilityDecisionsDir: path.join(root, "codex-chat", "data", "state", "capability_decisions"),
+    adminV2Dir: path.join(root, "ui-dist"),
     ...overrides,
   } as BrainAdminServiceConfig;
 }
@@ -663,6 +664,51 @@ test("brain admin OpenRouter settings write env, codex profile, and codex-chat c
   }
 });
 
+test("brain admin OpenRouter write accepts a changed codexProfile when the confirmation pins the read state", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-openrouter-profile-"));
+  try {
+    const cfg = config(root);
+    await withServer(cfg, authDeps(), async (baseUrl) => {
+      const settings = await fetch(`${baseUrl}/api/admin/brain/openrouter/settings`, { headers: authHeaders() });
+      assert.equal(settings.status, 200);
+      // The summary serves the CURRENT profile path + governed key set the client
+      // must echo back verbatim (never recompute from the value being written).
+      const summary = await settings.json() as { env: { envFile: string }; profilePath: string; confirmationKeys: string[]; current: { codexProfile: string } };
+      assert.equal(summary.current.codexProfile, "openrouter");
+      assert.match(summary.profilePath, /openrouter\.config\.toml$/);
+
+      // Edit the profile field to a NEW value while confirming the state we read
+      // (current profile path). This 400'd forever before the fix (server used to
+      // recompute the expected path from the submitted codexProfile).
+      const write = await fetch(`${baseUrl}/api/admin/brain/openrouter/settings`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "z-ai/glm-5.2",
+          codexProfile: "openrouter-alt",
+          modelProvider: "openrouter",
+          serviceTierMode: "omit",
+          confirmation: {
+            token: "brain-admin-openrouter-settings-confirmed-v1",
+            action: "openrouter.settings.write",
+            envFile: summary.env.envFile,
+            profilePath: summary.profilePath,
+            keys: summary.confirmationKeys,
+          },
+        }),
+      });
+      assert.equal(write.status, 200);
+      const payload = await write.json() as { profilePath: string; writtenKeys: string[] };
+      // The profile file actually written reflects the NEW profile name.
+      assert.match(payload.profilePath, /openrouter-alt\.config\.toml$/);
+      const envText = await readFile(path.join(root, "codex-chat.env"), "utf8");
+      assert.match(envText, /CODEX_CHAT_SUBAGENTS_DEFAULT_CODEX_PROFILE='openrouter-alt'/);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("brain admin operation API keeps plan low-friction and requires explicit live confirmation", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-op-"));
   const calls: string[] = [];
@@ -1230,7 +1276,7 @@ test("brain admin env schema exposes grouped metadata including an other group f
       const res = await fetch(`${baseUrl}/api/admin/brain/env/schema`, { headers: authHeaders() });
       assert.equal(res.status, 200);
       // Plan §6.4: the endpoint returns the bare schema array (no wrapper object).
-      const payload = await res.json() as Array<{ key: string; group: string; required: boolean; secret: boolean; description: string }>;
+      const payload = await res.json() as Array<{ key: string; group: string; required: boolean; secret: boolean; writable: boolean; description: string }>;
       assert.ok(Array.isArray(payload));
       const by = Object.fromEntries(payload.map((entry) => [entry.key, entry]));
       assert.equal(by.SLACK_BOT_TOKEN.group, "slack");
@@ -1240,10 +1286,19 @@ test("brain admin env schema exposes grouped metadata including an other group f
       assert.equal(by.CODEX_CHAT_CODEX_MODEL.group, "model");
       assert.equal(by.OPENROUTER_API_KEY.group, "openrouter");
       assert.equal(by.CODEX_CHAT_API_ENABLED.group, "feature_flags");
+      // `writable` reflects the service's env-write allowlist (config allows only
+      // CODEX_CHAT_BASE_URL + SLACK_BOT_TOKEN here), so the UI can render
+      // non-writable rows read-only instead of offering an input the server 403s.
+      assert.equal(by.SLACK_BOT_TOKEN.writable, true);
+      assert.equal(by.CODEX_CHAT_BASE_URL.writable, true);
+      assert.equal(by.CODEX_CHAT_CODEX_MODEL.writable, false);
       // Unrecognized keys present in the env file surface under the other group.
       assert.equal(by.SOME_CUSTOM_FLAG.group, "other");
+      // A non-allowlisted key (recognized or not) is marked writable:false.
+      assert.equal(by.SOME_CUSTOM_FLAG.writable, false);
       assert.equal(by.CUSTOM_API_TOKEN.group, "other");
       assert.equal(by.CUSTOM_API_TOKEN.secret, true);
+      assert.equal(by.CUSTOM_API_TOKEN.writable, false);
       assert.equal(JSON.stringify(payload).includes("xoxb-super-secret"), false);
       assert.equal(JSON.stringify(payload).includes("shh"), false);
     });
@@ -1252,34 +1307,44 @@ test("brain admin env schema exposes grouped metadata including an other group f
   }
 });
 
-test("brain admin env write still requires the approval phrase and validates against the schema", async () => {
+test("brain admin env write gates on confirmation (confirmed flag OR legacy phrase) and validates against the schema", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-env-validate-"));
+  const fakeBotToken = ["xoxb", "super", "secret"].join("-");
   try {
     await withServer(config(root), authDeps(), async (baseUrl) => {
-      // The approval phrase is still required (the legacy console posts on one click).
-      const noApproval = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
+      // Plan §6.4 / §8 step 4: a one-click write from any client — no `confirmed`
+      // flag and no approval phrase — must be refused (never a silent secret
+      // overwrite), even for otherwise-valid, allowlisted keys.
+      const noConfirmation = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
         method: "POST",
         headers: { ...authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ entries: { CODEX_CHAT_BASE_URL: "https://brain.example.test", SLACK_BOT_TOKEN: "xoxb-super-secret" } }),
+        body: JSON.stringify({ entries: { CODEX_CHAT_BASE_URL: "https://brain.example.test", SLACK_BOT_TOKEN: fakeBotToken } }),
       });
-      assert.equal(noApproval.status, 400);
-      assert.equal((await noApproval.json() as { error: string }).error, "approval_required");
+      assert.equal(noConfirmation.status, 400);
+      assert.equal((await noConfirmation.json() as { error: string }).error, "approval_required");
 
-      // With the phrase, allowed writes succeed.
-      const write = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
+      // The React console sends `confirmed: true` after its ConfirmDialog → succeeds.
+      const confirmedWrite = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
         method: "POST",
         headers: { ...authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ approval: "write env", entries: { CODEX_CHAT_BASE_URL: "https://brain.example.test", SLACK_BOT_TOKEN: "xoxb-super-secret" } }),
+        body: JSON.stringify({ confirmed: true, entries: { CODEX_CHAT_BASE_URL: "https://brain.example.test", SLACK_BOT_TOKEN: fakeBotToken } }),
       });
-      assert.equal(write.status, 200);
-      const okPayload = await write.json() as { writtenKeys: string[] };
-      assert.deepEqual(okPayload.writtenKeys.sort(), ["CODEX_CHAT_BASE_URL", "SLACK_BOT_TOKEN"]);
+      assert.equal(confirmedWrite.status, 200);
+      assert.deepEqual((await confirmedWrite.json() as { writtenKeys: string[] }).writtenKeys.sort(), ["CODEX_CHAT_BASE_URL", "SLACK_BOT_TOKEN"]);
 
-      // With the phrase, schema validation still returns field-level errors (bad URL format).
+      // The still-live legacy console keeps posting the approval phrase → succeeds.
+      const phraseWrite = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ approval: "write env", entries: { CODEX_CHAT_BASE_URL: "https://brain.example.test" } }),
+      });
+      assert.equal(phraseWrite.status, 200);
+
+      // Schema validation still returns field-level errors (bad URL format).
       const invalid = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
         method: "POST",
         headers: { ...authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ approval: "write env", entries: { CODEX_CHAT_BASE_URL: "not-a-url" } }),
+        body: JSON.stringify({ confirmed: true, entries: { CODEX_CHAT_BASE_URL: "not-a-url" } }),
       });
       assert.equal(invalid.status, 400);
       const invalidPayload = await invalid.json() as { error: string; fieldErrors: Array<{ key: string; code: string }> };
@@ -1290,10 +1355,77 @@ test("brain admin env write still requires the approval phrase and validates aga
       const empty = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
         method: "POST",
         headers: { ...authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ approval: "write env", entries: { CODEX_CHAT_BASE_URL: "" } }),
+        body: JSON.stringify({ confirmed: true, entries: { CODEX_CHAT_BASE_URL: "" } }),
       });
       assert.equal(empty.status, 400);
       assert.ok((await empty.json() as { fieldErrors: Array<{ key: string; code: string }> }).fieldErrors.some((fieldError) => fieldError.code === "required"));
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("admin-v2 static handler serves the SPA shell, guards traversal, and reports an unbuilt UI", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-v2-"));
+  try {
+    // 503 when the build output is absent (adminV2Dir points at a missing dir).
+    // The absolute build path must NOT leak into this unauthenticated response.
+    const missingDir = path.join(root, "missing-ui");
+    await withServer(config(root, { adminV2Dir: missingDir }), authDeps(), async (baseUrl) => {
+      const unbuilt = await fetch(`${baseUrl}/admin-v2/`);
+      assert.equal(unbuilt.status, 503);
+      const unbuiltBody = await unbuilt.text();
+      assert.match(unbuiltBody, /not built/i);
+      assert.equal(unbuiltBody.includes(missingDir), false);
+    });
+
+    // With a build present: index injection, asset serving, SPA fallback, traversal block.
+    const uiDir = path.join(root, "ui-dist");
+    await mkdir(path.join(uiDir, "assets"), { recursive: true });
+    await writeFile(path.join(uiDir, "index.html"), "<!doctype html><html><head><title>Brain</title></head><body><div id=\"root\"></div></body></html>");
+    await writeFile(path.join(uiDir, "assets", "app.js"), "export const brand = 'brain';\n");
+    // A secret-looking file outside the build dir must never be reachable via traversal or symlink.
+    await writeFile(path.join(root, "secret.txt"), "TOP-SECRET-VALUE");
+    // A symlink INSIDE the build dir pointing outside it must not be served.
+    await symlink(path.join(root, "secret.txt"), path.join(uiDir, "leak.txt"));
+
+    await withServer(config(root, { adminV2Dir: uiDir, clerkPublishableKey: "pk_test_admin_v2" }), authDeps(), async (baseUrl) => {
+      // Root shell: 200 HTML with the injected non-secret bootstrap config, no-store.
+      const shell = await fetch(`${baseUrl}/admin-v2/`);
+      assert.equal(shell.status, 200);
+      assert.match(shell.headers.get("cache-control") ?? "", /no-store/);
+      const shellHtml = await shell.text();
+      assert.match(shellHtml, /window\.__BRAIN_UI_CONFIG__/);
+      assert.match(shellHtml, /pk_test_admin_v2/);
+      assert.match(shellHtml, /id="root"/);
+
+      // A direct request to index.html goes through the injected, no-store shell
+      // path — never the raw file with a long public cache (plan §6.6 / fix).
+      const directIndex = await fetch(`${baseUrl}/admin-v2/index.html`);
+      assert.equal(directIndex.status, 200);
+      assert.match(directIndex.headers.get("cache-control") ?? "", /no-store/);
+      assert.match(await directIndex.text(), /window\.__BRAIN_UI_CONFIG__/);
+
+      // Deep link to an SPA route with no matching file → index.html fallback.
+      const deep = await fetch(`${baseUrl}/admin-v2/settings`);
+      assert.equal(deep.status, 200);
+      assert.match(await deep.text(), /window\.__BRAIN_UI_CONFIG__/);
+
+      // Hashed asset served with a JS content type, real bytes, and a long cache.
+      const asset = await fetch(`${baseUrl}/admin-v2/assets/app.js`);
+      assert.equal(asset.status, 200);
+      assert.match(asset.headers.get("content-type") ?? "", /javascript/);
+      assert.match(asset.headers.get("cache-control") ?? "", /max-age=86400/);
+      assert.match(await asset.text(), /brand = 'brain'/);
+
+      // Path traversal must not escape the build dir.
+      const traversal = await fetch(`${baseUrl}/admin-v2/..%2f..%2fsecret.txt`);
+      assert.notEqual(traversal.status, 200);
+      assert.equal((await traversal.text()).includes("TOP-SECRET-VALUE"), false);
+
+      // A symlink inside the build dir pointing outside it must not be served.
+      const symlinked = await fetch(`${baseUrl}/admin-v2/leak.txt`);
+      assert.equal((await symlinked.text()).includes("TOP-SECRET-VALUE"), false);
     });
   } finally {
     await rm(root, { recursive: true, force: true });
