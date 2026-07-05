@@ -20,7 +20,7 @@ without repeating work.
 ### Progress (checkboxes are the source of truth for resume)
 
 - [x] Step 1 — Brain backend: §6.1 status, §6.2 setup state, §6.4 env schema + validated writes (Opus-implemented, Fable-reviewed: 10 review findings fixed; env-write approval gate retained until step 4)
-- [ ] Step 2 — Brain backend: §6.5 reads (summary, catalog, users, paginated audit, dry-run authorize)
+- [x] Step 2 — Brain backend: §6.5 reads (summary, catalog, users, paginated audit, dry-run authorize) (Opus-implemented, Fable-reviewed: 10 findings fixed incl. anonymized synthetic fixture, dry-run parity, fail-closed store load, anchored audit cursor; dry-run verified against 4 real logged decisions)
 - [ ] Step 3 — Brain backend: §6.5 writes (store migration + backup, grant/identity mutations, impact preview, audit events)
 - [ ] Step 4 — Frontend: React/Vite app at `/admin-v2` (Home + Settings, then Setup, Users, Operations)
 - [ ] Step 5 — codex-chat: §6.3 structured logging + agent tail, §6.7 IPC config command; Brain reroutes env writes

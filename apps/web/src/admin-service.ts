@@ -1,11 +1,14 @@
 import { spawn } from "node:child_process";
-import { appendFile, chmod, mkdir, open, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, open, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { authorizeBrainAdminRequest, isBrainAdminAuthConfigured, parseAdminAllowedEmails, type ClerkUserLookup, type VerifyClerkToken } from "./admin-auth.js";
 import { capabilityAdminSummary } from "./capabilities.js";
+import { actorContextFromExternalId, evaluateAuthorization, parseCapabilityStore, type CapabilityStore } from "./capability-store.js";
+import { buildCapabilityCatalog } from "./capability-catalog.js";
+import { buildAuditFeed, buildUsersResponse, type AuditOutcome, type AuditType } from "./capability-admin-reads.js";
 import { envFileMetadata, expandHomePath, parseEnvKeys, readEnvKeyPresence, resolveEnvFilePath, writeMergedEnvFile } from "./env-file.js";
 import { buildEnvSchema, SECRETISH_RE, validateEnvUpdates, type EnvFieldError } from "./env-schema.js";
 import { renderBrainAdminDeniedPage, renderBrainAdminPage, renderBrainAdminSignInPage } from "./admin-page.js";
@@ -263,6 +266,19 @@ async function handleAdminApi(request: IncomingMessage, response: ServerResponse
   }
   if (request.method === "GET" && url.pathname === "/api/admin/brain/capabilities") {
     return sendJson(response, 200, await capabilityAdminSummary({ storePath: config.capabilityStorePath, auditLogPath: config.capabilityAuditLogPath, adminEmail, codexChatPath: config.codexChatPath, workspacePath: config.workspacePath }));
+  }
+  if (request.method === "GET" && url.pathname === "/api/admin/brain/capabilities/catalog") {
+    return handleCapabilityCatalog(response, config);
+  }
+  if (request.method === "GET" && url.pathname === "/api/admin/brain/users") {
+    return handleCapabilityUsers(response, config);
+  }
+  if (request.method === "POST" && url.pathname === "/api/admin/brain/capabilities/check") {
+    const payload = await readJsonBody(request);
+    return handleCapabilityCheck(response, config, payload);
+  }
+  if (request.method === "GET" && url.pathname === "/api/admin/brain/audit") {
+    return handleCapabilityAudit(response, config, url);
   }
   if (request.method === "POST" && url.pathname === "/api/admin/brain/codex-chat/operation") {
     const payload = await readJsonBody(request);
@@ -610,6 +626,159 @@ async function recentCapabilityDenialCount(config: BrainAdminServiceConfig): Pro
     }
   }
   return count;
+}
+
+// --- §6.5 capability READ endpoints (catalog, users, dry-run, audit) ---------
+
+// Load the live enforced capability store. Returns the parsed store, or an error
+// reason when the store is missing/unreadable/invalid (fail-closed: a store
+// problem is surfaced, never treated as an empty allow-list). Every read failure
+// (ENOENT, EACCES, EISDIR, corrupt JSON) maps to a fail-closed reason rather than
+// throwing. The internal reason follows codex-chat's vocabulary
+// (`brain_store_unavailable:<path>`, `brain_store_invalid`,
+// `brain_store_invalid_schema`); `httpStoreReason` strips the path before it is
+// surfaced over HTTP.
+async function loadCapabilityStore(config: BrainAdminServiceConfig): Promise<{ store?: CapabilityStore; error?: string }> {
+  const storePath = resolveEnvFilePath(config.capabilityStorePath);
+  let text: string;
+  try {
+    text = await readFile(storePath, "utf8");
+  } catch {
+    // Any read failure fails closed. The raw error (which can include the path,
+    // errno details, etc.) is never surfaced.
+    return { error: `brain_store_unavailable:${storePath}` };
+  }
+  try {
+    return { store: parseCapabilityStore(text) };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    // Anchor the unavailable reason to the store path exactly as codex-chat does.
+    return { error: reason === "brain_store_unavailable" ? `brain_store_unavailable:${storePath}` : reason };
+  }
+}
+
+// Reason to surface over HTTP: strip codex-chat's `:<path>` suffix from the
+// unavailable reason so responses never echo the store path.
+function httpStoreReason(reason: string): string {
+  return reason.startsWith("brain_store_unavailable:") ? "brain_store_unavailable" : reason;
+}
+
+async function handleCapabilityCatalog(response: ServerResponse, config: BrainAdminServiceConfig): Promise<void> {
+  const { store, error } = await loadCapabilityStore(config);
+  if (error) return sendJson(response, 503, { error: "capability_store_unavailable", reason: httpStoreReason(error) });
+  return sendJson(response, 200, buildCapabilityCatalog(store));
+}
+
+async function handleCapabilityUsers(response: ServerResponse, config: BrainAdminServiceConfig): Promise<void> {
+  const { store, error } = await loadCapabilityStore(config);
+  if (error) return sendJson(response, 503, { error: "capability_store_unavailable", reason: httpStoreReason(error) });
+  return sendJson(response, 200, buildUsersResponse(store));
+}
+
+async function handleCapabilityCheck(response: ServerResponse, config: BrainAdminServiceConfig, payload: Record<string, unknown>): Promise<void> {
+  const subjectId = typeof payload.subjectId === "string" && payload.subjectId.trim() ? payload.subjectId.trim() : undefined;
+  const actorId = typeof payload.actorId === "string" && payload.actorId.trim() ? payload.actorId.trim() : undefined;
+  const operation = typeof payload.operation === "string" ? payload.operation.trim() : "";
+  const action = typeof payload.action === "string" && payload.action.trim() ? payload.action.trim() : undefined;
+  if (!operation) return sendJson(response, 400, { error: "operation_required" });
+  if (!subjectId && !actorId) return sendJson(response, 400, { error: "subject_or_actor_required" });
+  // A missing resource defaults to {} in old code, which the live runtime never
+  // sends and which neuters strict selector coverage (can report allow where the
+  // runtime denies). Require the concrete resource the runtime would send.
+  if (!payload.resource || typeof payload.resource !== "object" || Array.isArray(payload.resource)) {
+    return sendJson(response, 400, { error: "resource_required", hint: "Pass the concrete resource keys the runtime would send (source, surfaceKind, actorId, teamId, channelId, ...) as a JSON object of string values." });
+  }
+  const resource = payload.resource as Record<string, unknown>;
+
+  const identifier = subjectId ?? actorId ?? "";
+  const { store, error } = await loadCapabilityStore(config);
+  if (!store) {
+    // Store unreachable/invalid while enforcement is live means fail-closed deny.
+    return sendJson(response, 200, { allowed: false, reason: httpStoreReason(error ?? "brain_store_unavailable"), grantIds: [], subjectId: identifier });
+  }
+  const actor = subjectId ? { id: subjectId } : actorContextFromExternalId(actorId as string);
+  const result = evaluateAuthorization(store, { actor, requirement: { operation, action, resource } });
+  return sendJson(response, 200, { allowed: result.allowed, reason: result.reason, grantIds: result.grantIds, subjectId: identifier, subjectIds: result.subjectIds });
+}
+
+// Bound how much of each source we read for the merged audit feed.
+const AUDIT_MAX_DECISION_FILES = 30;
+
+function parseJsonlRecords(text: string): Record<string, unknown>[] {
+  const records: Record<string, unknown>[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const record = JSON.parse(line) as unknown;
+      if (record && typeof record === "object" && !Array.isArray(record)) records.push(record as Record<string, unknown>);
+    } catch {
+      // Skip malformed lines rather than fail the whole feed.
+    }
+  }
+  return records;
+}
+
+async function readCapabilityDecisionRecords(config: BrainAdminServiceConfig): Promise<Record<string, unknown>[]> {
+  const dir = await capabilityDecisionsDirPath(config);
+  let entries: string[];
+  try {
+    entries = (await readdir(dir)).filter((name) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name)).sort().reverse();
+  } catch {
+    return [];
+  }
+  // Read the per-day files in parallel (bounded by AUDIT_MAX_DECISION_FILES and
+  // each file's tail window) instead of awaiting them one at a time.
+  const texts = await Promise.all(entries.slice(0, AUDIT_MAX_DECISION_FILES).map((name) => readFileTail(path.join(dir, name), AUDIT_TAIL_BYTES)));
+  const records: Record<string, unknown>[] = [];
+  for (const text of texts) records.push(...parseJsonlRecords(text));
+  return records;
+}
+
+function encodeAuditCursor(offset: number, newestTimeMs: number | null): string {
+  return Buffer.from(JSON.stringify({ o: offset, t: newestTimeMs }), "utf8").toString("base64url");
+}
+
+function decodeAuditCursor(token: string | null): { offset: number; anchorMs: number | null } {
+  if (!token) return { offset: 0, anchorMs: null };
+  try {
+    const parsed = JSON.parse(Buffer.from(token, "base64url").toString("utf8")) as { o?: unknown; t?: unknown };
+    const offsetRaw = typeof parsed.o === "number" && Number.isFinite(parsed.o) ? Math.floor(parsed.o) : 0;
+    const anchorMs = typeof parsed.t === "number" && Number.isFinite(parsed.t) ? parsed.t : null;
+    return { offset: offsetRaw > 0 ? offsetRaw : 0, anchorMs };
+  } catch {
+    return { offset: 0, anchorMs: null };
+  }
+}
+
+async function handleCapabilityAudit(response: ServerResponse, config: BrainAdminServiceConfig, url: URL): Promise<void> {
+  const typeParam = url.searchParams.get("type");
+  const type: AuditType | undefined = typeParam === "capability" || typeParam === "operations" ? typeParam : undefined;
+  const outcomeParam = url.searchParams.get("outcome");
+  const outcome: AuditOutcome | undefined = outcomeParam === "allowed" || outcomeParam === "denied" ? outcomeParam : undefined;
+  const actor = url.searchParams.get("actor")?.trim() || undefined;
+  const operation = url.searchParams.get("operation")?.trim() || undefined;
+  const limitRaw = Number.parseInt(url.searchParams.get("limit") ?? "", 10);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 200) : 50;
+  const { offset, anchorMs } = decodeAuditCursor(url.searchParams.get("cursor"));
+
+  const includeOperations = type !== "capability";
+  const includeCapability = type !== "operations";
+  // Read the three audit sources in parallel rather than one after another.
+  const [operationsRecords, capabilityDecisionRecords, capabilityAuditRecords] = await Promise.all([
+    includeOperations ? readFileTail(resolveEnvFilePath(config.auditLogPath), AUDIT_TAIL_BYTES).then(parseJsonlRecords) : Promise.resolve([] as Record<string, unknown>[]),
+    includeCapability ? readCapabilityDecisionRecords(config) : Promise.resolve([] as Record<string, unknown>[]),
+    includeCapability ? readFileTail(resolveEnvFilePath(config.capabilityAuditLogPath), AUDIT_TAIL_BYTES).then(parseJsonlRecords) : Promise.resolve([] as Record<string, unknown>[]),
+  ]);
+
+  const feed = buildAuditFeed({ operationsRecords, capabilityDecisionRecords, capabilityAuditRecords, query: { type, outcome, actor, operation, offset, limit, anchorMs } });
+  return sendJson(response, 200, {
+    schemaVersion: 1,
+    rows: feed.rows,
+    total: feed.total,
+    limit,
+    nextCursor: feed.nextOffset === null ? null : encodeAuditCursor(feed.nextOffset, feed.newestTimeMs),
+    filters: { type: type ?? "both", outcome: outcome ?? null, actor: actor ?? null, operation: operation ?? null },
+  });
 }
 
 // --- §6.4 env schema response ------------------------------------------------

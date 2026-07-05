@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type http from "node:http";
@@ -8,6 +8,7 @@ import { authorizeBrainAdminRequest, parseAdminAllowedEmails } from "./admin-aut
 import { renderBrainAdminDeniedPage, renderBrainAdminPage, renderBrainAdminSignInPage } from "./admin-page.js";
 import { createBrainAdminServer, type BrainAdminServiceConfig, type BrainAdminServiceDeps } from "./admin-service.js";
 import { mergeEnvFileText } from "./env-file.js";
+import { LIVE_CAPABILITY_STORE_JSON } from "./capability-store.fixture.js";
 
 async function writeJson(filePath: string, value: unknown): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true });
@@ -1319,6 +1320,355 @@ process.stdout.write(JSON.stringify({ settings: { event_subscriptions: { request
       const download = await fetch(`${baseUrl}/api/admin/brain/slack/manifest/download`, { headers: authHeaders() });
       assert.equal(download.status, 200);
       assert.equal(download.headers.get("content-disposition"), 'attachment; filename="brain.slack.manifest.json"');
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// --- §6.5 capability READ endpoints -----------------------------------------
+
+// SYNTHETIC capability decisions modeled on the codex-chat decision shape
+// (allowed + denied, across telegram and slack actors). Identifiers mirror the
+// synthetic fixture store so the dry-run endpoint reproduces each outcome
+// against the same store content the enforcer evaluates. No real Telegram/Slack
+// identifiers appear here.
+const REAL_DECISIONS = [
+  {
+    name: "allowed_telegram", allowed: true,
+    actorId: "telegram:user:900000001", operation: "telegram.event.receive", action: "receive",
+    resource: { source: "telegram", surfaceKind: "telegram", chatId: "900000001", messageId: "10001", conversationSessionId: "session_alpha01", actorId: "telegram:user:900000001" },
+  },
+  {
+    name: "allowed_slack", allowed: true,
+    actorId: "slack:team:T00SYNTH01:user:U00SYNTHAA", operation: "slack.event.receive", action: "receive",
+    resource: { source: "slack", surfaceKind: "slack", teamId: "T00SYNTH01", channelId: "C00SYNTH01", threadTs: "1700000001.000100", messageTs: "1700000001.000100", messageId: "1700000001.000100", conversationSessionId: "session_beta01", actorId: "slack:team:T00SYNTH01:user:U00SYNTHAA" },
+  },
+  {
+    name: "denied_slack_unlinked", allowed: false,
+    actorId: "slack:team:T00SYNTH01:user:U00SYNTHBB", operation: "slack.event.receive", action: "receive",
+    resource: { source: "slack", surfaceKind: "slack", teamId: "T00SYNTH01", channelId: "C00SYNTH01", threadTs: "1700000002.000200", messageTs: "1700000002.000200", messageId: "1700000002.000200", conversationSessionId: "session_gamma01", actorId: "slack:team:T00SYNTH01:user:U00SYNTHBB" },
+  },
+  {
+    name: "denied_telegram_system", allowed: false,
+    actorId: "telegram:system", operation: "system.callback.enqueue", action: "enqueue",
+    resource: { source: "subagent", surfaceKind: "telegram", chatId: "900000001", messageId: "10002", conversationSessionId: "session_alpha01", actorId: "telegram:system" },
+  },
+];
+
+async function writeLiveStore(root: string): Promise<void> {
+  await writeFile(path.join(root, "capabilities.json"), LIVE_CAPABILITY_STORE_JSON);
+}
+
+test("brain capability catalog endpoint serves groups as data from the store vocabulary", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-catalog-"));
+  try {
+    await writeLiveStore(root);
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/brain/capabilities/catalog`, { headers: authHeaders() });
+      assert.equal(res.status, 200);
+      const payload = await res.json() as {
+        storeAvailable: boolean;
+        groups: Array<{ id: string; status: string; childCount: number; presentChildCount: number; children: Array<{ id: string; present: boolean }> }>;
+        counts: { groups: number; uncategorized: number };
+      };
+      assert.equal(payload.storeAvailable, true);
+      const groupIds = payload.groups.map((group) => group.id);
+      // Plan §2.3 canonical group list renders first, in order, as data.
+      assert.deepEqual(groupIds.slice(0, 8), ["projects", "crm", "calendar", "slack", "todos", "finance", "health", "capability-admin"]);
+      const byId = Object.fromEntries(payload.groups.map((group) => [group.id, group]));
+      // Finance/Health are ordinary not-yet-connected placeholder groups (empty).
+      assert.equal(byId.finance.status, "placeholder");
+      assert.equal(byId.finance.childCount, 0);
+      assert.equal(byId.health.status, "placeholder");
+      // Real grant vocabulary is marked present under human groups.
+      assert.equal(byId.projects.children.find((child) => child.id === "projects.read")?.present, true);
+      assert.equal(byId.output.children.find((child) => child.id === "output.text.send")?.present, true);
+      assert.equal(byId.events.children.find((child) => child.id === "telegram.event.receive")?.present, true);
+      // Every capability id the store references maps to a catalog group.
+      assert.equal(payload.counts.uncategorized, 0);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain users endpoint summarizes people, identities, grants, and system subjects", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-users-"));
+  try {
+    await writeLiveStore(root);
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/brain/users`, { headers: authHeaders() });
+      assert.equal(res.status, 200);
+      const payload = await res.json() as {
+        storeAvailable: boolean;
+        people: Array<{ id: string; displayName: string; identities: Array<{ provider: string; externalId: string; linkedAt?: string }>; grants: { total: number; grantedGroupCount: number; totalGroupCount: number; byGroup: Array<{ id: string; granted: boolean }> } }>;
+        systemSubjects: Array<{ id: string; grants: { total: number; capabilityIds: string[] } }>;
+        counts: { people: number; systemSubjects: number };
+      };
+      assert.equal(payload.storeAvailable, true);
+      assert.equal(payload.counts.people, 1);
+      const tim = payload.people.find((person) => person.id === "person_alpha");
+      assert.ok(tim, "person_alpha present");
+      // Two linked identities (telegram + slack); the observed-unlinked slack
+      // identity has no personId and must not attach to this person.
+      assert.deepEqual(tim.identities.map((identity) => identity.provider).sort(), ["slack", "telegram"]);
+      for (const identity of tim.identities) assert.ok(identity.linkedAt, "identity linked date present");
+      assert.ok(tim.grants.total > 0);
+      assert.ok(tim.grants.grantedGroupCount > 0);
+      assert.equal(tim.grants.byGroup.find((group) => group.id === "projects")?.granted, true);
+      // System subjects are separated from people.
+      const runtime = payload.systemSubjects.find((subject) => subject.id === "system:codex-chat-runtime");
+      assert.ok(runtime, "system subject present");
+      assert.ok(runtime.grants.capabilityIds.includes("system.callback.enqueue"));
+      assert.equal(payload.people.some((person) => person.id.startsWith("system:")), false);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain catalog and users endpoints fail closed with 503 when the store is unavailable", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-nostore-"));
+  try {
+    // No capabilities.json written: the store is unavailable.
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      for (const route of ["capabilities/catalog", "users"]) {
+        const res = await fetch(`${baseUrl}/api/admin/brain/${route}`, { headers: authHeaders() });
+        assert.equal(res.status, 503, `${route} should 503 when the store is unavailable`);
+        const payload = await res.json() as { error: string; reason: string };
+        assert.equal(payload.error, "capability_store_unavailable");
+        // The store path is never echoed in the surfaced reason.
+        assert.equal(payload.reason, "brain_store_unavailable");
+        assert.equal(JSON.stringify(payload).includes(root), false);
+      }
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function disabledSubjectStore(): unknown {
+  return {
+    schemaVersion: 2,
+    people: [{ id: "p_dis", displayName: "Disabled Subject Owner", status: "active", personType: "human", primarySubjectId: "person:dis", subjectIds: ["person:dis", "identity:dis_off"] }],
+    externalIdentities: [],
+    subjects: [
+      { id: "person:dis", kind: "person", personId: "p_dis", status: "active" },
+      { id: "identity:dis_off", kind: "external_identity", personId: "p_dis", status: "disabled" },
+    ],
+    grantBundles: [],
+    grants: [
+      // Enforcing grant on a DISABLED subject: the authorizer never resolves it,
+      // so it must not count as in force.
+      { id: "g_disabled", subjectId: "identity:dis_off", capabilityId: "projects.read", grantKind: "capability", actions: ["read"], resource: { selectors: { projectId: "*" } }, status: "active", enforcement: "enforcing" },
+      // Enforcing grant on the ACTIVE subject for a capability id the catalog does
+      // not map to any group: must surface under "other".
+      { id: "g_other", subjectId: "person:dis", capabilityId: "madeup.capability", grantKind: "capability", actions: ["read"], resource: { selectors: {} }, status: "active", enforcement: "enforcing" },
+    ],
+  };
+}
+
+test("brain users endpoint excludes disabled subjects and surfaces unmapped grants under 'other'", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-users-disabled-"));
+  try {
+    await writeJson(path.join(root, "capabilities.json"), disabledSubjectStore());
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/brain/users`, { headers: authHeaders() });
+      assert.equal(res.status, 200);
+      const payload = await res.json() as {
+        people: Array<{
+          id: string;
+          activeSubjectIds: string[];
+          disabledSubjects: Array<{ id: string; status?: string; grantCount: number; inForce: number }>;
+          grants: { inForce: number; byGroup: Array<{ id: string; granted: boolean; grantedChildCount: number }> };
+        }>;
+      };
+      const person = payload.people.find((p) => p.id === "p_dis");
+      assert.ok(person, "p_dis present");
+      // The active subject resolves; the disabled subject does not.
+      assert.deepEqual(person.activeSubjectIds, ["person:dis"]);
+      // The disabled subject's enforcing projects grant is not in force.
+      const projects = person.grants.byGroup.find((g) => g.id === "projects");
+      assert.equal(projects?.granted, false);
+      assert.equal(projects?.grantedChildCount, 0);
+      const disabled = person.disabledSubjects.find((s) => s.id === "identity:dis_off");
+      assert.ok(disabled, "disabled subject surfaced");
+      assert.equal(disabled.status, "disabled");
+      assert.equal(disabled.grantCount, 1);
+      assert.equal(disabled.inForce, 0);
+      // The active subject's grant on an unmapped capability id shows under "other".
+      const other = person.grants.byGroup.find((g) => g.id === "other");
+      assert.ok(other, "'other' group present");
+      assert.equal(other.granted, true);
+      assert.equal(person.grants.inForce, 1);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain dry-run check reproduces real codex-chat decisions against the enforced store", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-check-real-"));
+  try {
+    await writeLiveStore(root);
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      for (const decision of REAL_DECISIONS) {
+        const res = await fetch(`${baseUrl}/api/admin/brain/capabilities/check`, {
+          method: "POST",
+          headers: { ...authHeaders(), "content-type": "application/json" },
+          body: JSON.stringify({ actorId: decision.actorId, operation: decision.operation, action: decision.action, resource: decision.resource }),
+        });
+        assert.equal(res.status, 200);
+        const payload = await res.json() as { allowed: boolean; reason: string; subjectId: string };
+        assert.equal(payload.allowed, decision.allowed, `${decision.name}: expected allowed=${decision.allowed}, got ${payload.allowed} (${payload.reason})`);
+        assert.equal(payload.subjectId, decision.actorId);
+      }
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function craftedStore(): unknown {
+  return {
+    schemaVersion: 2,
+    people: [{ id: "p_test", status: "active", primarySubjectId: "person:test", subjectIds: ["person:test"] }],
+    externalIdentities: [],
+    subjects: [{ id: "person:test", kind: "person", personId: "p_test" }],
+    grantBundles: [],
+    grants: [
+      { id: "g_ok", subjectId: "person:test", capabilityId: "projects.read", grantKind: "capability", actions: ["read"], resource: { selectors: { projectId: "*" } }, status: "active", enforcement: "enforcing" },
+      { id: "g_expired", subjectId: "person:test", capabilityId: "calendar.event.read", grantKind: "capability", actions: ["read"], resource: { selectors: { calendarId: "*" } }, status: "active", enforcement: "enforcing", expiresAt: "2020-01-01T00:00:00.000Z" },
+      { id: "g_nonenf", subjectId: "person:test", capabilityId: "crm.contact.read", grantKind: "capability", actions: ["read"], resource: { selectors: { contactId: "*" } }, status: "active", enforcement: "non_enforcing" },
+    ],
+  };
+}
+
+test("brain dry-run check covers allow, deny, expired, missing-selector, and non-enforcing cases", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-check-crafted-"));
+  try {
+    await writeJson(path.join(root, "capabilities.json"), craftedStore());
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      async function check(body: unknown): Promise<{ allowed: boolean; reason: string }> {
+        const res = await fetch(`${baseUrl}/api/admin/brain/capabilities/check`, {
+          method: "POST", headers: { ...authHeaders(), "content-type": "application/json" }, body: JSON.stringify(body),
+        });
+        assert.equal(res.status, 200);
+        return await res.json() as { allowed: boolean; reason: string };
+      }
+      // allow: enforcing grant matches capability + covered selector.
+      assert.equal((await check({ subjectId: "person:test", operation: "projects.read", resource: { projectId: "p1" } })).allowed, true);
+      // deny: no grant for this capability.
+      assert.equal((await check({ subjectId: "person:test", operation: "todos.item.read", resource: { listId: "l1" } })).allowed, false);
+      // expired grant is denied.
+      assert.equal((await check({ subjectId: "person:test", operation: "calendar.event.read", resource: { calendarId: "c1" } })).allowed, false);
+      // missing selector coverage: resource carries a concrete key the grant does not select.
+      assert.equal((await check({ subjectId: "person:test", operation: "projects.read", resource: { projectId: "p1", repoAlias: "brain" } })).allowed, false);
+      // non-enforcing grant is denied (matches codex-chat authorize()).
+      assert.equal((await check({ subjectId: "person:test", operation: "crm.contact.read", resource: { contactId: "c1" } })).allowed, false);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain dry-run check requires operation and a subject/actor and fails closed without a store", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-check-guard-"));
+  try {
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const missingOp = await fetch(`${baseUrl}/api/admin/brain/capabilities/check`, { method: "POST", headers: { ...authHeaders(), "content-type": "application/json" }, body: JSON.stringify({ subjectId: "person:test" }) });
+      assert.equal(missingOp.status, 400);
+      const missingActor = await fetch(`${baseUrl}/api/admin/brain/capabilities/check`, { method: "POST", headers: { ...authHeaders(), "content-type": "application/json" }, body: JSON.stringify({ operation: "projects.read" }) });
+      assert.equal(missingActor.status, 400);
+      // A missing resource is rejected: the runtime always sends a concrete
+      // resource, and defaulting to {} would neuter strict selector coverage.
+      const missingResource = await fetch(`${baseUrl}/api/admin/brain/capabilities/check`, { method: "POST", headers: { ...authHeaders(), "content-type": "application/json" }, body: JSON.stringify({ subjectId: "person:test", operation: "projects.read" }) });
+      assert.equal(missingResource.status, 400);
+      assert.equal((await missingResource.json() as { error: string }).error, "resource_required");
+      // No store on disk: fail-closed deny, not a silent allow.
+      const noStore = await fetch(`${baseUrl}/api/admin/brain/capabilities/check`, { method: "POST", headers: { ...authHeaders(), "content-type": "application/json" }, body: JSON.stringify({ subjectId: "person:test", operation: "projects.read", resource: {} }) });
+      assert.equal(noStore.status, 200);
+      const payload = await noStore.json() as { allowed: boolean; reason: string };
+      assert.equal(payload.allowed, false);
+      assert.equal(payload.reason, "brain_store_unavailable");
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain audit endpoint merges, filters, paginates, and never echoes secrets", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-audit-"));
+  try {
+    const day = "2026-07-05";
+    const t = (n: number) => `2026-07-05T10:0${n}:00.000Z`;
+    // Brain admin (operations) audit JSONL.
+    await writeFile(path.join(root, "audit.jsonl"),
+      `${JSON.stringify({ at: t(0), action: "codex-chat.operation.execute", operation: "restart", status: 0, adminEmail: "tim@example.test" })}\n` +
+      `${JSON.stringify({ at: t(1), action: "codex-chat.env.write", keys: ["SLACK_BOT_TOKEN"], adminEmail: "tim@example.test" })}\n`);
+    // codex-chat capability decision records (with a token planted in a reason
+    // and a resource field to prove scrubbing).
+    const decisionsDir = path.join(root, "codex-chat", "data", "state", "capability_decisions");
+    // Fake Slack tokens are assembled at runtime so no secret-shaped literal
+    // appears in the source (GitHub push protection matches the raw pattern).
+    const fakeBotToken = ["xoxb", "1111111111", "supersecrettoken"].join("-");
+    const fakeBotToken2 = ["xoxb", "2222222222", "anothersecret"].join("-");
+    const fakeAppToken = ["xapp", "1", "A00SYNTH", "9999", "appsecret"].join("-");
+    await writeFileRecursive(path.join(decisionsDir, `${day}.jsonl`),
+      `${JSON.stringify({ checkedAt: t(2), actorId: "telegram:user:900000001", operation: "telegram.event.receive", action: "receive", allowed: true, resourceSummary: { chatId: "900000001" } })}\n` +
+      `${JSON.stringify({ checkedAt: t(3), actorId: "slack:team:T:user:U", operation: "slack.event.receive", action: "receive", allowed: false, reason: `denied token ${fakeBotToken} and app ${fakeAppToken}`, resourceSummary: { note: fakeBotToken2, channelId: "C1" } })}\n` +
+      `${JSON.stringify({ checkedAt: t(4), actorId: "telegram:system", operation: "system.callback.enqueue", action: "enqueue", allowed: false, reason: "actor_not_linked_to_brain_subject", resourceSummary: {} })}\n`);
+    await withServer(config(root, { capabilityDecisionsDir: decisionsDir }), authDeps(), async (baseUrl) => {
+      async function audit(query: string): Promise<{ rows: Array<{ type: string; actor: string; operation: string; result: string; target: string; reason?: string }>; total: number; nextCursor: string | null }> {
+        const res = await fetch(`${baseUrl}/api/admin/brain/audit${query}`, { headers: authHeaders() });
+        assert.equal(res.status, 200);
+        return await res.json() as never;
+      }
+      // Merged feed, newest first.
+      const all = await audit("");
+      assert.equal(all.total, 5);
+      assert.equal(all.rows[0].operation, "system.callback.enqueue");
+      assert.ok(all.rows.some((row) => row.type === "operations"));
+      assert.ok(all.rows.some((row) => row.type === "capability"));
+      // Type filter.
+      const capOnly = await audit("?type=capability");
+      assert.equal(capOnly.total, 3);
+      assert.ok(capOnly.rows.every((row) => row.type === "capability"));
+      const opsOnly = await audit("?type=operations");
+      assert.equal(opsOnly.total, 2);
+      // Outcome filter (denial-centric default emphasis is a filter here).
+      const denied = await audit("?outcome=denied");
+      assert.equal(denied.total, 2);
+      assert.ok(denied.rows.every((row) => row.result === "denied"));
+      // Actor filter.
+      const tg = await audit("?actor=telegram");
+      assert.ok(tg.rows.every((row) => row.actor.includes("telegram")));
+      // Pagination via opaque cursor.
+      const page1 = await audit("?limit=2");
+      assert.equal(page1.rows.length, 2);
+      assert.ok(page1.nextCursor);
+      // A newer record arriving between page-1 and page-2 must not shift page 2
+      // (anchored pagination): no duplicate, no skip.
+      await appendFile(path.join(decisionsDir, `${day}.jsonl`),
+        `${JSON.stringify({ checkedAt: t(5), actorId: "telegram:user:900000001", operation: "runtime.status.read", action: "read", allowed: true, resourceSummary: {} })}\n`);
+      const page2 = await audit(`?limit=2&cursor=${encodeURIComponent(page1.nextCursor as string)}`);
+      assert.ok(page2.rows.length >= 1);
+      assert.notEqual(page1.rows[0].operation, page2.rows[0].operation);
+      const pagedOps = [...page1.rows, ...page2.rows].map((row) => row.operation);
+      // The newer record is excluded from the anchored page; no page-1 row repeats on page 2.
+      assert.equal(pagedOps.includes("runtime.status.read"), false);
+      assert.equal(new Set(pagedOps).size, pagedOps.length);
+      // Restarting from page 1 surfaces the newer record.
+      const restart = await audit("?type=capability&limit=10");
+      assert.ok(restart.rows.some((row) => row.operation === "runtime.status.read"));
+      // Secret non-echo across the whole response.
+      const raw = JSON.stringify(await audit(""));
+      assert.equal(raw.includes(fakeBotToken), false);
+      assert.equal(raw.includes(fakeBotToken2), false);
+      // xapp app-level tokens are scrubbed too.
+      assert.equal(raw.includes(fakeAppToken), false);
+      assert.match(raw, /redacted-slack-token/);
     });
   } finally {
     await rm(root, { recursive: true, force: true });

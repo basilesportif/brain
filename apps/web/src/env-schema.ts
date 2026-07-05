@@ -30,7 +30,9 @@ export interface EnvFieldError {
   message: string;
 }
 
-export const SECRETISH_RE = /(SECRET|TOKEN|KEY|PASSWORD|COOKIE|SESSION|CREDENTIAL)/i;
+// Union of the env-schema and capability-admin-reads secretish heuristics: any
+// key name hinting at a secret is treated as one (presence-only, never echoed).
+export const SECRETISH_RE = /(SECRET|TOKEN|KEY|PASSWORD|COOKIE|SESSION|CREDENTIAL|SIGNATURE)/i;
 const SERVICE_TIER_MODES = ["auto", "always", "omit"] as const;
 
 // Static schema for the keys the current admin UI hardcodes. Unrecognized keys
