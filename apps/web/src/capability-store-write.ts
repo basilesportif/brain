@@ -167,7 +167,8 @@ export type MutationSpec =
   | { kind: "link_identity"; personId: string; provider: string; externalId: string; teamId?: string; adminEmail: string }
   | { kind: "unlink_identity"; personId: string; identityId: string; adminEmail: string }
   | { kind: "grant"; personId: string; target: string; selectors?: Record<string, unknown>; adminEmail: string }
-  | { kind: "revoke"; personId: string; grantId: string; adminEmail: string };
+  | { kind: "revoke"; personId: string; grantId: string; adminEmail: string }
+  | { kind: "revoke_batch"; personId: string; grantIds: string[]; reason?: string; adminEmail: string };
 
 export interface MutationOutcome {
   changed: boolean;
@@ -609,6 +610,56 @@ function applyRevoke(store: CapabilityStore, spec: Extract<MutationSpec, { kind:
   };
 }
 
+// Atomic batch revoke: revoke every named grant in ONE mutation so the store is
+// written once, ONE impact preview is computed for the combined change (fixing
+// the understated per-grant merge), and one audit event covers the batch. An
+// unknown grant id (not on any of the person's subjects) aborts the WHOLE batch
+// with a 404 — the client sends exact ids from GET /users, so an unknown id means
+// the store drifted and the operator must re-preview against the current store.
+// Already-revoked ids are a per-grant no-op (idempotent, mirrors single revoke).
+function applyRevokeBatch(store: CapabilityStore, spec: Extract<MutationSpec, { kind: "revoke_batch" }>): MutationOutcome {
+  const person = findPerson(store, spec.personId);
+  if (!Array.isArray(spec.grantIds) || spec.grantIds.length === 0) {
+    throw new CapabilityWriteError("invalid_request", 400, "grantIds is required");
+  }
+  const subjectSet = new Set(personSubjectIds(store, person));
+  const now = new Date().toISOString();
+  const requestedIds = [...new Set(spec.grantIds.map((grantId) => requireNonEmpty(grantId, "grantId")))];
+  const capabilityIds = new Set<string>();
+  const revokedGrantIds: string[] = [];
+  const reasonSuffix = spec.reason && spec.reason.trim() ? `: ${spec.reason.trim()}` : "";
+  for (const grantId of requestedIds) {
+    const grant = (store.grants ?? []).find((candidate) => candidate.id === grantId && subjectSet.has(candidate.subjectId));
+    if (!grant) throw new CapabilityWriteError("grant_not_found", 404, `Grant ${grantId} not found for ${person.id}`);
+    capabilityIds.add(grant.capabilityId);
+    const alreadyRevoked = grant.status === "revoked" || Boolean(grant.revokedAt);
+    if (!alreadyRevoked) {
+      grant.status = "revoked";
+      grant.revokedAt = now;
+      grant.reason = `Revoked by admin ${spec.adminEmail}${reasonSuffix}`;
+      revokedGrantIds.push(grantId);
+    }
+  }
+  const changed = revokedGrantIds.length > 0;
+  if (changed) store.updatedAt = now;
+
+  return {
+    changed,
+    personId: person.id,
+    explicitCapabilityIds: [...capabilityIds],
+    audit: {
+      action: "capability.grant.revoked",
+      adminEmail: spec.adminEmail,
+      personId: person.id,
+      batch: true,
+      grantIds: requestedIds,
+      revokedGrantIds,
+      capabilityIds: [...capabilityIds],
+    },
+    detail: { personId: person.id, grantIds: requestedIds, revokedGrantIds, capabilityIds: [...capabilityIds] },
+  };
+}
+
 export function applySpec(store: CapabilityStore, spec: MutationSpec): MutationOutcome {
   switch (spec.kind) {
     case "create_person":
@@ -621,6 +672,8 @@ export function applySpec(store: CapabilityStore, spec: MutationSpec): MutationO
       return applyGrant(store, spec);
     case "revoke":
       return applyRevoke(store, spec);
+    case "revoke_batch":
+      return applyRevokeBatch(store, spec);
     default: {
       const exhaustive: never = spec;
       throw new CapabilityWriteError("invalid_request", 400, `Unknown mutation ${String((exhaustive as { kind?: string }).kind)}`);

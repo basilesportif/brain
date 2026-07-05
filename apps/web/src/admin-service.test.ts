@@ -1261,7 +1261,13 @@ test("brain admin slack setup state persists completion and derives per-step don
       });
       assert.equal(reconfigure.status, 200);
       const after = await fetch(`${baseUrl}/api/admin/brain/slack/setup`, { headers: authHeaders() });
-      assert.equal((await after.json() as { setupComplete: boolean }).setupComplete, false);
+      const afterPayload = await after.json() as { setupComplete: boolean; completedBy?: string; lastCompletedAt?: string; lastCompletedBy?: string };
+      assert.equal(afterPayload.setupComplete, false);
+      // C1 (finding 9): marking setup incomplete preserves the prior completion
+      // provenance as last-completed instead of erasing who/when it was completed.
+      assert.equal(afterPayload.completedBy, undefined);
+      assert.equal(afterPayload.lastCompletedBy, completePayload.setup.completedBy);
+      assert.ok(afterPayload.lastCompletedAt, "last completion timestamp retained");
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -1990,6 +1996,183 @@ test("brain capability write refuses self-lockout, concurrent modification, and 
       assert.equal(conflict.status, 409);
       assert.equal(conflict.payload.error, "store_conflict");
       assert.equal(conflict.payload.retryable, true);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// A1 (grant entries): a person with TWO active subjects, each holding a
+// capability grant in the same catalog group, so the /users response must surface
+// the underlying grant entries computed across BOTH subjects.
+function multiSubjectStore(): string {
+  return JSON.stringify({
+    schemaVersion: 2,
+    people: [{ id: "person_multi", displayName: "Multi", status: "active", personType: "human", primarySubjectId: "person:person_multi", identityIds: ["identity_telegram_900000123"], subjectIds: ["person:person_multi"] }],
+    externalIdentities: [{ id: "identity_telegram_900000123", provider: "telegram", providerUserId: "900000123", personId: "person_multi", status: "linked" }],
+    identityProofs: [],
+    subjects: [
+      { id: "person:person_multi", personId: "person_multi", kind: "person", status: "active" },
+      { id: "subject:person_multi_secondary", personId: "person_multi", kind: "person", status: "active" },
+    ],
+    grants: [
+      { id: "g_primary_crm_read", subjectId: "person:person_multi", capabilityId: "crm.contact.read", grantKind: "capability", resource: { selectors: { scope: "owner_all", contactId: "*" } }, actions: ["*"], status: "active", enforcement: "enforcing" },
+      { id: "g_secondary_crm_write", subjectId: "subject:person_multi_secondary", capabilityId: "crm.contact.write", grantKind: "capability", resource: { selectors: { scope: "owner_all", contactId: "*" } }, actions: ["*"], status: "active", enforcement: "enforcing" },
+    ],
+  });
+}
+
+// A2/A3: two OVERLAPPING grants of the same capability on one subject, so
+// revoking only one leaves it allowed (per-grant preview understates) but
+// revoking BOTH in a batch denies it. person_ov also holds a capability-admin
+// grant + linked identity so batch-revoking the crm grants never trips lockout.
+function overlappingGrantsStore(): string {
+  return JSON.stringify({
+    schemaVersion: 2,
+    people: [{ id: "person_ov", displayName: "Overlap", status: "active", personType: "human", primarySubjectId: "person:person_ov", identityIds: ["identity_telegram_900000123"], subjectIds: ["person:person_ov"] }],
+    externalIdentities: [{ id: "identity_telegram_900000123", provider: "telegram", providerUserId: "900000123", personId: "person_ov", status: "linked" }],
+    identityProofs: [],
+    subjects: [{ id: "person:person_ov", personId: "person_ov", kind: "person", status: "active" }],
+    grants: [
+      { id: "g_ov_a", subjectId: "person:person_ov", capabilityId: "crm.contact.read", grantKind: "capability", resource: { selectors: {} }, actions: ["*"], status: "active", enforcement: "enforcing" },
+      { id: "g_ov_b", subjectId: "person:person_ov", capabilityId: "crm.contact.read", grantKind: "capability", resource: { selectors: {} }, actions: ["*"], status: "active", enforcement: "enforcing" },
+      { id: "g_ov_admin", subjectId: "person:person_ov", capabilityId: "capability.catalog.read", grantKind: "capability", resource: { selectors: {} }, actions: ["*"], status: "active", enforcement: "enforcing" },
+    ],
+  });
+}
+
+test("brain users response carries grant entries across every active subject (A1)", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-grant-entries-"));
+  try {
+    await writeFile(path.join(root, "capabilities.json"), multiSubjectStore());
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const users = (await (await fetch(`${baseUrl}/api/admin/brain/users`, { headers: authHeaders() })).json()) as any;
+      const person = users.people.find((p: any) => p.id === "person_multi");
+      assert.ok(person, "person present");
+      // Both subjects resolve as active.
+      assert.deepEqual([...person.activeSubjectIds].sort(), ["person:person_multi", "subject:person_multi_secondary"]);
+
+      const crm = person.grants.byGroup.find((g: any) => g.id === "crm");
+      assert.ok(crm, "crm group present");
+      assert.equal(crm.granted, true);
+      assert.equal(crm.grantedChildCount, 2);
+      // Group-revoke targets: exact grant entries across BOTH subjects.
+      const entryIds = crm.grantEntries.map((e: any) => e.grantId).sort();
+      assert.deepEqual(entryIds, ["g_primary_crm_read", "g_secondary_crm_write"]);
+      const subjectIds = crm.grantEntries.map((e: any) => e.subjectId).sort();
+      assert.deepEqual(subjectIds, ["person:person_multi", "subject:person_multi_secondary"]);
+      // Full grant-entry shape, secret-free selector summary.
+      const readEntry = crm.grantEntries.find((e: any) => e.grantId === "g_primary_crm_read");
+      assert.equal(readEntry.capabilityId, "crm.contact.read");
+      assert.equal(readEntry.grantKind, "capability");
+      assert.equal(readEntry.status, "active");
+      assert.equal(readEntry.enforcement, "enforcing");
+      assert.match(readEntry.selectorsSummary, /scope=owner_all/);
+
+      // Per-child entries map to the subject that grants each capability.
+      const childRead = crm.children.find((c: any) => c.capabilityId === "crm.contact.read");
+      const childWrite = crm.children.find((c: any) => c.capabilityId === "crm.contact.write");
+      assert.deepEqual(childRead.entries.map((e: any) => e.subjectId), ["person:person_multi"]);
+      assert.deepEqual(childWrite.entries.map((e: any) => e.subjectId), ["subject:person_multi_secondary"]);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain batch revoke is atomic with one combined impact preview and partial-unknown 404 (A2)", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-batch-revoke-"));
+  try {
+    await writeFile(path.join(root, "capabilities.json"), overlappingGrantsStore());
+    const auditPath = path.join(root, "capability-audit.jsonl");
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const surface = { actorId: "telegram:user:900000123", operation: "crm.contact.read", resource: {} };
+      // Baseline: the capability is allowed (two overlapping grants).
+      assert.equal((await jsonRequest(baseUrl, "POST", "/api/admin/brain/capabilities/check", surface)).payload.allowed, true);
+
+      // Revoking ONLY ONE of the two overlapping grants denies nothing — the other
+      // still allows the capability. This is exactly what merged per-grant
+      // previews got wrong; the combined preview must report it truthfully.
+      const previewOne = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/person_ov/grants/revoke-batch?preview=true", { grantIds: ["g_ov_a"] });
+      assert.equal(previewOne.status, 200);
+      assert.equal(previewOne.payload.impact.summary.newlyDeniedCount, 0);
+
+      // Revoking BOTH overlapping grants together denies the capability — the ONE
+      // combined preview over the whole change reports the real impact.
+      const previewBoth = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/person_ov/grants/revoke-batch?preview=true", { grantIds: ["g_ov_a", "g_ov_b"] });
+      assert.equal(previewBoth.status, 200);
+      assert.ok(previewBoth.payload.impact.summary.newlyDeniedCount >= 1);
+      assert.ok(previewBoth.payload.impact.surfaces.some((s: any) => s.newlyDenied.includes("crm.contact.read")));
+
+      // Partial-unknown-id semantics: a batch naming an unknown grant id aborts the
+      // WHOLE batch (404) and writes nothing (chosen: atomic all-or-nothing).
+      const partial = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/person_ov/grants/revoke-batch", { grantIds: ["g_ov_a", "grant_missing"] });
+      assert.equal(partial.status, 404);
+      assert.equal(partial.payload.error, "grant_not_found");
+      const untouched = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8"));
+      assert.equal(untouched.grants.find((g: any) => g.id === "g_ov_a").status, "active");
+
+      // Commit the batch: ONE store write revokes both grants and denies the op.
+      const commit = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/person_ov/grants/revoke-batch", { grantIds: ["g_ov_a", "g_ov_b"] });
+      assert.equal(commit.status, 200);
+      assert.equal(commit.payload.changed, true);
+      const stored = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8"));
+      for (const id of ["g_ov_a", "g_ov_b"]) {
+        const g = stored.grants.find((row: any) => row.id === id);
+        assert.equal(g.status, "revoked", `${id} revoked`);
+        assert.ok(g.revokedAt, `${id} has revokedAt`);
+      }
+      assert.equal((await jsonRequest(baseUrl, "POST", "/api/admin/brain/capabilities/check", surface)).payload.allowed, false);
+
+      // Exactly ONE audit event for the whole batch, naming both grant ids.
+      const auditLines = (await readFile(auditPath, "utf8")).split(/\n/).filter((line) => line.trim());
+      const revokeEvents = auditLines.map((line) => JSON.parse(line)).filter((r: any) => r.action === "capability.grant.revoked");
+      assert.equal(revokeEvents.length, 1, "one audit event for the batch");
+      assert.equal(revokeEvents[0].batch, true);
+      assert.deepEqual([...revokeEvents[0].revokedGrantIds].sort(), ["g_ov_a", "g_ov_b"]);
+
+      // Already-revoked ids are a per-grant no-op: a second batch does not rewrite.
+      const bytesBefore = await readFile(path.join(root, "capabilities.json"));
+      const again = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/person_ov/grants/revoke-batch", { grantIds: ["g_ov_a"] });
+      assert.equal(again.status, 200);
+      assert.equal(again.payload.changed, false);
+      assert.ok(bytesBefore.equals(await readFile(path.join(root, "capabilities.json"))), "no-op batch did not rewrite the store");
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain batch revoke pins the preview store hash and 409s a stale commit (A3)", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-batch-hash-"));
+  try {
+    await writeFile(path.join(root, "capabilities.json"), overlappingGrantsStore());
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      // Preview against the current store; capture the hash it was computed against.
+      const preview = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/person_ov/grants/revoke-batch?preview=true", { grantIds: ["g_ov_a", "g_ov_b"] });
+      assert.equal(preview.status, 200);
+      const staleHash = preview.payload.storeHash as string;
+      assert.ok(staleHash);
+
+      // The store moves out-of-band (an unrelated grant is added).
+      const drift = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/person_ov/grants", { capabilityId: "todos.item.read" });
+      assert.equal(drift.status, 200);
+      const freshHash = drift.payload.storeHash as string;
+      assert.notEqual(freshHash, staleHash);
+
+      // Committing the batch pinned to the stale preview hash is a retryable 409.
+      const conflict = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/person_ov/grants/revoke-batch", { grantIds: ["g_ov_a", "g_ov_b"], expectedStoreHash: staleHash });
+      assert.equal(conflict.status, 409);
+      assert.equal(conflict.payload.error, "store_conflict");
+      assert.equal(conflict.payload.retryable, true);
+      // The conflict wrote nothing: both grants remain active.
+      const stored = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8"));
+      assert.equal(stored.grants.find((g: any) => g.id === "g_ov_a").status, "active");
+
+      // Re-pinned to the current store hash, the same commit succeeds.
+      const ok = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/person_ov/grants/revoke-batch", { grantIds: ["g_ov_a", "g_ov_b"], expectedStoreHash: freshHash });
+      assert.equal(ok.status, 200);
+      assert.equal(ok.payload.changed, true);
     });
   } finally {
     await rm(root, { recursive: true, force: true });

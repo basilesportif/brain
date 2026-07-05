@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:e2e": "node e2e/admin-v2-smoke.mjs"
   },
   "dependencies": {
     "@clerk/clerk-react": "5.61.8",

@@ -7,7 +7,9 @@ import { useStatus } from "./lib/queries";
 import { ApiError } from "./lib/api";
 import { Home } from "./routes/Home";
 import { Settings } from "./routes/Settings";
-import { Stub } from "./routes/Stub";
+import { Setup } from "./routes/Setup";
+import { Users } from "./routes/Users";
+import { Operations } from "./routes/Operations";
 
 // The status endpoint is the first gated call every session makes, so it
 // doubles as the access gate: an auth/forbidden result means the server
@@ -30,9 +32,9 @@ export function App() {
           <Routes>
             <Route path="/" element={<Home />} />
             <Route path="/settings" element={<Settings />} />
-            <Route path="/setup" element={<Stub title="Setup" />} />
-            <Route path="/users" element={<Stub title="Users" />} />
-            <Route path="/operations" element={<Stub title="Operations" />} />
+            <Route path="/setup" element={<Setup />} />
+            <Route path="/users" element={<Users />} />
+            <Route path="/operations" element={<Operations />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </ErrorBoundary>

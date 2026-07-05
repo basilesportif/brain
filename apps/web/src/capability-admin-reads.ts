@@ -4,7 +4,7 @@
 // these are directly unit-testable.
 
 import { CAPABILITY_GROUP_DEFINITIONS, mappedCatalogCapabilityIds, storeCapabilityVocabulary } from "./capability-catalog.js";
-import { grantInForce, grantedCapabilityIds, type CapabilityStore, type StoreGrant, type StoreSubject } from "./capability-store.js";
+import { grantAllowsCapability, grantInForce, grantedCapabilityIds, type CapabilityStore, type StoreGrant, type StoreSubject } from "./capability-store.js";
 import { SECRETISH_RE } from "./env-schema.js";
 
 // --- GET /users --------------------------------------------------------------
@@ -18,6 +18,32 @@ export interface UserIdentitySummary {
   linkedAt?: string;
 }
 
+// One underlying grant record the admin can act on directly. Surfaced per group
+// and per individual capability so the client revokes exact grant ids (no
+// client-side dry-run resolution that misses secondary subjects / selectors).
+export interface UserGrantEntry {
+  grantId: string;
+  capabilityId: string;
+  grantKind: string;
+  subjectId: string;
+  status: string;
+  enforcement: string;
+  // Compact, secret-scrubbed selector summary (e.g. "teamId=* surfaceKind=slack")
+  // so the operator can see the scope a grant covers before revoking it.
+  selectorsSummary: string;
+}
+
+// Per child capability of a group: whether an in-force grant provides it and the
+// exact grant entries that do. The client offers Revoke only on grantKind
+// "capability" entries; a capability provided only via a group/bundle grant is
+// rendered read-only ("granted via group X") so a single-capability revoke can
+// never silently delete the broader grant.
+export interface UserChildGrantSummary {
+  capabilityId: string;
+  granted: boolean;
+  entries: UserGrantEntry[];
+}
+
 export interface UserGroupSummary {
   id: string;
   label: string;
@@ -25,6 +51,12 @@ export interface UserGroupSummary {
   childCount: number;
   grantedChildCount: number;
   granted: boolean;
+  // In-force grant entries this group's Revoke targets: capability-kind grants
+  // for the group's children plus any group-kind grant for the group itself.
+  // Bundle grants are intentionally excluded — a bundle spans multiple groups, so
+  // a single group revoke must not delete it; revoke bundles individually.
+  grantEntries: UserGrantEntry[];
+  children: UserChildGrantSummary[];
 }
 
 export interface UserGrantExpiry {
@@ -107,6 +139,46 @@ function grantsForSubjects(store: CapabilityStore, subjectIds: string[]): StoreG
   return (store.grants ?? []).filter((grant) => subjectSet.has(grant.subjectId));
 }
 
+// Compact, secret-scrubbed one-line summary of a grant's resource selectors.
+// Drops any selector key whose name hints at a secret and scrubs token-shaped
+// values, mirroring the audit-target scrubbing so the /users read never echoes a
+// secret even from a malformed grant.
+function summarizeGrantSelectors(selectors: Record<string, unknown> | undefined): string {
+  if (!selectors || typeof selectors !== "object") return "";
+  const parts: string[] = [];
+  for (const [key, value] of Object.entries(selectors)) {
+    if (value === undefined || value === null || value === "") continue;
+    if (SECRETISH_RE.test(key)) continue;
+    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") continue;
+    parts.push(`${key}=${scrubSecrets(String(value))}`);
+  }
+  return parts.join(" ").slice(0, TARGET_MAX);
+}
+
+function toGrantEntry(grant: StoreGrant): UserGrantEntry {
+  return {
+    grantId: grant.id,
+    capabilityId: grant.capabilityId,
+    grantKind: grant.grantKind ?? "capability",
+    subjectId: grant.subjectId,
+    status: grant.status ?? "unknown",
+    enforcement: grant.enforcement ?? "enforcing",
+    selectorsSummary: summarizeGrantSelectors(grant.resource?.selectors as Record<string, unknown> | undefined),
+  };
+}
+
+// Dedupe grant entries by grant id, preserving first-seen order.
+function uniqueEntries(entries: UserGrantEntry[]): UserGrantEntry[] {
+  const seen = new Set<string>();
+  const out: UserGrantEntry[] = [];
+  for (const entry of entries) {
+    if (seen.has(entry.grantId)) continue;
+    seen.add(entry.grantId);
+    out.push(entry);
+  }
+  return out;
+}
+
 export function buildUsersResponse(store: CapabilityStore | undefined, now?: Date): UsersResponse {
   if (!store) {
     return { schemaVersion: 1, storeAvailable: false, people: [], systemSubjects: [], counts: { people: 0, systemSubjects: 0 } };
@@ -139,14 +211,33 @@ export function buildUsersResponse(store: CapabilityStore | undefined, now?: Dat
     const inForceGrants = grants.filter((grant) => grantInForce(grant, now));
     const byGroup: UserGroupSummary[] = CAPABILITY_GROUP_DEFINITIONS.map((definition) => {
       const childIds = definition.capabilities.map((child) => child.id);
-      const granted = grantedCapabilityIds(store, activeSubjectIds, childIds, now);
+      const children: UserChildGrantSummary[] = definition.capabilities.map((child) => {
+        const entries = inForceGrants.filter((grant) => grantAllowsCapability(store, grant, child.id)).map(toGrantEntry);
+        return { capabilityId: child.id, granted: entries.length > 0, entries };
+      });
+      // Group-revoke targets: the in-force grants (capability- or group-kind) that
+      // provide any child or the bare group operation, keyed to exact grant ids.
+      const grantEntries = uniqueEntries(
+        inForceGrants
+          .filter((grant) => (grant.grantKind ?? "capability") !== "bundle")
+          .filter(
+            (grant) =>
+              grant.capabilityId === definition.id ||
+              grantAllowsCapability(store, grant, definition.id) ||
+              childIds.some((childId) => grantAllowsCapability(store, grant, childId)),
+          )
+          .map(toGrantEntry),
+      );
+      const grantedChildCount = children.filter((child) => child.granted).length;
       return {
         id: definition.id,
         label: definition.label,
         status: definition.status,
         childCount: childIds.length,
-        grantedChildCount: granted.size,
-        granted: granted.size > 0,
+        grantedChildCount,
+        granted: grantedChildCount > 0 || grantEntries.length > 0,
+        grantEntries,
+        children,
       };
     });
     // Grants on capability ids the catalog does not map to a group must not
@@ -154,6 +245,10 @@ export function buildUsersResponse(store: CapabilityStore | undefined, now?: Dat
     // the same grouping logic the catalog uses.
     const grantedOther = grantedCapabilityIds(store, activeSubjectIds, unmappedVocabulary, now);
     if (grantedOther.size > 0) {
+      const otherChildren: UserChildGrantSummary[] = [...grantedOther].sort().map((capabilityId) => {
+        const entries = inForceGrants.filter((grant) => grantAllowsCapability(store, grant, capabilityId)).map(toGrantEntry);
+        return { capabilityId, granted: entries.length > 0, entries };
+      });
       byGroup.push({
         id: "other",
         label: "Other",
@@ -161,6 +256,8 @@ export function buildUsersResponse(store: CapabilityStore | undefined, now?: Dat
         childCount: grantedOther.size,
         grantedChildCount: grantedOther.size,
         granted: true,
+        grantEntries: uniqueEntries(otherChildren.flatMap((child) => child.entries).filter((entry) => entry.grantKind !== "bundle")),
+        children: otherChildren,
       });
     }
     // Non-active subjects are inert to the authorizer; list them so their grants

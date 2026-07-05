@@ -922,13 +922,24 @@ async function handleCapabilityUserMutation(
     return false;
   }
 
-  // POST /users/:id/grants  |  DELETE /users/:id/grants/:grantId
+  // POST /users/:id/grants  |  POST /users/:id/grants/revoke-batch
+  //                          |  DELETE /users/:id/grants/:grantId
   if (segments[1] === "grants") {
     if (segments.length === 2 && method === "POST") {
       const body = await readJsonBodyOptional(request);
       const target = optionalString(body.groupId) ?? optionalString(body.capabilityId) ?? optionalString(body.target) ?? "";
       const selectors = body.selectors && typeof body.selectors === "object" && !Array.isArray(body.selectors) ? (body.selectors as Record<string, unknown>) : undefined;
       const spec: MutationSpec = { kind: "grant", personId, target, selectors, adminEmail };
+      await runMutation(response, config, url, body, spec);
+      return true;
+    }
+    // Atomic batch revoke: one store write + one combined impact preview + one
+    // audit event for a set of exact grant ids (from GET /users grant entries).
+    if (segments.length === 3 && segments[2] === "revoke-batch" && method === "POST") {
+      const body = await readJsonBodyOptional(request);
+      const grantIds = Array.isArray(body.grantIds) ? body.grantIds.filter((id): id is string => typeof id === "string") : [];
+      const reason = optionalString(body.reason);
+      const spec: MutationSpec = { kind: "revoke_batch", personId, grantIds, reason, adminEmail };
       await runMutation(response, config, url, body, spec);
       return true;
     }
@@ -1014,6 +1025,11 @@ interface SlackSetupStore {
   setupComplete: boolean;
   completedAt?: string;
   completedBy?: string;
+  // Provenance of the most recent completion, retained when setup is later marked
+  // incomplete (Reconfigure) so the "who/when last completed" history is not
+  // erased by re-opening the wizard.
+  lastCompletedAt?: string;
+  lastCompletedBy?: string;
   updatedAt?: string;
 }
 
@@ -1027,6 +1043,8 @@ async function readSlackSetupStore(filePath: string): Promise<SlackSetupStore> {
       setupComplete: parsed.setupComplete === true,
       completedAt: typeof parsed.completedAt === "string" ? redactTelemetryText(parsed.completedAt) : undefined,
       completedBy: typeof parsed.completedBy === "string" ? redactTelemetryText(parsed.completedBy) : undefined,
+      lastCompletedAt: typeof parsed.lastCompletedAt === "string" ? redactTelemetryText(parsed.lastCompletedAt) : undefined,
+      lastCompletedBy: typeof parsed.lastCompletedBy === "string" ? redactTelemetryText(parsed.lastCompletedBy) : undefined,
       updatedAt: typeof parsed.updatedAt === "string" ? redactTelemetryText(parsed.updatedAt) : undefined,
     };
   } catch {
@@ -1081,6 +1099,8 @@ async function slackSetupSummary(config: BrainAdminServiceConfig) {
     setupComplete: store.setupComplete,
     completedAt: store.completedAt,
     completedBy: store.completedBy,
+    lastCompletedAt: store.lastCompletedAt,
+    lastCompletedBy: store.lastCompletedBy,
     updatedAt: store.updatedAt,
     steps,
     verification: {
@@ -1095,9 +1115,31 @@ async function handleSlackSetupWrite(response: ServerResponse, config: BrainAdmi
     return sendJson(response, 400, { error: "invalid_setup_state", expected: { complete: "boolean" } });
   }
   const now = new Date().toISOString();
-  const store: SlackSetupStore = payload.complete
-    ? { schemaVersion: 1, setupComplete: true, completedAt: now, completedBy: adminEmail, updatedAt: now }
-    : { schemaVersion: 1, setupComplete: false, updatedAt: now };
+  // Read the prior state so marking setup incomplete (Reconfigure) preserves the
+  // most recent completion provenance instead of erasing it.
+  const prior = await readSlackSetupStore(config.slackSetupStatePath);
+  let store: SlackSetupStore;
+  if (payload.complete) {
+    store = {
+      schemaVersion: 1,
+      setupComplete: true,
+      completedAt: now,
+      completedBy: adminEmail,
+      ...(prior.lastCompletedAt ? { lastCompletedAt: prior.lastCompletedAt } : {}),
+      ...(prior.lastCompletedBy ? { lastCompletedBy: prior.lastCompletedBy } : {}),
+      updatedAt: now,
+    };
+  } else {
+    const lastCompletedAt = prior.completedAt ?? prior.lastCompletedAt;
+    const lastCompletedBy = prior.completedBy ?? prior.lastCompletedBy;
+    store = {
+      schemaVersion: 1,
+      setupComplete: false,
+      ...(lastCompletedAt ? { lastCompletedAt } : {}),
+      ...(lastCompletedBy ? { lastCompletedBy } : {}),
+      updatedAt: now,
+    };
+  }
   await writeSlackSetupStore(config.slackSetupStatePath, store);
   await appendAudit(config, { action: "slack.setup.update", adminEmail, setupComplete: store.setupComplete, storePath: resolveEnvFilePath(config.slackSetupStatePath) });
   return sendJson(response, 200, { ok: true, setup: await slackSetupSummary(config) });

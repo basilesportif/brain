@@ -114,11 +114,13 @@ function mapError(status: number, payload: unknown): ApiError {
 export interface ApiClient {
   get<T>(path: string): Promise<T>;
   post<T>(path: string, body: unknown): Promise<T>;
+  del<T>(path: string, body?: unknown): Promise<T>;
 }
 
 export function createApiClient(getToken: TokenGetter): ApiClient {
   return {
     get: <T>(path: string) => request<T>(path, getToken, { method: "GET" }),
     post: <T>(path: string, body: unknown) => request<T>(path, getToken, { method: "POST", body }),
+    del: <T>(path: string, body?: unknown) => request<T>(path, getToken, { method: "DELETE", body }),
   };
 }

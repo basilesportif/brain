@@ -294,7 +294,7 @@ function grantMatches(
   return { allowed: true };
 }
 
-function grantAllowsCapability(store: CapabilityStore, grant: StoreGrant, operation: string): boolean {
+export function grantAllowsCapability(store: CapabilityStore, grant: StoreGrant, operation: string): boolean {
   // Enforcement intentionally does not honor operation wildcards. Brain may grant
   // grouped capabilities through bundles/groups, but runtime-created '*' grants
   // are never accepted as a side-effect authorization.
