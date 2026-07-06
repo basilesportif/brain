@@ -60,6 +60,18 @@ export function mergeEnvFileText(sourceText: string, updates: Record<string, str
   return out.length > 0 ? `${out.join("\n")}\n` : "";
 }
 
+export async function atomicWriteFile(filePath: string, content: string, options: { mode?: number; dirMode?: number } = {}): Promise<void> {
+  const mode = options.mode ?? 0o600;
+  const resolved = resolveEnvFilePath(filePath);
+  await mkdir(dirname(resolved), { recursive: true, mode: options.dirMode ?? 0o700 });
+  const tmp = `${resolved}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmp, content, { mode });
+  await rename(tmp, resolved);
+  // writeFile({ mode }) controls newly-created temp files; after rename, chmod
+  // once to correct a pre-existing target whose mode was broader.
+  await chmod(resolved, mode).catch(() => undefined);
+}
+
 /**
  * Fallback-only writer per admin UI redesign plan §6.7. The normal codex-chat
  * config path is IPC `set_config`; this direct env-file merge is retained for
@@ -67,13 +79,9 @@ export function mergeEnvFileText(sourceText: string, updates: Record<string, str
  */
 export async function writeMergedEnvFile(filePath: string, updates: Record<string, string>, managedBy?: string): Promise<void> {
   const resolved = resolveEnvFilePath(filePath);
-  await mkdir(dirname(resolved), { recursive: true, mode: 0o700 });
   const current = await readTextIfPresent(resolved);
   const merged = mergeEnvFileText(current, updates, managedBy);
-  const tmp = `${resolved}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tmp, merged, { mode: 0o600 });
-  await rename(tmp, resolved);
-  await chmod(resolved, 0o600);
+  await atomicWriteFile(resolved, merged);
 }
 
 export async function readEnvKeyPresence(filePath: string, keys: readonly string[]): Promise<Record<string, boolean>> {

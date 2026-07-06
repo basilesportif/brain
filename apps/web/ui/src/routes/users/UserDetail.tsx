@@ -108,6 +108,7 @@ function GroupRow({ user, group, onGrantGroup, onRevokeGroup, onGrantCapability,
   const byGroup = user.grants.byGroup.find((entry) => entry.id === group.id);
   const granted = byGroup?.granted ?? false;
   const grantedChild = byGroup?.grantedChildCount ?? 0;
+  const syntheticGroup = group.synthetic === true || group.id === "other";
   // The exact grant entries a group revoke would delete (bundles excluded server-
   // side); no directly-revocable entries means the group is provided only via a
   // bundle, so the group Revoke is disabled rather than silently deleting it.
@@ -135,7 +136,13 @@ function GroupRow({ user, group, onGrantGroup, onRevokeGroup, onGrantCapability,
               Revoke group
             </button>
           ) : (
-            <button className="btn sm" type="button" onClick={() => onGrantGroup(group)} disabled={group.children.length === 0}>
+            <button
+              className="btn sm"
+              type="button"
+              onClick={() => onGrantGroup(group)}
+              disabled={group.children.length === 0 || syntheticGroup}
+              title={syntheticGroup ? "Unmapped capabilities must be added to the catalog before they can be granted" : undefined}
+            >
               Grant group
             </button>
           )}
@@ -157,7 +164,13 @@ function GroupRow({ user, group, onGrantGroup, onRevokeGroup, onGrantCapability,
                   </span>
                   <span className="cap-advanced-actions">
                     {!childGranted ? (
-                      <button className="btn ghost sm" type="button" onClick={() => onGrantCapability(child.id, child.label)}>
+                      <button
+                        className="btn ghost sm"
+                        type="button"
+                        onClick={() => onGrantCapability(child.id, child.label)}
+                        disabled={syntheticGroup}
+                        title={syntheticGroup ? "Unmapped capabilities must be added to the catalog before they can be granted" : undefined}
+                      >
                         Grant
                       </button>
                     ) : directGrantIds.length > 0 ? (

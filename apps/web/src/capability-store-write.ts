@@ -33,6 +33,8 @@ import {
   grantedCapabilityIds,
   grantInForce,
   parseCapabilityStore,
+  subjectExistsAndActive,
+  subjectIdsForPerson,
   type ActorContext,
   type CapabilityStore,
   type StoreExternalIdentity,
@@ -195,25 +197,13 @@ const CAPABILITY_ADMIN_IDS: string[] = (() => {
   return [...ids];
 })();
 
-function personSubjectIds(store: CapabilityStore, person: StorePerson): string[] {
-  const ids = new Set<string>();
-  if (person.primarySubjectId) ids.add(person.primarySubjectId);
-  for (const id of person.subjectIds ?? []) ids.add(id);
-  for (const subject of store.subjects ?? []) {
-    if (subject.personId === person.id) ids.add(subject.id);
-  }
-  return [...ids];
-}
-
 // A person's subject ids that would actually resolve at runtime for admin
-// computation: a subject whose status is present and not "active" is never
-// resolved by codex-chat's resolveActorSubjects, so a capability-admin grant on
-// it can never reach the admin surface and must not count toward self-lockout.
+// computation: codex-chat's resolveActorSubjects keeps only subjects that exist
+// in store.subjects and are not explicitly inactive, so a grant on a missing or
+// suspended subject can never reach the admin surface and must not count toward
+// self-lockout.
 function personActiveSubjectIds(store: CapabilityStore, person: StorePerson): string[] {
-  return personSubjectIds(store, person).filter((id) => {
-    const subject = (store.subjects ?? []).find((candidate) => candidate.id === id);
-    return !(subject && subject.status && subject.status !== "active");
-  });
+  return subjectIdsForPerson(store, person).filter((id) => subjectExistsAndActive(store, id));
 }
 
 function personLinkedIdentities(store: CapabilityStore, personId: string): StoreExternalIdentity[] {
@@ -296,7 +286,7 @@ function personSurfaceActors(store: CapabilityStore, personId: string): { surfac
 function personInForceCapabilityIds(store: CapabilityStore, personId: string): string[] {
   const person = (store.people ?? []).find((candidate) => candidate.id === personId);
   if (!person) return [];
-  const subjectSet = new Set(personSubjectIds(store, person));
+  const subjectSet = new Set(personActiveSubjectIds(store, person));
   const ids = new Set<string>();
   for (const grant of store.grants ?? []) {
     if (!subjectSet.has(grant.subjectId)) continue;
@@ -368,6 +358,25 @@ function findPerson(store: CapabilityStore, personId: string): StorePerson {
   const person = (store.people ?? []).find((candidate) => candidate.id === personId);
   if (!person) throw new CapabilityWriteError("person_not_found", 404, `Person ${personId} not found`);
   return person;
+}
+
+function ensureWritablePrimarySubject(store: CapabilityStore, person: StorePerson): { subjectId: string; materialized: boolean } {
+  const subjectId = requireNonEmpty(person.primarySubjectId, "primarySubjectId");
+  const subjects = (store.subjects ??= []);
+  const subject = subjects.find((candidate) => candidate.id === subjectId);
+  if (!subject) {
+    subjects.push({ id: subjectId, personId: person.id, status: "active", kind: "person", source: "manual_admin" });
+    person.subjectIds = [...new Set([...(person.subjectIds ?? []), subjectId])];
+    return { subjectId, materialized: true };
+  }
+  if (subject.status && subject.status !== "active") {
+    throw new CapabilityWriteError("primary_subject_unavailable", 400, "Person primary subject is not active", {
+      personId: person.id,
+      subjectId,
+      status: subject.status,
+    });
+  }
+  return { subjectId, materialized: false };
 }
 
 function externalIdentityId(provider: string, externalId: string, teamId?: string): string {
@@ -519,7 +528,7 @@ function applyGrant(store: CapabilityStore, spec: Extract<MutationSpec, { kind: 
   const person = findPerson(store, spec.personId);
   const target = requireNonEmpty(spec.target, "target");
   const { capabilityIds, expandedFromGroup } = expandGrantTarget(target);
-  const subjectId = person.primarySubjectId ?? `person:${person.id}`;
+  const { subjectId, materialized } = ensureWritablePrimarySubject(store, person);
   const now = new Date().toISOString();
   // An explicit selectors object in the request wins verbatim; otherwise each
   // granted capability defaults to the broad selector template for its group so
@@ -528,7 +537,7 @@ function applyGrant(store: CapabilityStore, spec: Extract<MutationSpec, { kind: 
 
   // Skip capabilities the person's active subjects already hold in force so a
   // re-grant is idempotent rather than piling duplicate rows.
-  const alreadyGranted = grantedCapabilityIds(store, personSubjectIds(store, person), capabilityIds);
+  const alreadyGranted = grantedCapabilityIds(store, personActiveSubjectIds(store, person), capabilityIds);
   const toGrant = capabilityIds.filter((id) => !alreadyGranted.has(id));
 
   const grantIds: string[] = [];
@@ -553,10 +562,10 @@ function applyGrant(store: CapabilityStore, spec: Extract<MutationSpec, { kind: 
     grants.push(grant);
     grantIds.push(grantId);
   }
-  if (grantIds.length > 0) store.updatedAt = now;
+  if (materialized || grantIds.length > 0) store.updatedAt = now;
 
   return {
-    changed: grantIds.length > 0,
+    changed: materialized || grantIds.length > 0,
     personId: person.id,
     explicitCapabilityIds: capabilityIds,
     audit: {
@@ -568,15 +577,16 @@ function applyGrant(store: CapabilityStore, spec: Extract<MutationSpec, { kind: 
       grantKind: expandedFromGroup ? "group" : "capability",
       grantIds,
       capabilityIds: toGrant,
+      materializedPrimarySubject: materialized ? { personId: person.id, subjectId } : undefined,
     },
-    detail: { personId: person.id, subjectId, target, expandedFromGroup, grantIds, grantedCapabilityIds: toGrant, alreadyGranted: [...alreadyGranted] },
+    detail: { personId: person.id, subjectId, target, expandedFromGroup, grantIds, grantedCapabilityIds: toGrant, alreadyGranted: [...alreadyGranted], materializedPrimarySubject: materialized },
   };
 }
 
 function applyRevoke(store: CapabilityStore, spec: Extract<MutationSpec, { kind: "revoke" }>): MutationOutcome {
   const person = findPerson(store, spec.personId);
   const grantId = requireNonEmpty(spec.grantId, "grantId");
-  const subjectSet = new Set(personSubjectIds(store, person));
+  const subjectSet = new Set(subjectIdsForPerson(store, person));
   const grant = (store.grants ?? []).find((candidate) => candidate.id === grantId && subjectSet.has(candidate.subjectId));
   if (!grant) throw new CapabilityWriteError("grant_not_found", 404, `Grant ${grantId} not found for ${person.id}`);
   const now = new Date().toISOString();
@@ -622,7 +632,7 @@ function applyRevokeBatch(store: CapabilityStore, spec: Extract<MutationSpec, { 
   if (!Array.isArray(spec.grantIds) || spec.grantIds.length === 0) {
     throw new CapabilityWriteError("invalid_request", 400, "grantIds is required");
   }
-  const subjectSet = new Set(personSubjectIds(store, person));
+  const subjectSet = new Set(subjectIdsForPerson(store, person));
   const now = new Date().toISOString();
   const requestedIds = [...new Set(spec.grantIds.map((grantId) => requireNonEmpty(grantId, "grantId")))];
   const capabilityIds = new Set<string>();

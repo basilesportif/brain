@@ -4,8 +4,9 @@
 // these are directly unit-testable.
 
 import { CAPABILITY_GROUP_DEFINITIONS, mappedCatalogCapabilityIds, storeCapabilityVocabulary } from "./capability-catalog.js";
-import { grantAllowsCapability, grantInForce, grantedCapabilityIds, type CapabilityStore, type StoreGrant, type StoreSubject } from "./capability-store.js";
+import { grantAllowsCapability, grantInForce, grantedCapabilityIds, subjectExistsAndActive, subjectIdsForPerson, type CapabilityStore, type StoreGrant, type StoreSubject } from "./capability-store.js";
 import { SECRETISH_RE } from "./env-schema.js";
+import { redactSecretText } from "./redaction.js";
 
 // --- GET /users --------------------------------------------------------------
 
@@ -110,28 +111,8 @@ export interface UsersResponse {
   counts: { people: number; systemSubjects: number };
 }
 
-function subjectIdsForPerson(store: CapabilityStore, personId: string, seed: { primarySubjectId?: string; subjectIds?: string[]; identityIds?: string[] }): string[] {
-  const ids = new Set<string>();
-  if (seed.primarySubjectId) ids.add(seed.primarySubjectId);
-  for (const id of seed.subjectIds ?? []) ids.add(id);
-  for (const subject of store.subjects ?? []) {
-    if (subject.personId === personId) ids.add(subject.id);
-    if (subject.identityId && (seed.identityIds ?? []).includes(subject.identityId)) ids.add(subject.id);
-  }
-  return [...ids];
-}
-
 function subjectStatus(store: CapabilityStore, subjectId: string): string | undefined {
   return (store.subjects ?? []).find((subject) => subject.id === subjectId)?.status;
-}
-
-// Matches resolveActorSubjects: a subject resolves only when its status is absent
-// or "active". A subject id with no matching subject record is treated as active
-// (the person seed may reference a subject the store has not materialized).
-function subjectIsActive(store: CapabilityStore, subjectId: string): boolean {
-  const subject = (store.subjects ?? []).find((candidate) => candidate.id === subjectId);
-  if (!subject) return true;
-  return !subject.status || subject.status === "active";
 }
 
 function grantsForSubjects(store: CapabilityStore, subjectIds: string[]): StoreGrant[] {
@@ -144,15 +125,7 @@ function grantsForSubjects(store: CapabilityStore, subjectIds: string[]): StoreG
 // values, mirroring the audit-target scrubbing so the /users read never echoes a
 // secret even from a malformed grant.
 function summarizeGrantSelectors(selectors: Record<string, unknown> | undefined): string {
-  if (!selectors || typeof selectors !== "object") return "";
-  const parts: string[] = [];
-  for (const [key, value] of Object.entries(selectors)) {
-    if (value === undefined || value === null || value === "") continue;
-    if (SECRETISH_RE.test(key)) continue;
-    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") continue;
-    parts.push(`${key}=${scrubSecrets(String(value))}`);
-  }
-  return parts.join(" ").slice(0, TARGET_MAX);
+  return summarizeResourceTarget(selectors);
 }
 
 function toGrantEntry(grant: StoreGrant): UserGrantEntry {
@@ -202,11 +175,11 @@ export function buildUsersResponse(store: CapabilityStore | undefined, now?: Dat
   const mapped = mappedCatalogCapabilityIds();
   const unmappedVocabulary = [...storeCapabilityVocabulary(store)].filter((id) => !mapped.has(id));
   const people: UserSummary[] = (store.people ?? []).map((person) => {
-    const subjectIds = subjectIdsForPerson(store, person.id, person);
+    const subjectIds = subjectIdsForPerson(store, person);
     // The authorizer only resolves subjects whose status is absent or "active";
     // grant/group summaries must count grants on those subjects only, matching
     // resolveActorSubjects and the dry-run endpoint.
-    const activeSubjectIds = subjectIds.filter((id) => subjectIsActive(store, id));
+    const activeSubjectIds = subjectIds.filter((id) => subjectExistsAndActive(store, id));
     const grants = grantsForSubjects(store, activeSubjectIds);
     const inForceGrants = grants.filter((grant) => grantInForce(grant, now));
     const byGroup: UserGroupSummary[] = CAPABILITY_GROUP_DEFINITIONS.map((definition) => {
@@ -263,7 +236,7 @@ export function buildUsersResponse(store: CapabilityStore | undefined, now?: Dat
     // Non-active subjects are inert to the authorizer; list them so their grants
     // are visible but clearly marked not in force.
     const disabledSubjects: DisabledSubjectSummary[] = subjectIds
-      .filter((id) => !subjectIsActive(store, id))
+      .filter((id) => !subjectExistsAndActive(store, id))
       .map((id) => ({ id, status: subjectStatus(store, id), grantCount: grantsForSubjects(store, [id]).length, inForce: 0 as const }));
     return {
       id: person.id,
@@ -368,14 +341,7 @@ const TARGET_MAX = 300;
 // Belt-and-suspenders: codex-chat already redacts its decision resourceSummary,
 // but the audit feed must never echo a token even from a malformed record.
 function scrubSecrets(text: string): string {
-  return text
-    // Slack bot/user/app/refresh/session tokens: xoxb-/xoxa-/xoxp-/xoxr-/xoxs-/
-    // xoxe-/xoxd- and app-level xapp- tokens.
-    .replace(/\bxox[baprsed]-[A-Za-z0-9-]+/gi, "[redacted-slack-token]")
-    .replace(/\bxapp-[A-Za-z0-9-]+/gi, "[redacted-slack-token]")
-    .replace(/\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/g, "[redacted-openai-key]")
-    .replace(/\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g, "[redacted-github-token]")
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]{10,}/gi, "Bearer [redacted]");
+  return redactSecretText(text);
 }
 
 function summarizeResourceTarget(resourceSummary: unknown): string {

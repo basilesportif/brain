@@ -44,8 +44,8 @@ export function ConnectionsSection() {
     const payload: SlackSettingsWritePayload = {
       entries,
       confirmation: {
-        token: "brain-admin-slack-settings-confirmed-v1",
-        action: "slack.settings.write",
+        token: slack.data!.confirmation.token,
+        action: slack.data!.confirmation.action,
         envFile: env.envFile,
         keys: Object.keys(entries),
       },

@@ -61,6 +61,11 @@ export interface EnvPresenceSummary {
   envFile: string;
   allowedKeys: string[];
   keys: EnvPresenceKey[];
+  confirmation?: {
+    token: string;
+    action: string;
+    envFile: string;
+  };
 }
 
 export interface EnvFieldError {
@@ -77,6 +82,16 @@ export interface EnvWriteResponse {
   presence: Record<string, boolean>;
 }
 
+export interface EnvWritePayload {
+  entries: Record<string, string>;
+  confirmation: {
+    token: string;
+    action: string;
+    envFile: string;
+    keys: string[];
+  };
+}
+
 // --- §5.3 Slack settings -----------------------------------------------------
 
 export interface SlackSettingsSummary {
@@ -86,6 +101,10 @@ export interface SlackSettingsSummary {
   slackAppId: string | null;
   appSettingsUrl: string;
   env: EnvPresenceSummary;
+  confirmation: {
+    token: string;
+    action: string;
+  };
 }
 
 // --- §5.3 Model (main loop + OpenRouter subagents) ---------------------------
@@ -112,6 +131,10 @@ export interface MainModelSummary {
   activePreset: string;
   // The exact confirmation key set the write requires; echoed back verbatim.
   confirmationKeys: string[];
+  confirmation: {
+    token: string;
+    action: string;
+  };
   restartRequiredForChanges: boolean;
   presets: MainModelPreset[];
   openRouter: {
@@ -140,10 +163,15 @@ export interface OpenRouterSummary {
   recommendedModelProvider: string;
   recommendedServiceTierMode: string;
   current: OpenRouterCurrentConfig;
-  // Current profile path the confirmation pins (read-state), and the exact key
-  // set the write requires — both echoed back verbatim in the write payload.
+  // Current profile path for display and the exact key set the write governs.
+  // The write confirmation pins the submitted profile/write path.
   profilePath: string;
+  profileTargets: Array<{ codexProfile: string; profilePath: string }>;
   confirmationKeys: string[];
+  confirmation: {
+    token: string;
+    action: string;
+  };
   codexProfile: { path: string; present: boolean };
   env: EnvPresenceSummary;
 }
@@ -153,8 +181,8 @@ export interface OpenRouterSummary {
 export interface SlackSettingsWritePayload {
   entries: Record<string, string>;
   confirmation: {
-    token: "brain-admin-slack-settings-confirmed-v1";
-    action: "slack.settings.write";
+    token: string;
+    action: string;
     envFile: string;
     keys: string[];
   };
@@ -163,8 +191,8 @@ export interface SlackSettingsWritePayload {
 export interface MainModelWritePayload {
   preset: string;
   confirmation: {
-    token: "brain-admin-main-loop-model-confirmed-v1";
-    action: "codex-chat.main-loop-model.write";
+    token: string;
+    action: string;
     envFile: string;
     preset: string;
     keys: string[];
@@ -182,9 +210,10 @@ export interface OpenRouterWriteEntries {
 
 export interface OpenRouterWritePayload extends OpenRouterWriteEntries {
   confirmation: {
-    token: "brain-admin-openrouter-settings-confirmed-v1";
-    action: "openrouter.settings.write";
+    token: string;
+    action: string;
     envFile: string;
+    codexProfile: string;
     profilePath: string;
     keys: string[];
   };
@@ -331,6 +360,7 @@ export interface CatalogGroup {
   label: string;
   description: string;
   status: "active" | "placeholder";
+  synthetic?: boolean;
   childCount: number;
   presentChildCount: number;
   children: CatalogCapability[];

@@ -43,6 +43,7 @@ export interface CatalogGroup {
   label: string;
   description: string;
   status: "active" | "placeholder";
+  synthetic?: boolean;
   childCount: number;
   presentChildCount: number;
   children: CatalogCapability[];
@@ -328,6 +329,7 @@ export function buildCapabilityCatalog(store: CapabilityStore | undefined): Capa
       label: "Other",
       description: "Capability ids present in the store but not yet mapped to a catalog group.",
       status: "active",
+      synthetic: true,
       childCount: uncategorized.length,
       presentChildCount: uncategorized.length,
       children: uncategorized.map((id) => ({ id, label: id, present: true })),

@@ -1,9 +1,11 @@
 import { spawn } from "node:child_process";
-import { appendFile, chmod, mkdir, open, readdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { appendFile, mkdir, open, readdir, readFile, realpath, stat } from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { authorizeBrainAdminRequest, isBrainAdminAuthConfigured, parseAdminAllowedEmails, type ClerkUserLookup, type VerifyClerkToken } from "./admin-auth.js";
 import { capabilityAdminSummary } from "./capabilities.js";
@@ -12,9 +14,10 @@ import { buildCapabilityCatalog } from "./capability-catalog.js";
 import { buildAuditFeed, buildUsersResponse, type AuditOutcome, type AuditType } from "./capability-admin-reads.js";
 import { commitMutation, previewMutation, CapabilityWriteError, type MutationResult, type MutationSpec } from "./capability-store-write.js";
 import { DEFAULT_CODEX_CHAT_IPC_TIMEOUT_MS, isCodexChatIpcError, sendSetConfig, type CodexChatIpcError, type CodexChatSetConfigResult } from "./codex-chat-ipc.js";
-import { envFileMetadata, expandHomePath, parseEnvKeys, readEnvKeyPresence, resolveEnvFilePath, writeMergedEnvFile } from "./env-file.js";
+import { atomicWriteFile, envFileMetadata, expandHomePath, parseEnvKeys, readEnvKeyPresence, resolveEnvFilePath, writeMergedEnvFile } from "./env-file.js";
 import { buildEnvSchema, SECRETISH_RE, validateEnvUpdates, type EnvFieldError } from "./env-schema.js";
 import { renderBrainAdminDeniedPage, renderBrainAdminPage, renderBrainAdminSignInPage } from "./admin-page.js";
+import { redactSecretText } from "./redaction.js";
 
 const SLACK_EVENTS_BASE_URL = "https://brain.decisive-outcomes.com";
 const SLACK_EVENTS_PATH = "/api/slack/events";
@@ -70,6 +73,7 @@ const DEFAULT_ENV_KEYS = [
 ] as const;
 
 const MAX_BODY_BYTES = 128 * 1024;
+const CODEX_CHAT_ENV_CONFIRMATION_TOKEN = "brain-admin-codex-chat-env-confirmed-v1";
 const LIVE_OPERATION_CONFIRMATION_TOKEN = "brain-admin-live-operation-confirmed-v1";
 const SLACK_SETTINGS_CONFIRMATION_TOKEN = "brain-admin-slack-settings-confirmed-v1";
 const OPENROUTER_SETTINGS_CONFIRMATION_TOKEN = "brain-admin-openrouter-settings-confirmed-v1";
@@ -196,6 +200,9 @@ export function createBrainAdminServer(config: BrainAdminServiceConfig = loadBra
     try {
       await handleRequest(request, response, config, deps);
     } catch (error) {
+      if (error instanceof CapabilityWriteError) {
+        return sendJson(response, error.status, { error: error.code, message: error.message, ...(error.details ?? {}) });
+      }
       sendJson(response, 500, { error: "internal_error", message: error instanceof Error ? error.message : String(error) });
     }
   });
@@ -379,13 +386,29 @@ async function serviceHealth(config: BrainAdminServiceConfig) {
 }
 
 async function serviceSettings(config: BrainAdminServiceConfig) {
-  const env = await codexChatEnvSummary(config);
+  const [
+    env,
+    capabilityStatus,
+    repoRegistry,
+    slack,
+    slackCanary,
+    mainLoopModel,
+    openRouter,
+  ] = await Promise.all([
+    codexChatEnvSummary(config),
+    capabilityEnforcementStatus(config),
+    repoRegistrySummary(config.repoRegistryPath),
+    slackSettingsSummary(config),
+    slackCanarySummary(config),
+    mainLoopModelSummary(config),
+    openRouterSettingsSummary(config),
+  ]);
   return {
     routePath: config.routePath,
     publicBaseUrl: config.publicBaseUrl || null,
     instance: instanceSummary(config),
     repoRegistry: {
-      ...(await repoRegistrySummary(config.repoRegistryPath)),
+      ...repoRegistry,
       sourceOfTruth: false,
       role: "read-only context only; this running Brain instance is configured by its own env/settings",
     },
@@ -403,23 +426,36 @@ async function serviceSettings(config: BrainAdminServiceConfig) {
       operationCommands: operationCommandSummary(config),
       restartCommand: operationCommand(config, "restart") ? redactedCommand(operationCommand(config, "restart") ?? "") : null,
     },
-    slack: await slackSettingsSummary(config),
-    slackCanary: await slackCanarySummary(config),
-    mainLoopModel: await mainLoopModelSummary(config),
-    openRouter: await openRouterSettingsSummary(config),
+    slack,
+    slackCanary,
+    mainLoopModel,
+    openRouter,
     capabilities: {
       schemaVersion: 2,
       storePath: resolveEnvFilePath(config.capabilityStorePath),
       auditLogPath: resolveEnvFilePath(config.capabilityAuditLogPath),
-      writesEnabled: false,
-      enforcementEnabled: false,
-      role: "read-only Phase 5 catalog/store/admin surface; codex-chat runtime enforcement is not connected",
+      writesEnabled: capabilityStatus.storePresent && capabilityStatus.storeValid,
+      enforcementEnabled: capabilityStatus.enforcementEnabled,
+      storePresent: capabilityStatus.storePresent,
+      storeValid: capabilityStatus.storeValid,
+      lastLoaded: capabilityStatus.lastLoaded ?? null,
+      recentDenials: capabilityStatus.recentDenials,
+      error: capabilityStatus.error ?? null,
+      role: "live enforced codex-chat capability store; admin writes persist through Brain's guarded write path",
     },
   };
 }
 
 async function codexChatEnvSummary(config: BrainAdminServiceConfig) {
-  return envPresenceSummary(config, config.allowedEnvKeys);
+  const env = await envPresenceSummary(config, config.allowedEnvKeys);
+  return {
+    ...env,
+    confirmation: {
+      token: CODEX_CHAT_ENV_CONFIRMATION_TOKEN,
+      action: "codex-chat.env.write",
+      envFile: env.envFile,
+    },
+  };
 }
 
 // --- §6.1 structured status endpoint -----------------------------------------
@@ -621,7 +657,43 @@ interface CapabilityEnforcementStatus {
   error?: string;
 }
 
+const CAPABILITY_STATUS_CACHE_TTL_MS = 5_000;
+const capabilityStatusCache = new Map<string, { expiresAt: number; value?: CapabilityEnforcementStatus; promise?: Promise<CapabilityEnforcementStatus> }>();
+
+function capabilityStatusCacheKey(config: BrainAdminServiceConfig): string {
+  return JSON.stringify({
+    storePath: resolveEnvFilePath(config.capabilityStorePath),
+    configFile: config.codexChatConfigFile ? resolveEnvFilePath(config.codexChatConfigFile) : "",
+    decisionsDir: config.capabilityDecisionsDir,
+    codexChatPath: resolveEnvFilePath(config.codexChatPath),
+  });
+}
+
+function clearCapabilityStatusCache(): void {
+  capabilityStatusCache.clear();
+}
+
 async function capabilityEnforcementStatus(config: BrainAdminServiceConfig): Promise<CapabilityEnforcementStatus> {
+  const key = capabilityStatusCacheKey(config);
+  const now = Date.now();
+  const cached = capabilityStatusCache.get(key);
+  if (cached && cached.expiresAt > now) {
+    if (cached.value) return cached.value;
+    if (cached.promise) return cached.promise;
+  }
+  const promise = readCapabilityEnforcementStatus(config);
+  capabilityStatusCache.set(key, { expiresAt: now + CAPABILITY_STATUS_CACHE_TTL_MS, promise });
+  try {
+    const value = await promise;
+    capabilityStatusCache.set(key, { expiresAt: Date.now() + CAPABILITY_STATUS_CACHE_TTL_MS, value });
+    return value;
+  } catch (error) {
+    capabilityStatusCache.delete(key);
+    throw error;
+  }
+}
+
+async function readCapabilityEnforcementStatus(config: BrainAdminServiceConfig): Promise<CapabilityEnforcementStatus> {
   const enforcementEnabled = await readEnforcementEnabled(config);
   const storePath = resolveEnvFilePath(config.capabilityStorePath);
   let storePresent = false;
@@ -658,11 +730,12 @@ async function readEnforcementEnabled(config: BrainAdminServiceConfig): Promise<
 // Mirror codex-chat's `loadBrainCapabilityStore` schema check so Brain's "store
 // valid" verdict matches what the enforcer would accept.
 function isValidCapabilityStoreShape(raw: string): boolean {
-  let parsed: unknown;
-  try { parsed = JSON.parse(raw); } catch { return false; }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
-  const store = parsed as Record<string, unknown>;
-  return Array.isArray(store.grants) && Array.isArray(store.subjects) && Array.isArray(store.externalIdentities);
+  try {
+    parseCapabilityStore(raw);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function capabilityDecisionsDirPath(config: BrainAdminServiceConfig): Promise<string> {
@@ -682,11 +755,18 @@ async function recentCapabilityDenialCount(config: BrainAdminServiceConfig): Pro
   // today and yesterday can hold a decision from the last hour.
   const now = new Date();
   const days = [now, new Date(now.getTime() - 24 * 60 * 60_000)].map((date) => date.toISOString().slice(0, 10));
-  let count = 0;
-  for (const day of days) {
-    const text = await readTextIfPresent(path.join(dir, `${day}.jsonl`));
-    if (!text) continue;
-    for (const line of text.split(/\r?\n/)) {
+  const counts = await Promise.all(days.map((day) => countCapabilityDenialsInFile(path.join(dir, `${day}.jsonl`), cutoffMs)));
+  return counts.reduce((sum, value) => sum + value, 0);
+}
+
+async function countCapabilityDenialsInFile(filePath: string, cutoffMs: number): Promise<number> {
+  try {
+    const info = await stat(filePath);
+    if (!info.isFile()) return 0;
+    let count = 0;
+    const input = createReadStream(filePath, { encoding: "utf8" });
+    const lines = createInterface({ input, crlfDelay: Infinity });
+    for await (const line of lines) {
       if (!line.trim()) continue;
       let record: Record<string, unknown>;
       try { record = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
@@ -694,8 +774,11 @@ async function recentCapabilityDenialCount(config: BrainAdminServiceConfig): Pro
       const checkedAtMs = typeof record.checkedAt === "string" ? Date.parse(record.checkedAt) : NaN;
       if (Number.isFinite(checkedAtMs) && checkedAtMs >= cutoffMs) count += 1;
     }
+    return count;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw error;
   }
-  return count;
 }
 
 // --- §6.5 capability READ endpoints (catalog, users, dry-run, audit) ---------
@@ -862,6 +945,10 @@ async function handleCapabilityAudit(response: ServerResponse, config: BrainAdmi
 // Read a JSON body but tolerate an empty body (DELETE with no payload), where
 // the write parameters come entirely from the path + query string.
 async function readJsonBodyOptional(request: IncomingMessage): Promise<Record<string, unknown>> {
+  return readJsonBodyInternal(request, { allowEmpty: true });
+}
+
+async function readJsonBodyInternal(request: IncomingMessage, options: { allowEmpty: boolean }): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of request) {
@@ -872,7 +959,10 @@ async function readJsonBodyOptional(request: IncomingMessage): Promise<Record<st
     chunks.push(buffer);
   }
   const raw = Buffer.concat(chunks).toString("utf8").trim();
-  if (!raw) return {};
+  if (!raw) {
+    if (options.allowEmpty) return {};
+    throw new CapabilityWriteError("invalid_body", 400, "Request body is required");
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw) as unknown;
@@ -1001,6 +1091,7 @@ async function runMutation(
       return sendJson(response, 200, { ok: true, preview: true, impact: result.impact, detail: result.outcome.detail, storeHash: result.storeHash });
     }
     result = await commitMutation(resolveEnvFilePath(config.capabilityStorePath), spec, { expectedHash: expectedHash ?? undefined });
+    if (result.outcome.changed) clearCapabilityStatusCache();
     // Audit the successful mutation with its impact summary — never secrets. The
     // store write already SUCCEEDED, so an audit-append failure must not turn a
     // committed write into a 500 (which would prompt a retry that duplicates
@@ -1077,17 +1168,15 @@ async function readSlackSetupStore(filePath: string): Promise<SlackSetupStore> {
 
 async function writeSlackSetupStore(filePath: string, store: SlackSetupStore): Promise<void> {
   const resolved = resolveEnvFilePath(filePath);
-  await mkdir(path.dirname(resolved), { recursive: true, mode: 0o700 });
-  const tmp = `${resolved}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tmp, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
-  await chmod(tmp, 0o600).catch(() => undefined);
-  await rename(tmp, resolved);
+  await atomicWriteFile(resolved, `${JSON.stringify(store, null, 2)}\n`);
 }
 
 async function slackSetupSummary(config: BrainAdminServiceConfig) {
-  const store = await readSlackSetupStore(config.slackSetupStatePath);
-  const present = await readEnvKeyPresence(config.codexChatEnvFile, ["SLACK_SIGNING_SECRET", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"]);
-  const telemetry = await slackTelemetrySummary(config);
+  const [store, present, telemetry] = await Promise.all([
+    readSlackSetupStore(config.slackSetupStatePath),
+    readEnvKeyPresence(config.codexChatEnvFile, ["SLACK_SIGNING_SECRET", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"]),
+    slackTelemetrySummary(config),
+  ]);
   const steps = [
     {
       id: "public_url",
@@ -1180,6 +1269,7 @@ async function slackSettingsSummary(config: BrainAdminServiceConfig) {
     runtimeOwner: "codex-chat verifies Slack signatures and normalizes runtime events",
     values: "write-only; presence only",
     env,
+    confirmation: { token: SLACK_SETTINGS_CONFIRMATION_TOKEN, action: "slack.settings.write" },
   };
 }
 
@@ -1377,11 +1467,7 @@ function parseTomlStringValue(value: string | null): string | undefined {
 }
 
 function redactTelemetryText(value: string): string {
-  return value
-    .replace(/xox[baprs]-[A-Za-z0-9-]+/g, "[redacted-slack-token]")
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
-    .replace(/v0=[a-f0-9]{32,}/gi, "v0=[redacted-signature]")
-    .slice(0, 240);
+  return redactSecretText(value).slice(0, 240);
 }
 
 type SlackCanaryStatus = "pending" | "passed" | "failed" | "blocked" | "not_applicable";
@@ -1571,11 +1657,7 @@ async function readSlackCanaryStore(filePath: string): Promise<SlackCanaryStore>
 
 async function writeSlackCanaryStore(filePath: string, store: SlackCanaryStore): Promise<void> {
   const resolved = resolveEnvFilePath(filePath);
-  await mkdir(path.dirname(resolved), { recursive: true, mode: 0o700 });
-  const tmp = `${resolved}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tmp, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
-  await chmod(tmp, 0o600).catch(() => undefined);
-  await rename(tmp, resolved);
+  await atomicWriteFile(resolved, `${JSON.stringify(store, null, 2)}\n`);
 }
 
 function sanitizeCanaryFreeform(value: unknown): string | undefined {
@@ -1641,6 +1723,7 @@ async function mainLoopModelSummary(config: BrainAdminServiceConfig) {
     // Served verbatim so the client echoes it back in the confirmation instead
     // of hand-mirroring the server's key list (fix).
     confirmationKeys: [...MAIN_LOOP_MODEL_ENV_KEYS],
+    confirmation: { token: MAIN_LOOP_MODEL_CONFIRMATION_TOKEN, action: "codex-chat.main-loop-model.write" },
     restartRequiredForChanges: true,
     presets: Object.entries(MAIN_LOOP_PRESETS).map(([id, preset]) => ({ id, label: preset.label, description: preset.description, updates: preset.updates, requiresOpenRouter: preset.requiresOpenRouter })),
     openRouter: {
@@ -1925,14 +2008,29 @@ async function readOpenRouterCurrentConfig(config: BrainAdminServiceConfig): Pro
   };
 }
 
+function splitOpenRouterProfiles(value: string): string[] {
+  return value
+    .split(/[,\s]+/)
+    .map((entry) => entry.trim())
+    .filter((entry) => /^[A-Za-z0-9._-]+$/.test(entry));
+}
+
+function openRouterProfileTargets(codexHomePath: string, current: { codexProfile: string; allowedCodexProfiles: string }): Array<{ codexProfile: string; profilePath: string }> {
+  const profiles = new Set<string>(["openrouter", current.codexProfile, ...splitOpenRouterProfiles(current.allowedCodexProfiles)]);
+  return [...profiles]
+    .filter((profile) => /^[A-Za-z0-9._-]+$/.test(profile))
+    .sort()
+    .map((codexProfile) => ({ codexProfile, profilePath: codexProfilePath(codexHomePath, codexProfile) }));
+}
+
 async function openRouterSettingsSummary(config: BrainAdminServiceConfig) {
   const env = await envPresenceSummary(config, OPENROUTER_ENV_KEYS);
   const current = await readOpenRouterCurrentConfig(config);
-  // The confirmation token pins the state the client READ, not the value being
-  // written: the profile path is the CURRENT profile's path (derived from the
-  // current codexProfile), so editing the profile field no longer breaks the
-  // confirmation (fix). The write recomputes this same current path to compare.
+  // The summary exposes server-computed absolute write targets. Clients echo
+  // one of these paths back in the confirmation instead of reconstructing local
+  // filesystem paths in browser JavaScript.
   const currentProfilePath = codexProfilePath(config.codexHomePath, current.codexProfile);
+  const profileTargets = openRouterProfileTargets(config.codexHomePath, current);
   const codexProfile = await codexProfileMetadata(config.codexHomePath, current.codexProfile);
   const codexChatConfig = config.codexChatConfigFile ? await codexChatProviderConfigSummary(config.codexChatConfigFile) : { configured: false };
   return {
@@ -1943,7 +2041,9 @@ async function openRouterSettingsSummary(config: BrainAdminServiceConfig) {
     recommendedServiceTierMode: "omit",
     current,
     profilePath: currentProfilePath,
+    profileTargets,
     confirmationKeys: [...OPENROUTER_SETTINGS_CONFIRMATION_KEYS],
+    confirmation: { token: OPENROUTER_SETTINGS_CONFIRMATION_TOKEN, action: "openrouter.settings.write" },
     codexProfile,
     codexChatConfig,
     env,
@@ -1961,18 +2061,14 @@ async function handleOpenRouterSettingsWrite(response: ServerResponse, config: B
   }
   const confirmation = parseOpenRouterSettingsConfirmation(payload.confirmation);
   const envFile = resolveEnvFilePath(config.codexChatEnvFile);
-  // The path of the profile file actually written (derived from the submitted
-  // codexProfile). Distinct from the confirmation's profilePath, which pins the
-  // CURRENT profile the client read (below).
+  // The path of the profile file actually written, derived from the submitted
+  // codexProfile. The confirmation must pin this write target, so a stale or
+  // tampered payload cannot redirect the write to a different profile file.
   const writtenProfilePath = codexProfilePath(config.codexHomePath, input.codexProfile);
-  // Confirmation pins READ state: compare against the current profile path the
-  // GET summary served (derived from the current, pre-write config), NOT one
-  // recomputed from the submitted codexProfile — otherwise editing the profile
-  // field would 400 `confirmation_required` forever (fix). And compare the keys
-  // against the static governed set the summary advertises, not the conditional
-  // written subset, so the client can echo `confirmationKeys` verbatim (fix).
-  const current = await readOpenRouterCurrentConfig(config);
-  const currentProfilePath = codexProfilePath(config.codexHomePath, current.codexProfile);
+  // Compare the keys against the static governed set the summary advertises, not
+  // only the conditional written subset, so the React client can echo
+  // `confirmationKeys` verbatim. The legacy console still sends the conditional
+  // subset until it is retired.
   const writtenEnvKeys = [
     ...(input.apiKey ? ["OPENROUTER_API_KEY"] : []),
     "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL",
@@ -1994,11 +2090,12 @@ async function handleOpenRouterSettingsWrite(response: ServerResponse, config: B
     || confirmation.token !== OPENROUTER_SETTINGS_CONFIRMATION_TOKEN
     || confirmation.action !== "openrouter.settings.write"
     || confirmation.envFile !== envFile
-    || confirmation.profilePath !== currentProfilePath
+    || confirmation.codexProfile !== input.codexProfile
+    || confirmation.profilePath !== writtenProfilePath
     || !keysOk) {
     return sendJson(response, 400, {
       error: "confirmation_required",
-      required: { token: OPENROUTER_SETTINGS_CONFIRMATION_TOKEN, action: "openrouter.settings.write", envFile, profilePath: currentProfilePath, keys: [...OPENROUTER_SETTINGS_CONFIRMATION_KEYS] }
+      required: { token: OPENROUTER_SETTINGS_CONFIRMATION_TOKEN, action: "openrouter.settings.write", envFile, codexProfile: input.codexProfile, profilePath: writtenProfilePath, keys: [...OPENROUTER_SETTINGS_CONFIRMATION_KEYS] }
     });
   }
 
@@ -2053,22 +2150,28 @@ async function envPresenceSummary(config: BrainAdminServiceConfig, keysToRead: r
 }
 
 async function handleEnvWrite(response: ServerResponse, config: BrainAdminServiceConfig, adminEmail: string, payload: Record<string, unknown>): Promise<void> {
+  const entries = parseEntries(payload.entries);
+  const writtenKeys = Object.keys(entries);
+  const envFile = resolveEnvFilePath(config.codexChatEnvFile);
   // Plan §6.4 / §8 step 4: env writes overwrite secrets in one request, so they
-  // stay behind a server-side confirmation gate (never a one-click overwrite
-  // from an arbitrary client). Accept EITHER an explicit `confirmed: true` — the
-  // React console (§5.3) sends this after its ConfirmDialog — OR the legacy
-  // approval phrase, so the still-live legacy `/admin` console keeps working
-  // until the step-7 cutover. Missing both → 400 `approval_required`, matching
-  // the confirmation-token contracts the Slack/OpenRouter/model endpoints
-  // enforce for these same keys. The separate operation/restart exact-approval
-  // contract (§5.5) is unaffected.
+  // stay behind a server-side confirmation gate. The React console echoes the
+  // server-issued token/action/env-file/key-set; the still-live legacy `/admin`
+  // page may use the exact approval phrase until that surface is retired.
   const approval = typeof payload.approval === "string" ? payload.approval.trim() : "";
   const approvalPhraseOk = approval === "write env" || approval === `write ${config.codexChatServiceName} env`;
-  const confirmed = payload.confirmed === true;
-  if (!confirmed && !approvalPhraseOk) {
-    return sendJson(response, 400, { error: "approval_required", expected: ["write env", `write ${config.codexChatServiceName} env`], confirmedFlag: true });
+  const confirmation = parseEnvWriteConfirmation(payload.confirmation);
+  const confirmationOk = Boolean(confirmation
+    && confirmation.token === CODEX_CHAT_ENV_CONFIRMATION_TOKEN
+    && confirmation.action === "codex-chat.env.write"
+    && confirmation.envFile === envFile
+    && sameStringSet(confirmation.keys, writtenKeys));
+  if (!approvalPhraseOk && !confirmationOk) {
+    return sendJson(response, 400, {
+      error: "confirmation_required",
+      required: { token: CODEX_CHAT_ENV_CONFIRMATION_TOKEN, action: "codex-chat.env.write", envFile, keys: writtenKeys },
+      legacyApproval: ["write env", `write ${config.codexChatServiceName} env`],
+    });
   }
-  const entries = parseEntries(payload.entries);
   const allowed = new Set(config.allowedEnvKeys);
   const updates: Record<string, string> = {};
   for (const [key, value] of Object.entries(entries)) {
@@ -2082,8 +2185,19 @@ async function handleEnvWrite(response: ServerResponse, config: BrainAdminServic
   if (fieldErrors.length > 0) return sendEnvValidationError(response, fieldErrors);
   const configWrite = await writeCodexChatEnvConfig(response, config, updates, "Brain control plane");
   if (!configWrite) return;
-  await appendAudit(config, { action: "codex-chat.env.write", adminEmail, keys: Object.keys(updates), envFile: resolveEnvFilePath(config.codexChatEnvFile), configWritePath: configWrite.configWritePath });
-  return sendJson(response, 200, { ok: true, envFile: resolveEnvFilePath(config.codexChatEnvFile), writtenKeys: Object.keys(updates), configWritePath: configWrite.configWritePath, values: "write-only", presence: await readPresenceAfterConfigWrite(config, updates, Object.keys(updates)), restartRequired: true });
+  await appendAudit(config, { action: "codex-chat.env.write", adminEmail, keys: Object.keys(updates), envFile, configWritePath: configWrite.configWritePath });
+  return sendJson(response, 200, { ok: true, envFile, writtenKeys: Object.keys(updates), configWritePath: configWrite.configWritePath, values: "write-only", presence: await readPresenceAfterConfigWrite(config, updates, Object.keys(updates)), restartRequired: true });
+}
+
+function parseEnvWriteConfirmation(value: unknown): { token?: string; action?: string; envFile?: string; keys: string[] } | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  return {
+    token: typeof record.token === "string" ? record.token : undefined,
+    action: typeof record.action === "string" ? record.action : undefined,
+    envFile: typeof record.envFile === "string" ? record.envFile : undefined,
+    keys: Array.isArray(record.keys) ? record.keys.filter((key): key is string => typeof key === "string") : [],
+  };
 }
 
 async function handleSlackSettingsWrite(response: ServerResponse, config: BrainAdminServiceConfig, adminEmail: string, payload: Record<string, unknown>): Promise<void> {
@@ -2206,7 +2320,7 @@ async function handleOperation(response: ServerResponse, config: BrainAdminServi
 
   const result = await (deps.runCommand ?? runShellCommand)(command, config.operationTimeoutMs);
   await appendAudit(config, { action: "codex-chat.operation.execute", adminEmail, operation, command: redactedCommand(command), status: result.status, signal: result.signal, timedOut: result.timedOut, freshPlan: Boolean(confirmation.freshPlan), bypassedFreshPlan: Boolean(confirmation.bypassedFreshPlan) });
-  return sendJson(response, result.status === 0 ? 200 : 500, { ok: result.status === 0, operation, status: result.status, signal: result.signal, timedOut: result.timedOut, stdout: redactOutput(result.stdout), stderr: redactOutput(result.stderr) });
+  return sendJson(response, 200, { ok: result.status === 0, operation, status: result.status, signal: result.signal, timedOut: result.timedOut, stdout: redactOutput(result.stdout), stderr: redactOutput(result.stderr) });
 }
 
 
@@ -2241,13 +2355,14 @@ function stringField(value: unknown, name: string, fallback: string): string {
   return out;
 }
 
-function parseOpenRouterSettingsConfirmation(value: unknown): { token?: string; action?: string; envFile?: string; profilePath?: string; keys: string[] } | null {
+function parseOpenRouterSettingsConfirmation(value: unknown): { token?: string; action?: string; envFile?: string; codexProfile?: string; profilePath?: string; keys: string[] } | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   return {
     token: typeof record.token === "string" ? record.token : undefined,
     action: typeof record.action === "string" ? record.action : undefined,
     envFile: typeof record.envFile === "string" ? record.envFile : undefined,
+    codexProfile: typeof record.codexProfile === "string" ? record.codexProfile : undefined,
     profilePath: typeof record.profilePath === "string" ? record.profilePath : undefined,
     keys: Array.isArray(record.keys) ? record.keys.filter((key): key is string => typeof key === "string") : [],
   };
@@ -2274,11 +2389,7 @@ async function writeOpenRouterCodexProfile(codexHomePath: string, input: OpenRou
     "env_key_instructions = \"Set OPENROUTER_API_KEY in the codex-chat service environment.\"",
     ""
   ].join("\n");
-  await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tmp, body, { mode: 0o600 });
-  await rename(tmp, filePath);
-  await chmod(filePath, 0o600);
+  await atomicWriteFile(filePath, body);
 }
 
 async function writeCodexChatProviderConfig(filePath: string, input: OpenRouterSettingsInput): Promise<void> {
@@ -2296,10 +2407,7 @@ async function writeCodexChatProviderConfig(filePath: string, input: OpenRouterS
     allowedModelProviders: [input.modelProvider],
     ...(input.backend ? { backend: input.backend } : {})
   });
-  const tmp = `${resolved}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tmp, next, { mode: 0o600 });
-  await rename(tmp, resolved);
-  await chmod(resolved, 0o600);
+  await atomicWriteFile(resolved, next);
 }
 
 async function codexProfileMetadata(codexHomePath: string, profile: string): Promise<{ path: string; present: boolean; mode?: string; size?: number }> {
@@ -2408,17 +2516,31 @@ const AUDIT_TAIL_BYTES = 256 * 1024;
 // Read only the trailing window of a file. When the file is larger than the
 // window we start mid-file and drop the first (partial) line so callers only
 // parse whole lines. Missing files read as "".
-async function readFileTail(filePath: string, maxBytes: number): Promise<string> {
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
+type TailReadHandle = {
+  stat(): Promise<{ size: number }>;
+  read(buffer: Buffer, offset: number, length: number, position: number): Promise<{ bytesRead: number }>;
+  close(): Promise<void>;
+};
+
+type TailOpen = (filePath: string, flags: "r") => Promise<TailReadHandle>;
+
+export async function readFileTail(filePath: string, maxBytes: number, openFile: TailOpen = open): Promise<string> {
+  let handle: TailReadHandle | undefined;
   try {
-    handle = await open(filePath, "r");
+    handle = await openFile(filePath, "r");
     const { size } = await handle.stat();
     const start = size > maxBytes ? size - maxBytes : 0;
     const length = size - start;
     if (length <= 0) return "";
     const buffer = Buffer.allocUnsafe(length);
-    await handle.read(buffer, 0, length, start);
-    let text = buffer.toString("utf8");
+    let total = 0;
+    while (total < length) {
+      const { bytesRead } = await handle.read(buffer, total, length - total, start + total);
+      if (bytesRead <= 0) break;
+      total += bytesRead;
+    }
+    if (total <= 0) return "";
+    let text = buffer.subarray(0, total).toString("utf8");
     if (start > 0) {
       const newline = text.indexOf("\n");
       text = newline >= 0 ? text.slice(newline + 1) : "";
@@ -2536,17 +2658,7 @@ async function runShellCommand(command: string, timeoutMs: number): Promise<Comm
 }
 
 async function readJsonBody(request: IncomingMessage): Promise<Record<string, unknown>> {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for await (const chunk of request) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    total += buffer.length;
-    if (total > MAX_BODY_BYTES) throw new Error("request body too large");
-    chunks.push(buffer);
-  }
-  const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("JSON body must be an object");
-  return parsed as Record<string, unknown>;
+  return readJsonBodyInternal(request, { allowEmpty: false });
 }
 
 function parseEntries(value: unknown): Record<string, unknown> {
@@ -2805,16 +2917,13 @@ function shellArg(value: string): string {
 }
 
 function redactedCommand(command: string): string {
-  return command
-    .replace(/((?:TOKEN|SECRET|KEY|PASSWORD|COOKIE|SESSION|CREDENTIAL)[A-Z0-9_]*=)(?:"[^"]*"|\'[^\']*\'|[^\s]+)/gi, "$1<redacted>")
-    .replace(/\b(sk-(?:proj-)?[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{20,})\b/g, "<redacted-token>");
+  return redactSecretText(
+    command.replace(/((?:TOKEN|SECRET|KEY|PASSWORD|COOKIE|SESSION|CREDENTIAL)[A-Z0-9_]*=)(?:"[^"]*"|\'[^\']*\'|[^\s]+)/gi, "$1<redacted>"),
+  );
 }
 
 function redactOutput(value: string): string {
-  return truncate(value)
-    .replace(/\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/g, "<redacted-openai-key>")
-    .replace(/\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g, "<redacted-github-token>")
-    .replace(/\bxox[baprs]-[A-Za-z0-9-]{20,}\b/g, "<redacted-slack-token>");
+  return redactSecretText(truncate(value));
 }
 
 function truncate(value: string, max = 16_000): string {

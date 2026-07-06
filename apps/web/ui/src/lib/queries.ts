@@ -15,6 +15,7 @@ import type {
   CapabilityCheckResponse,
   EnvPresenceSummary,
   EnvSchemaResponse,
+  EnvWritePayload,
   EnvWriteResponse,
   LiveOperationConfirmation,
   MainModelSummary,
@@ -103,10 +104,7 @@ export function useEnvWrite() {
   const api = useApiClient();
   const invalidate = useInvalidateSettings();
   return useMutation({
-    // `confirmed: true` is the server-side confirmation gate the ConfirmDialog
-    // stands in for (admin-service handleEnvWrite); without it the write is a
-    // 400 approval_required.
-    mutationFn: (entries: Record<string, string>) => api.post<EnvWriteResponse>("/codex-chat/env", { entries, confirmed: true }),
+    mutationFn: (payload: EnvWritePayload) => api.post<EnvWriteResponse>("/codex-chat/env", payload),
     onSuccess: invalidate,
   });
 }

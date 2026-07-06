@@ -3,7 +3,7 @@ import { useEnvSchema, useEnvSummary, useEnvWrite } from "../../lib/queries";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { ErrorNotice, Loading, RawJson, describeError } from "../../components/common";
 import { ApiError } from "../../lib/api";
-import type { EnvFieldError, EnvKeyGroup, EnvKeySchemaEntry } from "../../api-types";
+import type { EnvFieldError, EnvKeyGroup, EnvKeySchemaEntry, EnvWritePayload } from "../../api-types";
 import { RestartNote } from "./shared";
 
 const GROUP_LABELS: Record<EnvKeyGroup, string> = {
@@ -25,6 +25,7 @@ export function AllConfigSection() {
   const write = useEnvWrite();
   const [values, setValues] = useState<Record<string, string>>({});
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmError, setConfirmError] = useState<string | null>(null);
   const [wrote, setWrote] = useState<string[] | null>(null);
 
   const fieldErrors = useMemo<Map<string, EnvFieldError>>(() => {
@@ -52,10 +53,24 @@ export function AllConfigSection() {
   const presenceByKey = new Map((summary.data?.keys ?? []).map((entry) => [entry.key, entry] as const));
   const pending = Object.entries(values).filter(([, value]) => value.trim() !== "");
   const secretOverwrites = pending.filter(([key]) => (schema.data ?? []).find((entry) => entry.key === key)?.secret);
+  const confirmationAvailable = Boolean(summary.data?.confirmation);
 
   const confirm = () => {
     const entries = Object.fromEntries(pending.map(([key, value]) => [key, value.trim()]));
-    write.mutate(entries, {
+    const confirmation = summary.data?.confirmation;
+    if (!confirmation) {
+      setConfirmError("confirmation unavailable - reload settings");
+      return;
+    }
+    setConfirmError(null);
+    const payload: EnvWritePayload = {
+      entries,
+      confirmation: {
+        ...confirmation,
+        keys: Object.keys(entries),
+      },
+    };
+    write.mutate(payload, {
       onSuccess: (result) => {
         setWrote(result.writtenKeys);
         setValues({});
@@ -135,9 +150,10 @@ export function AllConfigSection() {
 
         {write.isError && !(write.error instanceof ApiError && write.error.kind === "validation") ? <ErrorNotice error={write.error} /> : null}
         {wrote ? <RestartNote writtenKeys={wrote} /> : null}
+        {!confirmationAvailable ? <p className="alert warn small">confirmation unavailable - reload settings</p> : null}
 
         <div className="settings-actions">
-          <button className="btn primary" type="button" disabled={pending.length === 0 || write.isPending} onClick={() => setConfirmOpen(true)}>
+          <button className="btn primary" type="button" disabled={pending.length === 0 || write.isPending || !confirmationAvailable} title={!confirmationAvailable ? "confirmation unavailable - reload settings" : undefined} onClick={() => setConfirmOpen(true)}>
             Save configuration
           </button>
         </div>
@@ -150,6 +166,7 @@ export function AllConfigSection() {
         title="Write configuration?"
         confirmLabel="Write configuration"
         busy={write.isPending}
+        confirmDisabled={!confirmationAvailable}
         onConfirm={confirm}
         onCancel={() => setConfirmOpen(false)}
       >
@@ -162,6 +179,7 @@ export function AllConfigSection() {
         {secretOverwrites.length > 0 ? (
           <p className="alert warn small">{secretOverwrites.length} secret value(s) will be overwritten. Secret values are write-only and never displayed.</p>
         ) : null}
+        {confirmError || !confirmationAvailable ? <p className="alert bad small">{confirmError ?? "confirmation unavailable - reload settings"}</p> : null}
         <p className="muted small">codex-chat restart is required for changes to take effect.</p>
         {write.isError ? <p className="alert bad small">{describeError(write.error).message}</p> : null}
       </ConfirmDialog>

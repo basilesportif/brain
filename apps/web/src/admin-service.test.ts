@@ -6,7 +6,7 @@ import path from "node:path";
 import type http from "node:http";
 import { authorizeBrainAdminRequest, parseAdminAllowedEmails } from "./admin-auth.js";
 import { renderBrainAdminDeniedPage, renderBrainAdminPage, renderBrainAdminSignInPage } from "./admin-page.js";
-import { createBrainAdminServer, initializeBrainAdminCapabilityStore, loadBrainAdminServiceConfig, type BrainAdminServiceConfig, type BrainAdminServiceDeps } from "./admin-service.js";
+import { createBrainAdminServer, initializeBrainAdminCapabilityStore, loadBrainAdminServiceConfig, readFileTail, type BrainAdminServiceConfig, type BrainAdminServiceDeps } from "./admin-service.js";
 import { fakeIpcToken, startFakeCodexChatIpc, type FakeCodexChatIpcServer } from "./codex-chat-ipc.test-helpers.js";
 import { mergeEnvFileText } from "./env-file.js";
 import { LIVE_CAPABILITY_STORE_JSON } from "./capability-store.fixture.js";
@@ -95,6 +95,24 @@ async function withServer<T>(cfg: BrainAdminServiceConfig, deps: Parameters<type
 
 function authHeaders() {
   return { authorization: "Bearer test-token" };
+}
+
+function envWritePayload(cfg: BrainAdminServiceConfig, entries: Record<string, string>): Record<string, unknown> {
+  return {
+    entries,
+    confirmation: {
+      token: "brain-admin-codex-chat-env-confirmed-v1",
+      action: "codex-chat.env.write",
+      envFile: cfg.codexChatEnvFile,
+      keys: Object.keys(entries),
+    },
+  };
+}
+
+function openRouterProfilePath(summary: { profilePath: string; profileTargets?: Array<{ codexProfile: string; profilePath: string }> }, profile: string): string {
+  const target = summary.profileTargets?.find((entry) => entry.codexProfile === profile);
+  assert.ok(target, `missing server-provided profile path for ${profile}`);
+  return target.profilePath;
 }
 
 function extractJsonScript(html: string, id: string): unknown {
@@ -369,8 +387,13 @@ test("brain admin page renders redesigned dashboard IA without secrets", () => {
   assert.match(html, /Confirm live operation/);
   assert.match(html, /<select[^>]*id="op"[^>]*>[\s\S]*<option value="restart" selected>restart<\/option>/);
   assert.match(html, /Review & confirm restart/);
+  assert.match(html, /succeeded=result\.ok===true/);
+  assert.match(html, /op\+' failed'/);
+  assert.match(html, /restart failed/);
   assert.match(html, /Confirm Slack settings write/);
   assert.match(html, /Review & write Slack settings/);
+  assert.match(html, /profileTargets/);
+  assert.doesNotMatch(html, /openRouterProfilePathFor/);
   assert.match(html, /Read-only Slack telemetry/);
   assert.match(html, /Raw \/slack\/telemetry/);
   assert.match(html, /writes codex-chat runtime env to disk/i);
@@ -417,6 +440,30 @@ test("brain admin settings identify the concrete local instance separately from 
       assert.equal(payload.codexChat.operationCommands.restart.configured, true);
       assert.match(payload.codexChat.operationCommands.restart.command ?? "", /echo restart-ok/);
       assert.equal(payload.codexChat.operationCommands.deploy.configured, true);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain admin settings report live capability enforcement posture", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-settings-capabilities-"));
+  try {
+    const cfg = config(root, { codexChatConfigFile: path.join(root, "codex-chat", "config", "codex-chat.toml") });
+    await writeJson(path.join(root, "capabilities.json"), validCapabilityStore());
+    await mkdir(path.dirname(cfg.codexChatConfigFile ?? ""), { recursive: true });
+    await writeFile(cfg.codexChatConfigFile ?? "", "version = 1\n\n[brain]\nenforcementEnabled = true\n");
+    await withServer(cfg, authDeps(), async (baseUrl) => {
+      const settings = await fetch(`${baseUrl}/api/admin/brain/settings`, { headers: authHeaders() });
+      assert.equal(settings.status, 200);
+      const payload = await settings.json() as {
+        capabilities: { writesEnabled: boolean; enforcementEnabled: boolean; storePresent: boolean; storeValid: boolean; role: string };
+      };
+      assert.equal(payload.capabilities.writesEnabled, true);
+      assert.equal(payload.capabilities.enforcementEnabled, true);
+      assert.equal(payload.capabilities.storePresent, true);
+      assert.equal(payload.capabilities.storeValid, true);
+      assert.match(payload.capabilities.role, /live enforced/);
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -634,7 +681,8 @@ test("brain admin env write handlers persist through codex-chat IPC", async () =
             token: "brain-admin-openrouter-settings-confirmed-v1",
             action: "openrouter.settings.write",
             envFile: openRouterSummary.env.envFile,
-            profilePath: openRouterSummary.profilePath,
+            codexProfile: "openrouter",
+            profilePath: openRouterProfilePath(openRouterSummary, "openrouter"),
             keys: openRouterSummary.confirmationKeys,
           },
         }),
@@ -645,7 +693,7 @@ test("brain admin env write handlers persist through codex-chat IPC", async () =
       const envWrite = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
         method: "POST",
         headers: { ...authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ confirmed: true, entries: { CODEX_CHAT_BASE_URL: "https://brain.example.com", SLACK_BOT_TOKEN: fakeBotToken } }),
+        body: JSON.stringify(envWritePayload(cfg, { CODEX_CHAT_BASE_URL: "https://brain.example.com", SLACK_BOT_TOKEN: fakeBotToken })),
       });
       assert.equal(envWrite.status, 200);
       const envPayload = await envWrite.json() as { configWritePath: string; presence: Record<string, boolean> };
@@ -697,7 +745,7 @@ test("brain admin derives IPC response presence from submitted entries, not the 
       const envWrite = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
         method: "POST",
         headers: { ...authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ confirmed: true, entries: { CODEX_CHAT_BASE_URL: "https://brain.example.com", SLACK_BOT_TOKEN: fakeBotToken } }),
+        body: JSON.stringify(envWritePayload(cfg, { CODEX_CHAT_BASE_URL: "https://brain.example.com", SLACK_BOT_TOKEN: fakeBotToken })),
       });
       assert.equal(envWrite.status, 200);
       const envPayload = await envWrite.json() as { configWritePath: string; presence: Record<string, boolean> };
@@ -719,7 +767,8 @@ test("brain admin derives IPC response presence from submitted entries, not the 
             token: "brain-admin-openrouter-settings-confirmed-v1",
             action: "openrouter.settings.write",
             envFile: summary.env.envFile,
-            profilePath: summary.profilePath,
+            codexProfile: "openrouter",
+            profilePath: openRouterProfilePath(summary, "openrouter"),
             keys: summary.confirmationKeys,
           },
         }),
@@ -748,7 +797,7 @@ test("brain admin maps codex-chat IPC field errors to validation errors without 
       const write = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
         method: "POST",
         headers: { ...authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ confirmed: true, entries: { CODEX_CHAT_BASE_URL: "https://brain.example.com" } }),
+        body: JSON.stringify(envWritePayload(cfg, { CODEX_CHAT_BASE_URL: "https://brain.example.com" })),
       });
       assert.equal(write.status, 400);
       const payload = await write.json() as { error: string; fieldErrors: Array<{ key: string; code: string; message: string }> };
@@ -777,7 +826,7 @@ test("brain admin falls back to bootstrap env-file writes only when IPC is unava
         const write = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
           method: "POST",
           headers: { ...authHeaders(), "content-type": "application/json" },
-          body: JSON.stringify({ confirmed: true, entries: { CODEX_CHAT_BASE_URL: "https://brain.example.com", SLACK_BOT_TOKEN: fakeBotToken } }),
+          body: JSON.stringify(envWritePayload(cfg, { CODEX_CHAT_BASE_URL: "https://brain.example.com", SLACK_BOT_TOKEN: fakeBotToken })),
         });
         assert.equal(write.status, 200);
         const payload = await write.json() as { configWritePath: string; presence: Record<string, boolean> };
@@ -819,7 +868,8 @@ test("brain admin reports ambiguous IPC failure and leaves OpenRouter TOML unwri
               token: "brain-admin-openrouter-settings-confirmed-v1",
               action: "openrouter.settings.write",
               envFile: summary.env.envFile,
-              profilePath: summary.profilePath,
+              codexProfile: "openrouter",
+              profilePath: openRouterProfilePath(summary, "openrouter"),
               keys: summary.confirmationKeys,
             },
           }),
@@ -855,7 +905,7 @@ test("brain admin does not fall back to disk when IPC auth fails", async () => {
         const write = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
           method: "POST",
           headers: { ...authHeaders(), "content-type": "application/json" },
-          body: JSON.stringify({ confirmed: true, entries: { CODEX_CHAT_BASE_URL: "https://brain.example.com", SLACK_BOT_TOKEN: fakeBotToken } }),
+          body: JSON.stringify(envWritePayload(cfg, { CODEX_CHAT_BASE_URL: "https://brain.example.com", SLACK_BOT_TOKEN: fakeBotToken })),
         });
         assert.equal(write.status, 502);
         const payload = await write.json() as { error: string; message: string; configWritePath: string; mayHaveApplied: boolean };
@@ -958,7 +1008,7 @@ test("brain admin OpenRouter settings write env, codex profile, and codex-chat c
     await withServer(cfg, authDeps(), async (baseUrl) => {
       const settings = await fetch(`${baseUrl}/api/admin/brain/openrouter/settings`, { headers: authHeaders() });
       assert.equal(settings.status, 200);
-      const summary = await settings.json() as { env: { envFile: string }; codexProfile: { path: string } };
+      const summary = await settings.json() as { env: { envFile: string }; profilePath: string; confirmationKeys: string[] };
 
       const entries = {
         apiKey: FAKE_OPENROUTER_API_KEY,
@@ -986,10 +1036,29 @@ test("brain admin OpenRouter settings write env, codex profile, and codex-chat c
       });
       assert.equal(missingConfirmation.status, 400);
 
+      const tamperedProfile = await fetch(`${baseUrl}/api/admin/brain/openrouter/settings`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({
+          ...entries,
+          codexProfile: "openrouter-prod",
+          confirmation: {
+            token: "brain-admin-openrouter-settings-confirmed-v1",
+            action: "openrouter.settings.write",
+            envFile: summary.env.envFile,
+            codexProfile: "openrouter",
+            profilePath: openRouterProfilePath(summary, "openrouter"),
+            keys,
+          },
+        }),
+      });
+      assert.equal(tamperedProfile.status, 400);
+      assert.equal((await tamperedProfile.json() as { error: string }).error, "confirmation_required");
+
       const write = await fetch(`${baseUrl}/api/admin/brain/openrouter/settings`, {
         method: "POST",
         headers: { ...authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ ...entries, confirmation: { token: "brain-admin-openrouter-settings-confirmed-v1", action: "openrouter.settings.write", envFile: summary.env.envFile, profilePath: summary.codexProfile.path, keys } }),
+        body: JSON.stringify({ ...entries, confirmation: { token: "brain-admin-openrouter-settings-confirmed-v1", action: "openrouter.settings.write", envFile: summary.env.envFile, codexProfile: entries.codexProfile, profilePath: openRouterProfilePath(summary, entries.codexProfile), keys } }),
       });
       assert.equal(write.status, 200);
       const payload = await write.json() as { writtenKeys: string[]; values: string; profilePath: string; apiKeyPresent: boolean };
@@ -1017,22 +1086,23 @@ test("brain admin OpenRouter settings write env, codex profile, and codex-chat c
   }
 });
 
-test("brain admin OpenRouter write accepts a changed codexProfile when the confirmation pins the read state", async () => {
+test("brain admin OpenRouter write accepts a changed codexProfile when the confirmation pins the write target", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-openrouter-profile-"));
   try {
     const cfg = config(root);
+    await writeFile(path.join(root, "codex-chat.env"), "CODEX_CHAT_SUBAGENTS_ALLOWED_CODEX_PROFILES='openrouter-alt'\n");
     await withServer(cfg, authDeps(), async (baseUrl) => {
       const settings = await fetch(`${baseUrl}/api/admin/brain/openrouter/settings`, { headers: authHeaders() });
       assert.equal(settings.status, 200);
-      // The summary serves the CURRENT profile path + governed key set the client
-      // must echo back verbatim (never recompute from the value being written).
-      const summary = await settings.json() as { env: { envFile: string }; profilePath: string; confirmationKeys: string[]; current: { codexProfile: string } };
+      // The summary serves exact profile targets; clients echo one of those
+      // absolute paths instead of deriving filesystem paths locally.
+      const summary = await settings.json() as { env: { envFile: string }; profilePath: string; profileTargets: Array<{ codexProfile: string; profilePath: string }>; confirmationKeys: string[]; current: { codexProfile: string } };
       assert.equal(summary.current.codexProfile, "openrouter");
       assert.match(summary.profilePath, /openrouter\.config\.toml$/);
+      assert.ok(summary.profileTargets.some((target) => target.codexProfile === "openrouter-alt" && /openrouter-alt\.config\.toml$/.test(target.profilePath)));
 
-      // Edit the profile field to a NEW value while confirming the state we read
-      // (current profile path). This 400'd forever before the fix (server used to
-      // recompute the expected path from the submitted codexProfile).
+      // Edit the profile field to a NEW value while confirming the computed write
+      // target for that new profile.
       const write = await fetch(`${baseUrl}/api/admin/brain/openrouter/settings`, {
         method: "POST",
         headers: { ...authHeaders(), "content-type": "application/json" },
@@ -1045,7 +1115,8 @@ test("brain admin OpenRouter write accepts a changed codexProfile when the confi
             token: "brain-admin-openrouter-settings-confirmed-v1",
             action: "openrouter.settings.write",
             envFile: summary.env.envFile,
-            profilePath: summary.profilePath,
+            codexProfile: "openrouter-alt",
+            profilePath: openRouterProfilePath(summary, "openrouter-alt"),
             keys: summary.confirmationKeys,
           },
         }),
@@ -1106,6 +1177,33 @@ test("brain admin operation API keeps plan low-friction and requires explicit li
       const audit = await readFile(path.join(root, "audit.jsonl"), "utf8");
       assert.match(audit, /codex-chat\.operation\.execute/);
       assert.equal(audit.includes("secretValuesLogged\":false"), true);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain admin operation API returns command failures as ok:false payloads, not HTTP failures", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-op-fail-"));
+  const fakeAppToken = ["xapp", "1", "A00SYNTH", "9999", "appsecret"].join("-");
+  try {
+    await withServer(config(root), {
+      ...(authDeps()),
+      runCommand: async () => ({ status: 7, signal: null, stdout: "", stderr: `restart failed ${fakeAppToken} Bearer abc`, timedOut: false }),
+    }, async (baseUrl) => {
+      const restart = await fetch(`${baseUrl}/api/admin/brain/codex-chat/operation`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ operation: "restart", confirmation: { token: "brain-admin-live-operation-confirmed-v1", operation: "restart", serviceName: "codex-chat.service" } }),
+      });
+      assert.equal(restart.status, 200);
+      const payload = await restart.json() as { ok: boolean; status: number; stderr: string };
+      assert.equal(payload.ok, false);
+      assert.equal(payload.status, 7);
+      assert.equal(payload.stderr.includes(fakeAppToken), false);
+      assert.equal(payload.stderr.includes("Bearer abc"), false);
+      assert.match(payload.stderr, /redacted-slack-token/);
+      assert.match(payload.stderr, /Bearer \[redacted\]/);
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -1404,6 +1502,29 @@ test("brain admin status endpoint reports healthy components server-side", async
   }
 });
 
+test("brain admin settings count recent capability denials across full day files", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-denial-count-full-"));
+  try {
+    const checkedAt = new Date().toISOString();
+    await writeJson(path.join(root, "capabilities.json"), validCapabilityStore());
+    const day = checkedAt.slice(0, 10);
+    const denialLines = Array.from({ length: 3 }, (_, index) => JSON.stringify({ allowed: false, checkedAt, reason: `synthetic-denial-${index}` }));
+    const paddingLines = Array.from({ length: 4_500 }, (_, index) => JSON.stringify({ allowed: true, checkedAt, padding: `${index}`.padEnd(80, "x") }));
+    const decisionPath = path.join(root, "codex-chat", "data", "state", "capability_decisions", `${day}.jsonl`);
+    await writeFileRecursive(decisionPath, `${[...denialLines, ...paddingLines].join("\n")}\n`);
+    assert.ok((await stat(decisionPath)).size > 256 * 1024);
+
+    await withServer(config(root, { capabilityDecisionsDir: "capability_decisions" }), authDeps(), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/brain/settings`, { headers: authHeaders() });
+      assert.equal(res.status, 200);
+      const payload = await res.json() as { capabilities: { recentDenials: number } };
+      assert.equal(payload.capabilities.recentDenials, 3);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("brain admin status endpoint reports unhealthy components server-side", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-status-bad-"));
   try {
@@ -1674,13 +1795,14 @@ test("brain admin env schema exposes grouped metadata including an other group f
   }
 });
 
-test("brain admin env write gates on confirmation (confirmed flag OR legacy phrase) and validates against the schema", async () => {
+test("brain admin env write gates on pinned confirmation or legacy phrase and validates against the schema", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-env-validate-"));
   const fakeBotToken = ["xoxb", "super", "secret"].join("-");
   try {
-    await withServer(config(root), authDeps(), async (baseUrl) => {
-      // Plan §6.4 / §8 step 4: a one-click write from any client — no `confirmed`
-      // flag and no approval phrase — must be refused (never a silent secret
+    const cfg = config(root);
+    await withServer(cfg, authDeps(), async (baseUrl) => {
+      // Plan §6.4 / §8 step 4: a one-click write from any client — no structured
+      // confirmation and no approval phrase — must be refused (never a silent secret
       // overwrite), even for otherwise-valid, allowlisted keys.
       const noConfirmation = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
         method: "POST",
@@ -1688,13 +1810,21 @@ test("brain admin env write gates on confirmation (confirmed flag OR legacy phra
         body: JSON.stringify({ entries: { CODEX_CHAT_BASE_URL: "https://brain.example.test", SLACK_BOT_TOKEN: fakeBotToken } }),
       });
       assert.equal(noConfirmation.status, 400);
-      assert.equal((await noConfirmation.json() as { error: string }).error, "approval_required");
+      assert.equal((await noConfirmation.json() as { error: string }).error, "confirmation_required");
 
-      // The React console sends `confirmed: true` after its ConfirmDialog → succeeds.
-      const confirmedWrite = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
+      const bareBoolean = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
         method: "POST",
         headers: { ...authHeaders(), "content-type": "application/json" },
         body: JSON.stringify({ confirmed: true, entries: { CODEX_CHAT_BASE_URL: "https://brain.example.test", SLACK_BOT_TOKEN: fakeBotToken } }),
+      });
+      assert.equal(bareBoolean.status, 400);
+      assert.equal((await bareBoolean.json() as { error: string }).error, "confirmation_required");
+
+      // The React console echoes the server-served token/action/envFile/key set.
+      const confirmedWrite = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify(envWritePayload(cfg, { CODEX_CHAT_BASE_URL: "https://brain.example.test", SLACK_BOT_TOKEN: fakeBotToken })),
       });
       assert.equal(confirmedWrite.status, 200);
       assert.deepEqual((await confirmedWrite.json() as { writtenKeys: string[] }).writtenKeys.sort(), ["CODEX_CHAT_BASE_URL", "SLACK_BOT_TOKEN"]);
@@ -1711,7 +1841,7 @@ test("brain admin env write gates on confirmation (confirmed flag OR legacy phra
       const invalid = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
         method: "POST",
         headers: { ...authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ confirmed: true, entries: { CODEX_CHAT_BASE_URL: "not-a-url" } }),
+        body: JSON.stringify(envWritePayload(cfg, { CODEX_CHAT_BASE_URL: "not-a-url" })),
       });
       assert.equal(invalid.status, 400);
       const invalidPayload = await invalid.json() as { error: string; fieldErrors: Array<{ key: string; code: string }> };
@@ -1722,7 +1852,7 @@ test("brain admin env write gates on confirmation (confirmed flag OR legacy phra
       const empty = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
         method: "POST",
         headers: { ...authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ confirmed: true, entries: { CODEX_CHAT_BASE_URL: "" } }),
+        body: JSON.stringify(envWritePayload(cfg, { CODEX_CHAT_BASE_URL: "" })),
       });
       assert.equal(empty.status, 400);
       assert.ok((await empty.json() as { fieldErrors: Array<{ key: string; code: string }> }).fieldErrors.some((fieldError) => fieldError.code === "required"));
@@ -1974,6 +2104,11 @@ test("brain users endpoint excludes disabled subjects and surfaces unmapped gran
   try {
     await writeJson(path.join(root, "capabilities.json"), disabledSubjectStore());
     await withServer(config(root), authDeps(), async (baseUrl) => {
+      const catalogRes = await fetch(`${baseUrl}/api/admin/brain/capabilities/catalog`, { headers: authHeaders() });
+      assert.equal(catalogRes.status, 200);
+      const catalog = await catalogRes.json() as { groups: Array<{ id: string; synthetic?: boolean }> };
+      assert.equal(catalog.groups.find((group) => group.id === "other")?.synthetic, true);
+
       const res = await fetch(`${baseUrl}/api/admin/brain/users`, { headers: authHeaders() });
       assert.equal(res.status, 200);
       const payload = await res.json() as {
@@ -2173,6 +2308,24 @@ test("brain audit endpoint merges, filters, paginates, and never echoes secrets"
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("readFileTail loops short reads and never stringifies unread buffer bytes", async () => {
+  const source = Buffer.from("alpha\nbeta\ngamma\n", "utf8");
+  let closed = false;
+  const text = await readFileTail("mock-audit.jsonl", source.length, async () => ({
+    stat: async () => ({ size: source.length }),
+    read: async (buffer: Buffer, offset: number, length: number, position: number) => {
+      buffer.fill(0x58, offset, offset + length);
+      const bytesRead = Math.min(3, length, Math.max(0, source.length - position));
+      if (bytesRead > 0) source.copy(buffer, offset, position, position + bytesRead);
+      return { bytesRead };
+    },
+    close: async () => { closed = true; },
+  }));
+  assert.equal(text, source.toString("utf8"));
+  assert.equal(text.includes("X"), false);
+  assert.equal(closed, true);
 });
 
 // --- §6.5 WRITES: mutations, impact preview, refusal rails, migration --------
@@ -2813,6 +2966,172 @@ test("brain self-lockout counts only admins on active subjects", async () => {
   }
 });
 
+function suspendedGrantRegrantStore(): unknown {
+  return {
+    schemaVersion: 2,
+    people: [{ id: "person_regrant", displayName: "Regrant", status: "active", personType: "human", primarySubjectId: "person:regrant", identityIds: ["identity_telegram_900000801"], subjectIds: ["person:regrant", "person:regrant_old"] }],
+    externalIdentities: [{ id: "identity_telegram_900000801", provider: "telegram", providerUserId: "900000801", personId: "person_regrant", status: "linked" }],
+    identityProofs: [],
+    subjects: [
+      { id: "person:regrant", personId: "person_regrant", kind: "person", status: "active" },
+      { id: "person:regrant_old", personId: "person_regrant", kind: "person", status: "suspended" },
+    ],
+    grants: [
+      { id: "g_old_suspended_crm", subjectId: "person:regrant_old", capabilityId: "crm.contact.read", grantKind: "capability", resource: { selectors: { scope: "*", contactId: "*" } }, actions: ["*"], status: "active", enforcement: "enforcing" },
+    ],
+  };
+}
+
+test("brain grant idempotency ignores suspended subjects and writes to the active primary subject", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-regrant-suspended-"));
+  try {
+    await writeJson(path.join(root, "capabilities.json"), suspendedGrantRegrantStore());
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const surface = { actorId: "telegram:user:900000801", operation: "crm.contact.read", resource: { scope: "workspace", contactId: "c_801" } };
+      assert.equal((await jsonRequest(baseUrl, "POST", "/api/admin/brain/capabilities/check", surface)).payload.allowed, false);
+
+      const grant = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/person_regrant/grants", { capabilityId: "crm.contact.read" });
+      assert.equal(grant.status, 200);
+      assert.equal(grant.payload.changed, true);
+      assert.equal(grant.payload.detail.subjectId, "person:regrant");
+      assert.equal(grant.payload.detail.grantIds.length, 1);
+      assert.deepEqual(grant.payload.detail.alreadyGranted, []);
+      assert.ok(grant.payload.impact.summary.newlyAllowedCount > 0);
+
+      const stored = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8"));
+      assert.ok(stored.grants.some((row: any) => row.id === "g_old_suspended_crm" && row.subjectId === "person:regrant_old"));
+      assert.ok(stored.grants.some((row: any) => row.subjectId === "person:regrant" && row.capabilityId === "crm.contact.read"));
+      assert.equal((await jsonRequest(baseUrl, "POST", "/api/admin/brain/capabilities/check", surface)).payload.allowed, true);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function badPrimarySubjectStore(subjects: readonly unknown[]): unknown {
+  return {
+    schemaVersion: 2,
+    people: [{ id: "person_bad_primary", displayName: "Bad Primary", status: "active", personType: "human", primarySubjectId: "person:bad_primary", identityIds: ["identity_telegram_900000802"], subjectIds: ["person:bad_primary"] }],
+    externalIdentities: [{ id: "identity_telegram_900000802", provider: "telegram", providerUserId: "900000802", personId: "person_bad_primary", status: "linked" }],
+    identityProofs: [],
+    subjects,
+    grants: [],
+  };
+}
+
+test("brain grant materializes a missing primary subject before writing", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-missing-primary-"));
+  try {
+    await writeJson(path.join(root, "capabilities.json"), badPrimarySubjectStore([]));
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const grant = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/person_bad_primary/grants", { capabilityId: "todos.item.read" });
+      assert.equal(grant.status, 200);
+      assert.equal(grant.payload.changed, true);
+      assert.equal(grant.payload.detail.subjectId, "person:bad_primary");
+      assert.equal(grant.payload.detail.materializedPrimarySubject, true);
+
+      const stored = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8"));
+      assert.ok(stored.subjects.some((subject: any) => subject.id === "person:bad_primary" && subject.status === "active" && subject.kind === "person" && subject.source === "manual_admin"));
+      assert.ok(stored.people[0].subjectIds.includes("person:bad_primary"));
+      assert.ok(stored.grants.some((grantRow: any) => grantRow.subjectId === "person:bad_primary" && grantRow.capabilityId === "todos.item.read"));
+      const audit = await readFile(path.join(root, "capability-audit.jsonl"), "utf8");
+      assert.match(audit, /materializedPrimarySubject/);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain grant refuses a suspended primary subject instead of reactivating it", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-suspended-primary-"));
+  try {
+    await writeJson(path.join(root, "capabilities.json"), badPrimarySubjectStore([{ id: "person:bad_primary", personId: "person_bad_primary", kind: "person", status: "suspended" }]));
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const grant = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/person_bad_primary/grants", { capabilityId: "todos.item.read" });
+      assert.equal(grant.status, 400);
+      assert.equal(grant.payload.error, "primary_subject_unavailable");
+      const stored = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8"));
+      assert.equal(stored.grants.length, 0);
+      assert.equal(stored.subjects.find((subject: any) => subject.id === "person:bad_primary").status, "suspended");
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function phantomSubjectAdminStore(): unknown {
+  return {
+    schemaVersion: 2,
+    people: [
+      { id: "person_real_admin", displayName: "Real Admin", status: "active", personType: "human", primarySubjectId: "person:real_admin", identityIds: ["identity_telegram_900000804"], subjectIds: ["person:real_admin"] },
+      { id: "person_phantom_admin", displayName: "Phantom Admin", status: "active", personType: "human", primarySubjectId: "person:phantom_admin", identityIds: ["identity_telegram_900000805"], subjectIds: ["person:phantom_admin"] },
+    ],
+    externalIdentities: [
+      { id: "identity_telegram_900000804", provider: "telegram", providerUserId: "900000804", personId: "person_real_admin", status: "linked" },
+      { id: "identity_telegram_900000805", provider: "telegram", providerUserId: "900000805", personId: "person_phantom_admin", status: "linked" },
+    ],
+    identityProofs: [],
+    subjects: [{ id: "person:real_admin", personId: "person_real_admin", kind: "person", status: "active" }],
+    grants: [
+      { id: "g_real_admin", subjectId: "person:real_admin", capabilityId: "capability.catalog.read", grantKind: "capability", resource: { selectors: {} }, actions: ["*"], status: "active", enforcement: "enforcing" },
+      { id: "g_phantom_admin", subjectId: "person:phantom_admin", capabilityId: "capability.catalog.read", grantKind: "capability", resource: { selectors: {} }, actions: ["*"], status: "active", enforcement: "enforcing" },
+    ],
+  };
+}
+
+test("brain self-lockout ignores phantom subject ids with no subject record", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-phantom-admin-"));
+  try {
+    await writeJson(path.join(root, "capabilities.json"), phantomSubjectAdminStore());
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const revoke = await jsonRequest(baseUrl, "DELETE", "/api/admin/brain/users/person_real_admin/grants/g_real_admin");
+      assert.equal(revoke.status, 422);
+      assert.equal(revoke.payload.error, "self_lockout");
+      const stored = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8"));
+      assert.equal(stored.grants.find((row: any) => row.id === "g_real_admin").status, "active");
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function identityLinkedSubjectStore(): unknown {
+  return {
+    schemaVersion: 2,
+    people: [{ id: "person_identity_subject", displayName: "Identity Subject", status: "active", personType: "human", primarySubjectId: "person:identity_subject", identityIds: ["identity_telegram_900000806"], subjectIds: ["person:identity_subject"] }],
+    externalIdentities: [{ id: "identity_telegram_900000806", provider: "telegram", providerUserId: "900000806", personId: "person_identity_subject", status: "linked" }],
+    identityProofs: [],
+    subjects: [
+      { id: "person:identity_subject", personId: "person_identity_subject", kind: "person", status: "active" },
+      { id: "identity:telegram_900000806", identityId: "identity_telegram_900000806", kind: "external_identity", status: "active" },
+    ],
+    grants: [
+      { id: "g_identity_subject_todo", subjectId: "identity:telegram_900000806", capabilityId: "todos.item.read", grantKind: "capability", resource: { selectors: { scope: "*", listId: "*" } }, actions: ["*"], status: "active", enforcement: "enforcing" },
+    ],
+  };
+}
+
+test("brain revoke resolves subjects linked through person identityIds", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-identity-subject-"));
+  try {
+    await writeJson(path.join(root, "capabilities.json"), identityLinkedSubjectStore());
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const users = (await (await fetch(`${baseUrl}/api/admin/brain/users`, { headers: authHeaders() })).json()) as any;
+      const person = users.people.find((row: any) => row.id === "person_identity_subject");
+      assert.ok(person.activeSubjectIds.includes("identity:telegram_900000806"));
+      assert.equal(person.grants.byGroup.find((group: any) => group.id === "todos")?.granted, true);
+
+      const revoke = await jsonRequest(baseUrl, "DELETE", "/api/admin/brain/users/person_identity_subject/grants/g_identity_subject_todo");
+      assert.equal(revoke.status, 200);
+      assert.equal(revoke.payload.changed, true);
+      const stored = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8"));
+      assert.equal(stored.grants.find((row: any) => row.id === "g_identity_subject_todo").status, "revoked");
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 // Finding 6: two concurrent in-process mutations serialize via the module-level
 // mutation queue — both writes land instead of one silently clobbering the other.
 test("brain concurrent mutations serialize in-process without losing writes", async () => {
@@ -2897,6 +3216,22 @@ test("brain user mutation rejects a malformed request body with 400 not 500", as
       const arrayBody = await fetch(`${baseUrl}/api/admin/brain/users`, { method: "POST", headers: { ...authHeaders(), "content-type": "application/json" }, body: "[]" });
       assert.equal(arrayBody.status, 400);
       assert.equal((await arrayBody.json() as { error: string }).error, "invalid_body");
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain generic JSON endpoints reject malformed request bodies with 400 not 500", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-generic-badbody-"));
+  try {
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const nonJson = await fetch(`${baseUrl}/api/admin/brain/slack/setup`, { method: "POST", headers: { ...authHeaders(), "content-type": "application/json" }, body: "not json at all" });
+      assert.equal(nonJson.status, 400);
+      assert.equal((await nonJson.json() as { error: string }).error, "invalid_body");
+      const empty = await fetch(`${baseUrl}/api/admin/brain/slack/setup`, { method: "POST", headers: { ...authHeaders(), "content-type": "application/json" }, body: "" });
+      assert.equal(empty.status, 400);
+      assert.equal((await empty.json() as { error: string }).error, "invalid_body");
     });
   } finally {
     await rm(root, { recursive: true, force: true });

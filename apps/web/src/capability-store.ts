@@ -226,6 +226,22 @@ export function grantedCapabilityIds(store: CapabilityStore, subjectIds: string[
   return granted;
 }
 
+export function subjectIdsForPerson(store: CapabilityStore, person: StorePerson): string[] {
+  const ids = new Set<string>();
+  if (person.primarySubjectId) ids.add(person.primarySubjectId);
+  for (const id of person.subjectIds ?? []) ids.add(id);
+  for (const subject of store.subjects ?? []) {
+    if (subject.personId === person.id) ids.add(subject.id);
+    if (subject.identityId && (person.identityIds ?? []).includes(subject.identityId)) ids.add(subject.id);
+  }
+  return [...ids];
+}
+
+export function subjectExistsAndActive(store: CapabilityStore, subjectId: string): boolean {
+  const subject = (store.subjects ?? []).find((candidate) => candidate.id === subjectId);
+  return Boolean(subject && (!subject.status || subject.status === "active"));
+}
+
 function resolveActorSubjects(store: CapabilityStore, actor: ActorContext): { allowed: true; subjectIds: string[] } | { allowed: false; reason: string } {
   const candidateSubjectIds = new Set<string>();
   const metadataSubject = stringValue(actor.metadata?.brainSubjectId) ?? stringValue(actor.metadata?.brain_subject_id);
@@ -245,10 +261,7 @@ function resolveActorSubjects(store: CapabilityStore, actor: ActorContext): { al
     for (const subjectId of person?.subjectIds ?? []) candidateSubjectIds.add(subjectId);
   }
 
-  const activeSubjectIds = [...candidateSubjectIds].filter((id) => {
-    const subject = (store.subjects ?? []).find((candidate) => candidate.id === id);
-    return subject && (!subject.status || subject.status === "active");
-  });
+  const activeSubjectIds = [...candidateSubjectIds].filter((id) => subjectExistsAndActive(store, id));
   if (activeSubjectIds.length === 0) return { allowed: false, reason: "actor_not_linked_to_brain_subject" };
   return { allowed: true, subjectIds: activeSubjectIds };
 }

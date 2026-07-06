@@ -23,8 +23,8 @@ function MainLoopModel() {
     const payload: MainModelWritePayload = {
       preset: selected,
       confirmation: {
-        token: "brain-admin-main-loop-model-confirmed-v1",
-        action: "codex-chat.main-loop-model.write",
+        token: data.confirmation.token,
+        action: data.confirmation.action,
         envFile: data.env.envFile,
         preset: selected,
         // Echo the server's key list verbatim (never hand-mirrored client-side).
@@ -109,6 +109,15 @@ function entriesFromCurrent(current: OpenRouterSummary["current"]): OpenRouterWr
   };
 }
 
+function profileTargets(data: OpenRouterSummary): Array<{ codexProfile: string; profilePath: string }> {
+  if (data.profileTargets?.length) return data.profileTargets;
+  return [{ codexProfile: data.current.codexProfile, profilePath: data.profilePath }];
+}
+
+function profileTargetFor(data: OpenRouterSummary, profile: string): { codexProfile: string; profilePath: string } | null {
+  return profileTargets(data).find((target) => target.codexProfile === profile) ?? null;
+}
+
 // Old→new diffs for the non-secret keys this write would change. The API key is
 // a secret and is shown keys-only in the dialog, never as a value diff.
 function nonSecretDiffs(current: OpenRouterSummary["current"], entries: OpenRouterWriteEntries): Array<{ key: string; from: string; to: string }> {
@@ -141,21 +150,29 @@ function OpenRouterForm({ data }: { data: OpenRouterSummary }) {
   const write = useOpenRouterWrite();
   const [entries, setEntries] = useState<OpenRouterWriteEntries>(() => entriesFromCurrent(data.current));
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmError, setConfirmError] = useState<string | null>(null);
   const [wrote, setWrote] = useState<string[] | null>(null);
 
   const set = (patch: Partial<OpenRouterWriteEntries>) => setEntries((prev) => ({ ...prev, ...patch }));
   const diffs = nonSecretDiffs(data.current, entries);
+  const profileTarget = profileTargetFor(data, entries.codexProfile);
 
   const confirm = () => {
+    const target = profileTargetFor(data, entries.codexProfile);
+    if (!target) {
+      setConfirmError("confirmation unavailable - reload settings");
+      return;
+    }
+    setConfirmError(null);
     const payload: OpenRouterWritePayload = {
       ...entries,
       confirmation: {
-        token: "brain-admin-openrouter-settings-confirmed-v1",
-        action: "openrouter.settings.write",
+        token: data.confirmation.token,
+        action: data.confirmation.action,
         envFile: data.env.envFile,
-        // Pin the read-state the server served (current profile + governed key
-        // set), echoed verbatim — never recomputed client-side.
-        profilePath: data.profilePath,
+        // Echo the exact server-computed path for the submitted profile.
+        codexProfile: entries.codexProfile,
+        profilePath: target.profilePath,
         keys: data.confirmationKeys,
       },
     };
@@ -214,8 +231,9 @@ function OpenRouterForm({ data }: { data: OpenRouterSummary }) {
       </div>
       {write.isError ? <ErrorNotice error={write.error} /> : null}
       {wrote ? <RestartNote writtenKeys={wrote} /> : null}
+      {!profileTarget ? <p className="alert warn small">confirmation unavailable - reload settings</p> : null}
       <div className="settings-actions">
-        <button className="btn primary" type="button" disabled={write.isPending} onClick={() => setConfirmOpen(true)}>
+        <button className="btn primary" type="button" disabled={write.isPending || !profileTarget} title={!profileTarget ? "confirmation unavailable - reload settings" : undefined} onClick={() => setConfirmOpen(true)}>
           Save OpenRouter settings
         </button>
       </div>
@@ -244,6 +262,7 @@ function OpenRouterForm({ data }: { data: OpenRouterSummary }) {
           <p className="muted small">No non-secret config values change{entries.apiKey ? " (the API key is updated below)" : ""}.</p>
         )}
         {entries.apiKey ? <p className="alert warn small">OPENROUTER_API_KEY will be overwritten. Secret values are write-only and never displayed.</p> : null}
+        {confirmError || !profileTarget ? <p className="alert bad small">{confirmError ?? "confirmation unavailable - reload settings"}</p> : null}
         <p className="muted small">codex-chat restart is required for changes to take effect.</p>
         {write.isError ? <p className="alert bad small">{describeError(write.error).message}</p> : null}
       </ConfirmDialog>
