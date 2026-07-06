@@ -211,6 +211,7 @@ export interface GrantInput {
   personId: string;
   target: string;
   isGroup: boolean;
+  selectors?: Record<string, string>;
   preview?: boolean;
   expectedStoreHash?: string;
 }
@@ -219,8 +220,9 @@ export function useGrant() {
   const api = useApiClient();
   const invalidate = useInvalidateCapabilities();
   return useMutation({
-    mutationFn: ({ personId, target, isGroup, preview, expectedStoreHash }: GrantInput) => {
+    mutationFn: ({ personId, target, isGroup, selectors, preview, expectedStoreHash }: GrantInput) => {
       const body: Record<string, unknown> = isGroup ? { groupId: target } : { capabilityId: target };
+      if (selectors) body.selectors = selectors;
       if (expectedStoreHash) body.expectedStoreHash = expectedStoreHash;
       const query = preview ? "?preview=true" : "";
       return api.post<MutationResponse>(`/users/${encodeURIComponent(personId)}/grants${query}`, body);

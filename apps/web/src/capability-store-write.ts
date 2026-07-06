@@ -24,8 +24,11 @@ import path from "node:path";
 
 import {
   CAPABILITY_GROUP_DEFINITIONS,
+  catalogDefinitionsForSource,
   defaultSelectorsForCapability,
   mappedCatalogCapabilityIds,
+  storeCapabilityVocabulary,
+  type CapabilityCatalogRegistrySource,
 } from "./capability-catalog.js";
 import {
   actorContextFromExternalId,
@@ -273,7 +276,7 @@ export type MutationSpec =
   | { kind: "create_person"; displayName: string; adminEmail: string }
   | { kind: "link_identity"; personId: string; provider: string; externalId: string; teamId?: string; adminEmail: string }
   | { kind: "unlink_identity"; personId: string; identityId: string; adminEmail: string }
-  | { kind: "grant"; personId: string; target: string; selectors?: Record<string, unknown>; adminEmail: string }
+  | { kind: "grant"; personId: string; target: string; selectors?: Record<string, unknown>; registry?: CapabilityCatalogRegistrySource; adminEmail: string }
   | { kind: "revoke"; personId: string; grantId: string; adminEmail: string }
   | { kind: "revoke_batch"; personId: string; grantIds: string[]; reason?: string; adminEmail: string };
 
@@ -284,6 +287,10 @@ export interface MutationOutcome {
   // the impact preview union the person's whole in-force capability set (used
   // for identity link/unlink, which flips a whole surface).
   explicitCapabilityIds?: string[];
+  // Representative resources for previewing selector-scoped grants. For grants,
+  // each capability is evaluated against the exact selector bag that will be
+  // stored, so a narrowed selector can deny/allow differently from a broad one.
+  impactResources?: Record<string, Record<string, unknown>>;
   // Structured, secret-free audit payload appended on a successful commit.
   audit: Record<string, unknown>;
   // Response detail surfaced to the caller (ids that were created/changed).
@@ -359,15 +366,15 @@ export interface SurfaceImpact {
 export interface ImpactPreview {
   surfaces: SurfaceImpact[];
   summary: { newlyAllowedCount: number; newlyDeniedCount: number };
-  // A fixed caveat: the impact diff is computed with an empty resource, so a
-  // capability shown as newlyAllowed is only truly allowed at runtime when the
-  // concrete resource keys the request carries are covered by the grant's
-  // selectors (codex-chat's selectorsMatch requires explicit coverage).
+  // A fixed caveat: grant previews evaluate against the selector resource that
+  // will be written, while non-grant previews use an empty resource. Live
+  // requests still carry concrete resource keys that must be covered by the
+  // grant's selectors (codex-chat's selectorsMatch requires explicit coverage).
   previewCaveat: string;
 }
 
 export const IMPACT_PREVIEW_CAVEAT =
-  "preview evaluates with an empty resource; live requests include concrete resource keys that must be covered by the grant's selectors";
+  "preview evaluates grant selectors when available; live requests include concrete resource keys that must be covered by the grant's selectors";
 
 // Representative actor contexts for a person's linked surfaces, in the canonical
 // external form the enforcer resolves (telegram:user:<id>,
@@ -411,6 +418,7 @@ export function computeImpact(
   after: CapabilityStore,
   personId: string | undefined,
   explicitCapabilityIds?: string[],
+  impactResources: Record<string, Record<string, unknown>> = {},
 ): ImpactPreview {
   if (!personId) return { surfaces: [], summary: { newlyAllowedCount: 0, newlyDeniedCount: 0 }, previewCaveat: IMPACT_PREVIEW_CAVEAT };
 
@@ -431,7 +439,7 @@ export function computeImpact(
     const newlyAllowed: string[] = [];
     const newlyDenied: string[] = [];
     for (const capabilityId of capabilityIds) {
-      const requirement = { operation: capabilityId, resource: {} };
+      const requirement = { operation: capabilityId, resource: impactResources[capabilityId] ?? {} };
       const wasAllowed = evaluateAuthorization(before, { actor, requirement }).allowed;
       const isAllowed = evaluateAuthorization(after, { actor, requirement }).allowed;
       if (isAllowed && !wasAllowed) newlyAllowed.push(capabilityId);
@@ -610,35 +618,156 @@ function applyUnlinkIdentity(store: CapabilityStore, spec: Extract<MutationSpec,
   };
 }
 
-// Expand a grant target (catalog group id OR individual capability id) into the
-// capability ids to write, using the shared catalog mapping.
-export function expandGrantTarget(target: string): { capabilityIds: string[]; expandedFromGroup: boolean } {
-  const group = CAPABILITY_GROUP_DEFINITIONS.find((definition) => definition.id === target);
-  if (group) {
-    if (group.capabilities.length === 0) {
-      throw new CapabilityWriteError("invalid_request", 400, `Group ${target} has no capabilities to grant`);
+interface ExpandedGrantTarget {
+  capabilityIds: string[];
+  expandedFromGroup: boolean;
+  vocabularyEntries: Map<string, { selectorKeys: string[]; deprecated?: boolean; provenance: "registry" | "curated" | "store" }>;
+}
+
+function grantVocabularyEntryMap(
+  store: CapabilityStore | undefined,
+  registry: CapabilityCatalogRegistrySource | undefined,
+): Map<string, { selectorKeys: string[]; deprecated?: boolean; provenance: "registry" | "curated" | "store" }> {
+  const source = registry ?? { available: false, registryVersion: null, capabilities: [] };
+  const out = new Map<string, { selectorKeys: string[]; deprecated?: boolean; provenance: "registry" | "curated" | "store" }>();
+  for (const group of catalogDefinitionsForSource(store, source)) {
+    for (const child of group.capabilities) {
+      if (out.has(child.id)) continue;
+      out.set(child.id, {
+        selectorKeys: child.selectorKeys ?? [],
+        provenance: child.provenance ?? "curated",
+        ...(child.deprecated === true ? { deprecated: true } : {}),
+      });
     }
-    return { capabilityIds: group.capabilities.map((child) => child.id), expandedFromGroup: true };
   }
-  // An individual capability id must be a real catalog id (group id or mapped
-  // child capability). Unknown strings must never be persisted as enforcing junk
-  // grants that the authorizer would evaluate.
-  if (!mappedCatalogCapabilityIds().has(target)) {
-    throw new CapabilityWriteError("unknown_capability", 400, `Unknown capability ${target}`);
+  return out;
+}
+
+function legacySelectorTemplate(store: CapabilityStore, capabilityId: string): Record<string, string> {
+  const keys = new Set<string>();
+  for (const grant of store.grants ?? []) {
+    if (grant.capabilityId !== capabilityId) continue;
+    for (const key of Object.keys((grant.resource?.selectors ?? {}) as Record<string, unknown>)) keys.add(key);
   }
-  return { capabilityIds: [target], expandedFromGroup: false };
+  if (keys.size > 0) return Object.fromEntries([...keys].sort().map((key) => [key, "*"]));
+  return defaultSelectorsForCapability(capabilityId);
+}
+
+const FORBIDDEN_SELECTOR_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+function normalizeSelectors(value: Record<string, unknown> | undefined): Record<string, string> | undefined {
+  if (!value) return undefined;
+  const out = Object.create(null) as Record<string, string>;
+  let count = 0;
+  for (const [key, raw] of Object.entries(value)) {
+    if (!Object.hasOwn(value, key)) continue;
+    const selectorKey = requireNonEmpty(key, "selector key");
+    if (FORBIDDEN_SELECTOR_KEYS.has(selectorKey)) {
+      throw new CapabilityWriteError("invalid_selector", 400, `Selector key ${selectorKey} is not allowed`, { selectorKey });
+    }
+    if (typeof raw !== "string" || !raw.trim()) {
+      throw new CapabilityWriteError("invalid_selector", 400, `Selector ${selectorKey} must be a non-empty string`);
+    }
+    out[selectorKey] = raw.trim();
+    count += 1;
+  }
+  if (count === 0) {
+    throw new CapabilityWriteError("invalid_selector", 400, "Provide at least one selector key or omit selectors to use defaults");
+  }
+  return out;
+}
+
+function validateSelectorsForCapability(
+  capabilityId: string,
+  selectors: Record<string, string>,
+  vocabularyEntries: Map<string, { selectorKeys: string[]; deprecated?: boolean; provenance: "registry" | "curated" | "store" }>,
+): void {
+  const entry = vocabularyEntries.get(capabilityId);
+  if (!entry) {
+    throw new CapabilityWriteError("unknown_capability", 400, `Unknown capability ${capabilityId}`);
+  }
+  const allowed = new Set(entry.selectorKeys);
+  for (const key of Object.keys(selectors)) {
+    if (!allowed.has(key)) {
+      throw new CapabilityWriteError("invalid_selector", 400, `Selector ${key} is not valid for ${capabilityId}`, {
+        capabilityId,
+        selectorKey: key,
+        allowedSelectorKeys: entry.selectorKeys,
+      });
+    }
+  }
+}
+
+function defaultSelectorsForGrantEntry(
+  store: CapabilityStore,
+  capabilityId: string,
+  entry: { selectorKeys: string[]; provenance: "registry" | "curated" | "store" },
+): Record<string, string> {
+  if (entry.provenance === "registry") return Object.fromEntries(entry.selectorKeys.map((key) => [key, "*"]));
+  if (entry.provenance === "curated") return defaultSelectorsForCapability(capabilityId);
+  if (entry.selectorKeys.length > 0) return Object.fromEntries(entry.selectorKeys.map((key) => [key, "*"]));
+  return legacySelectorTemplate(store, capabilityId);
+}
+
+// Expand a grant target (registry family group OR individual capability id) into
+// the capability ids to write. When the codex-chat registry is available it is
+// the primary vocabulary. Store-only ids remain eligible as legacy ids only when
+// the current store already references them; HTTP callers always pass a registry
+// context, while older direct callers keep the legacy catalog fallback.
+export function expandGrantTarget(
+  target: string,
+  store?: CapabilityStore,
+  registry?: CapabilityCatalogRegistrySource,
+): ExpandedGrantTarget {
+  const source = registry ?? { available: false, registryVersion: null, capabilities: [] };
+  const definitions = catalogDefinitionsForSource(store, source);
+  const vocabularyEntries = grantVocabularyEntryMap(store, registry);
+  const group = definitions.find((definition) => definition.id === target);
+  if (group) {
+    if (group.synthetic && registry?.available) {
+      throw new CapabilityWriteError("unknown_capability", 400, `Capability group ${target} is not grantable as a group`);
+    }
+    const grantableChildren = group.capabilities.filter((child) => child.deprecated !== true && child.grantable !== false && child.provenance !== "store");
+    if (grantableChildren.length === 0) {
+      throw new CapabilityWriteError("invalid_request", 400, `Group ${target} has no grantable capabilities`);
+    }
+    return { capabilityIds: grantableChildren.map((child) => child.id), expandedFromGroup: true, vocabularyEntries };
+  }
+
+  const vocabularyEntry = vocabularyEntries.get(target);
+  if (vocabularyEntry) {
+    if (vocabularyEntry.deprecated) {
+      throw new CapabilityWriteError("deprecated_capability", 400, `Capability ${target} is deprecated and cannot be granted`);
+    }
+    return { capabilityIds: [target], expandedFromGroup: false, vocabularyEntries };
+  }
+
+  const vocabulary = store ? storeCapabilityVocabulary(store) : new Set<string>();
+  if (registry && vocabulary.has(target)) {
+    return { capabilityIds: [target], expandedFromGroup: false, vocabularyEntries };
+  }
+
+  // Direct non-HTTP callers without a registry context keep the pre-registry
+  // static catalog guard instead of being allowed to persist arbitrary strings.
+  if (!registry && mappedCatalogCapabilityIds().has(target)) {
+    return { capabilityIds: [target], expandedFromGroup: false, vocabularyEntries };
+  }
+
+  throw new CapabilityWriteError("unknown_capability", 400, `Unknown capability ${target}`);
 }
 
 function applyGrant(store: CapabilityStore, spec: Extract<MutationSpec, { kind: "grant" }>): MutationOutcome {
   const person = findPerson(store, spec.personId);
   const target = requireNonEmpty(spec.target, "target");
-  const { capabilityIds, expandedFromGroup } = expandGrantTarget(target);
+  const { capabilityIds, expandedFromGroup, vocabularyEntries } = expandGrantTarget(target, store, spec.registry);
   const { subjectId, materialized } = ensureWritablePrimarySubject(store, person);
   const now = new Date().toISOString();
   // An explicit selectors object in the request wins verbatim; otherwise each
   // granted capability defaults to the broad selector template for its group so
   // the grant actually covers the concrete resource keys the runtime sends.
-  const explicitSelectors = spec.selectors && typeof spec.selectors === "object" && !Array.isArray(spec.selectors) ? spec.selectors : undefined;
+  const explicitSelectors = normalizeSelectors(
+    spec.selectors && typeof spec.selectors === "object" && !Array.isArray(spec.selectors) ? spec.selectors : undefined,
+  );
 
   // Skip capabilities the person's active subjects already hold in force so a
   // re-grant is idempotent rather than piling duplicate rows.
@@ -646,10 +775,14 @@ function applyGrant(store: CapabilityStore, spec: Extract<MutationSpec, { kind: 
   const toGrant = capabilityIds.filter((id) => !alreadyGranted.has(id));
 
   const grantIds: string[] = [];
+  const impactResources: Record<string, Record<string, unknown>> = {};
   const grants = (store.grants ??= []);
   for (const capabilityId of toGrant) {
     const grantId = `grant_admin_${shortId()}`;
-    const selectors = explicitSelectors ?? defaultSelectorsForCapability(capabilityId);
+    const vocabularyEntry = vocabularyEntries.get(capabilityId);
+    if (!vocabularyEntry) throw new CapabilityWriteError("unknown_capability", 400, `Unknown capability ${capabilityId}`);
+    const selectors = explicitSelectors ?? defaultSelectorsForGrantEntry(store, capabilityId, vocabularyEntry);
+    validateSelectorsForCapability(capabilityId, selectors, vocabularyEntries);
     const grant: StoreGrant = {
       id: grantId,
       subjectId,
@@ -666,6 +799,7 @@ function applyGrant(store: CapabilityStore, spec: Extract<MutationSpec, { kind: 
     };
     grants.push(grant);
     grantIds.push(grantId);
+    impactResources[capabilityId] = { ...selectors };
   }
   if (materialized || grantIds.length > 0) store.updatedAt = now;
 
@@ -673,6 +807,7 @@ function applyGrant(store: CapabilityStore, spec: Extract<MutationSpec, { kind: 
     changed: materialized || grantIds.length > 0,
     personId: person.id,
     explicitCapabilityIds: capabilityIds,
+    impactResources,
     audit: {
       action: "capability.grant.applied",
       adminEmail: spec.adminEmail,
@@ -682,9 +817,10 @@ function applyGrant(store: CapabilityStore, spec: Extract<MutationSpec, { kind: 
       grantKind: expandedFromGroup ? "group" : "capability",
       grantIds,
       capabilityIds: toGrant,
+      selectors: explicitSelectors ?? undefined,
       materializedPrimarySubject: materialized ? { personId: person.id, subjectId } : undefined,
     },
-    detail: { personId: person.id, subjectId, target, expandedFromGroup, grantIds, grantedCapabilityIds: toGrant, alreadyGranted: [...alreadyGranted], materializedPrimarySubject: materialized },
+    detail: { personId: person.id, subjectId, target, expandedFromGroup, selectors: explicitSelectors ?? null, grantIds, grantedCapabilityIds: toGrant, alreadyGranted: [...alreadyGranted], materializedPrimarySubject: materialized },
   };
 }
 
@@ -814,7 +950,7 @@ function simulate(before: CapabilityStore, spec: MutationSpec): { outcome: Mutat
   const outcome = applySpec(after, spec);
   assertValidStore(after);
   guardSelfLockout(before, after);
-  const impact = computeImpact(before, after, outcome.personId, outcome.explicitCapabilityIds);
+  const impact = computeImpact(before, after, outcome.personId, outcome.explicitCapabilityIds, outcome.impactResources);
   return { outcome, after, impact };
 }
 

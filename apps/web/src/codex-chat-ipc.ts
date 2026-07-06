@@ -9,6 +9,22 @@ export type CodexChatSetConfigResult =
   | { via: "ipc"; ok: true; restartRequired: boolean }
   | { via: "ipc"; ok: false; fieldErrors: Record<string, string> };
 
+export type CapabilityRiskTier = "low" | "medium" | "high";
+
+export interface CodexChatCapabilityRegistryEntry {
+  id: string;
+  family: string;
+  description: string;
+  selectorKeys: string[];
+  riskTier: CapabilityRiskTier;
+  deprecated?: boolean;
+}
+
+export interface CodexChatCapabilityRegistry {
+  registryVersion: number;
+  capabilities: CodexChatCapabilityRegistryEntry[];
+}
+
 export type CodexChatIpcErrorKind = "UNAVAILABLE" | "FAILED";
 export type CodexChatIpcErrorCode =
   | "TOKEN_UNAVAILABLE"
@@ -48,7 +64,31 @@ export async function sendSetConfig(
   const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_CODEX_CHAT_IPC_TIMEOUT_MS);
   const requestLine = `${JSON.stringify({ type: "set_config", entries, token })}\n`;
 
-  return new Promise<CodexChatSetConfigResult>((resolve, reject) => {
+  return sendOneLineIpcRequest(socketPath, requestLine, timeoutMs, "codex-chat IPC set_config timed out", parseSetConfigResponse);
+}
+
+// Read-only local metadata request. codex-chat intentionally serves this without
+// an IPC token for local callers; Brain is reading the registry as admin service
+// metadata, not acting as a runtime subject. Step-6-style subject attribution can
+// be added later if the registry read becomes an auditable capability check.
+export async function getCapabilityRegistry(
+  socketPath: string,
+  options: { timeoutMs?: number } = {},
+): Promise<CodexChatCapabilityRegistry> {
+  const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_CODEX_CHAT_IPC_TIMEOUT_MS);
+  const requestLine = `${JSON.stringify({ type: "get_capability_registry" })}\n`;
+
+  return sendOneLineIpcRequest(socketPath, requestLine, timeoutMs, "codex-chat IPC get_capability_registry timed out", parseCapabilityRegistryResponse);
+}
+
+function sendOneLineIpcRequest<T>(
+  socketPath: string,
+  requestLine: string,
+  timeoutMs: number,
+  timeoutMessage: string,
+  parseResponse: (line: string, requestLineWritten: boolean) => T,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
     const socket = createConnection(socketPath);
     let settled = false;
     let connected = false;
@@ -56,7 +96,7 @@ export async function sendSetConfig(
     let buffer = "";
 
     const timer = setTimeout(() => {
-      fail(new CodexChatIpcError("FAILED", "TIMEOUT", "codex-chat IPC set_config timed out", undefined, requestLineWritten));
+      fail(new CodexChatIpcError("FAILED", "TIMEOUT", timeoutMessage, undefined, requestLineWritten));
     }, timeoutMs);
 
     function cleanup(): void {
@@ -65,7 +105,7 @@ export async function sendSetConfig(
       if (!socket.destroyed) socket.destroy();
     }
 
-    function succeed(result: CodexChatSetConfigResult): void {
+    function succeed(result: T): void {
       if (settled) return;
       settled = true;
       cleanup();
@@ -96,7 +136,7 @@ export async function sendSetConfig(
       if (newline < 0) return;
       const line = buffer.slice(0, newline).trim();
       try {
-        succeed(parseSetConfigResponse(line, requestLineWritten));
+        succeed(parseResponse(line, requestLineWritten));
       } catch (error) {
         fail(asIpcError(error, "MALFORMED_RESPONSE", "codex-chat IPC response was malformed", requestLineWritten));
       }
@@ -158,6 +198,69 @@ function parseSetConfigResponse(line: string, requestLineWritten: boolean): Code
     return { via: "ipc", ok: false, fieldErrors: parseFieldErrors(result.fieldErrors, requestLineWritten) };
   }
   throw new CodexChatIpcError("FAILED", "MALFORMED_RESPONSE", "codex-chat IPC result missing ok flag", undefined, requestLineWritten);
+}
+
+function parseCapabilityRegistryResponse(line: string, requestLineWritten: boolean): CodexChatCapabilityRegistry {
+  if (!line) throw new CodexChatIpcError("FAILED", "MALFORMED_RESPONSE", "codex-chat IPC response was empty", undefined, requestLineWritten);
+  const parsed = parseJsonObject(line, requestLineWritten);
+  if (parsed.ok === false) {
+    const message = typeof parsed.error === "string" ? parsed.error : "";
+    const responseCode = typeof parsed.code === "string" ? parsed.code : "";
+    const unauthorized = responseCode === "unauthorized" || message.toLowerCase().includes("unauthorized");
+    throw new CodexChatIpcError(
+      "FAILED",
+      unauthorized ? "AUTH_REJECTED" : "IPC_REJECTED",
+      unauthorized ? "codex-chat IPC authorization failed" : "codex-chat IPC request was rejected",
+      undefined,
+      requestLineWritten,
+    );
+  }
+  if (parsed.ok !== true) throw new CodexChatIpcError("FAILED", "MALFORMED_RESPONSE", "codex-chat IPC response missing ok flag", undefined, requestLineWritten);
+
+  const result = parsed.result;
+  if (!isRecord(result)) throw new CodexChatIpcError("FAILED", "MALFORMED_RESPONSE", "codex-chat IPC response missing result", undefined, requestLineWritten);
+  const registryVersion = result.registryVersion;
+  if (typeof registryVersion !== "number" || !Number.isInteger(registryVersion) || registryVersion < 1) {
+    throw new CodexChatIpcError("FAILED", "MALFORMED_RESPONSE", "codex-chat IPC registry version was malformed", undefined, requestLineWritten);
+  }
+  if (!Array.isArray(result.capabilities)) {
+    throw new CodexChatIpcError("FAILED", "MALFORMED_RESPONSE", "codex-chat IPC registry capabilities were malformed", undefined, requestLineWritten);
+  }
+  return {
+    registryVersion,
+    capabilities: result.capabilities.map((entry) => parseCapabilityRegistryEntry(entry, requestLineWritten)),
+  };
+}
+
+function parseCapabilityRegistryEntry(value: unknown, requestLineWritten: boolean): CodexChatCapabilityRegistryEntry {
+  if (!isRecord(value)) throw new CodexChatIpcError("FAILED", "MALFORMED_RESPONSE", "codex-chat IPC registry entry was malformed", undefined, requestLineWritten);
+  const id = nonEmptyString(value.id);
+  const family = nonEmptyString(value.family);
+  const description = nonEmptyString(value.description);
+  const riskTier = value.riskTier;
+  if (riskTier !== "low" && riskTier !== "medium" && riskTier !== "high") {
+    throw new CodexChatIpcError("FAILED", "MALFORMED_RESPONSE", "codex-chat IPC registry risk tier was malformed", undefined, requestLineWritten);
+  }
+  if (!Array.isArray(value.selectorKeys)) {
+    throw new CodexChatIpcError("FAILED", "MALFORMED_RESPONSE", "codex-chat IPC registry selector keys were malformed", undefined, requestLineWritten);
+  }
+  const selectorKeys = value.selectorKeys.map((key) => {
+    const parsed = nonEmptyString(key);
+    return parsed;
+  });
+  return {
+    id,
+    family,
+    description,
+    selectorKeys: [...new Set(selectorKeys)],
+    riskTier,
+    ...(value.deprecated === true ? { deprecated: true } : {}),
+  };
+}
+
+function nonEmptyString(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error("expected non-empty string");
+  return value.trim();
 }
 
 function parseJsonObject(line: string, requestLineWritten: boolean): Record<string, unknown> {

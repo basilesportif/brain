@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { describeError } from "../../components/common";
 import { ApiError } from "../../lib/api";
@@ -27,6 +27,8 @@ export interface ImpactDialogProps {
   danger?: boolean;
   // Short human summary of the action (e.g. "Grant group CRM to Beta Operator").
   description: React.ReactNode;
+  previewKey?: string;
+  requestPending?: boolean;
   loadPreview: () => Promise<PreviewResult>;
   onCommit: (expectedStoreHash: string) => Promise<void>;
   onClose: () => void;
@@ -57,7 +59,7 @@ function ImpactBody({ impact }: { impact: ImpactPreview }) {
   );
 }
 
-export function ImpactDialog({ open, title, confirmLabel, danger, description, loadPreview, onCommit, onClose }: ImpactDialogProps) {
+export function ImpactDialog({ open, title, confirmLabel, danger, description, previewKey, requestPending, loadPreview, onCommit, onClose }: ImpactDialogProps) {
   const [impact, setImpact] = useState<ImpactPreview | null>(null);
   const [storeHash, setStoreHash] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -65,6 +67,11 @@ export function ImpactDialog({ open, title, confirmLabel, danger, description, l
   const [error, setError] = useState<unknown>(null);
   // Set when a commit was rejected because the store moved and we re-previewed.
   const [conflict, setConflict] = useState(false);
+  const loadPreviewRef = useRef(loadPreview);
+
+  useEffect(() => {
+    loadPreviewRef.current = loadPreview;
+  }, [loadPreview]);
 
   const runPreview = useCallback(() => {
     let cancelled = false;
@@ -72,7 +79,7 @@ export function ImpactDialog({ open, title, confirmLabel, danger, description, l
     setError(null);
     setImpact(null);
     setStoreHash(null);
-    loadPreview()
+    loadPreviewRef.current()
       .then((result) => {
         if (cancelled) return;
         setImpact(result.impact);
@@ -87,7 +94,7 @@ export function ImpactDialog({ open, title, confirmLabel, danger, description, l
     return () => {
       cancelled = true;
     };
-  }, [loadPreview]);
+  }, []);
 
   useEffect(() => {
     if (!open) {
@@ -100,9 +107,7 @@ export function ImpactDialog({ open, title, confirmLabel, danger, description, l
     setConflict(false);
     const cancel = runPreview();
     return cancel;
-    // loadPreview identity changes per open; keyed by `open` intentionally.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, previewKey, runPreview]);
 
   const confirm = () => {
     if (!storeHash) return; // no committing without a rendered, pinned preview
@@ -133,11 +138,12 @@ export function ImpactDialog({ open, title, confirmLabel, danger, description, l
       title={title}
       confirmLabel={confirmLabel}
       busy={committing}
-      confirmDisabled={loading || !impact}
+      confirmDisabled={loading || !impact || requestPending === true}
       onConfirm={confirm}
       onCancel={onClose}
     >
-      <p>{description}</p>
+      <div className="dialog-description">{description}</div>
+      {requestPending ? <p className="muted small">Updating preview…</p> : null}
       {loading ? <p className="muted small">Computing impact…</p> : null}
       {conflict ? (
         <p className="alert warn small">The store changed since the preview. The impact below was recomputed against the current store — review it and confirm again.</p>

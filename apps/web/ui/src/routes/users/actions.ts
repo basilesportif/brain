@@ -22,8 +22,8 @@ export interface PreviewResult {
 }
 
 export interface CapabilityActions {
-  previewGrant: (target: string, isGroup: boolean) => Promise<PreviewResult>;
-  commitGrant: (target: string, isGroup: boolean, expectedStoreHash: string) => Promise<void>;
+  previewGrant: (target: string, isGroup: boolean, selectors?: Record<string, string>) => Promise<PreviewResult>;
+  commitGrant: (target: string, isGroup: boolean, expectedStoreHash: string, selectors?: Record<string, string>) => Promise<void>;
   previewRevoke: (grantIds: string[]) => Promise<PreviewResult>;
   commitRevoke: (grantIds: string[], expectedStoreHash: string) => Promise<void>;
   previewUnlink: (identityId: string) => Promise<PreviewResult>;
@@ -36,15 +36,15 @@ export function useCapabilityActions(user: UserSummary): CapabilityActions {
   const unlink = useUnlink();
 
   const previewGrant = useCallback(
-    async (target: string, isGroup: boolean): Promise<PreviewResult> => {
-      const result = await grant.mutateAsync({ personId: user.id, target, isGroup, preview: true });
+    async (target: string, isGroup: boolean, selectors?: Record<string, string>): Promise<PreviewResult> => {
+      const result = await grant.mutateAsync({ personId: user.id, target, isGroup, selectors, preview: true });
       return { impact: result.impact, storeHash: result.storeHash };
     },
     [grant, user.id],
   );
   const commitGrant = useCallback(
-    async (target: string, isGroup: boolean, expectedStoreHash: string) => {
-      await grant.mutateAsync({ personId: user.id, target, isGroup, expectedStoreHash });
+    async (target: string, isGroup: boolean, expectedStoreHash: string, selectors?: Record<string, string>) => {
+      await grant.mutateAsync({ personId: user.id, target, isGroup, selectors, expectedStoreHash });
     },
     [grant, user.id],
   );

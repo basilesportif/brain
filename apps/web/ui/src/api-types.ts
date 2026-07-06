@@ -24,6 +24,13 @@ export interface StatusComponent {
   message: string;
   lastChecked: string;
   action?: StatusAction;
+  registry?: {
+    available: boolean;
+    registryVersion: number | null;
+    capabilityCount: number;
+    checkedAt: string;
+    error: { kind: string; code: string; message: string } | null;
+  };
 }
 
 export interface StatusResponse {
@@ -344,6 +351,9 @@ export interface SystemSubjectSummary {
 export interface UsersResponse {
   schemaVersion: 1;
   storeAvailable: boolean;
+  registryAvailable: boolean;
+  registryVersion: number | null;
+  registryCapabilityCount: number;
   people: UserSummary[];
   systemSubjects: SystemSubjectSummary[];
   counts: { people: number; systemSubjects: number };
@@ -353,6 +363,13 @@ export interface CatalogCapability {
   id: string;
   label: string;
   present: boolean;
+  description?: string;
+  selectorKeys: string[];
+  riskTier?: "low" | "medium" | "high";
+  deprecated?: boolean;
+  grantable: boolean;
+  registryKnown: boolean;
+  provenance: "registry" | "curated" | "store";
 }
 
 export interface CatalogGroup {
@@ -369,6 +386,9 @@ export interface CatalogGroup {
 export interface CapabilityCatalogResponse {
   schemaVersion: 1;
   storeAvailable: boolean;
+  registryAvailable: boolean;
+  registryVersion: number | null;
+  registryCapabilityCount: number;
   groups: CatalogGroup[];
   counts: {
     groups: number;
@@ -400,9 +420,8 @@ export interface SurfaceImpact {
 export interface ImpactPreview {
   surfaces: SurfaceImpact[];
   summary: { newlyAllowedCount: number; newlyDeniedCount: number };
-  // Fixed caveat: the diff is computed with an empty resource, so a capability
-  // shown newlyAllowed is only truly allowed when the request's concrete
-  // resource keys are covered by the grant's selectors. Always displayed.
+  // Fixed caveat: grant previews use the selector resource when available, and
+  // live requests must still supply concrete resource keys covered by selectors.
   previewCaveat: string;
 }
 

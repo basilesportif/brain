@@ -20,6 +20,8 @@ export interface FakeCodexChatIpcOptions {
   expectedToken?: string;
   persistEnvFile?: string;
   fieldErrors?: Record<string, string>;
+  capabilityRegistry?: Record<string, unknown>;
+  responseDelayMs?: number;
   response?: Record<string, unknown>;
   withholdResponse?: boolean;
   destroyAfterRead?: boolean;
@@ -74,6 +76,16 @@ async function handleFakeIpcLine(
   const message = JSON.parse(line) as Record<string, unknown>;
   const entries = isRecord(message.entries) ? stringEntries(message.entries) : {};
   requests.push({ type: message.type, keys: Object.keys(entries), brainSubjectIdPresent: Object.prototype.hasOwnProperty.call(message, "brainSubjectId") });
+  if (message.type === "get_capability_registry") {
+    if (options.destroyAfterRead) {
+      setTimeout(() => socket.destroy(), 5);
+      return;
+    }
+    if (options.withholdResponse) return;
+    if (options.responseDelayMs) await delay(options.responseDelayMs);
+    socket.write(`${JSON.stringify({ ok: true, result: options.capabilityRegistry ?? { registryVersion: 1, capabilities: [] } })}\n`);
+    return;
+  }
   if (message.token !== expectedToken) {
     socket.write(`${JSON.stringify({ ok: false, error: "unauthorized: valid IPC token required", code: "unauthorized" })}\n`);
     return;
@@ -89,6 +101,10 @@ async function handleFakeIpcLine(
   }
   if (options.persistEnvFile) await writeMergedEnvFile(options.persistEnvFile, entries, "fake codex-chat IPC test server");
   socket.write(`${JSON.stringify(options.response ?? { ok: true, result: { ok: true, restartRequired: true } })}\n`);
+}
+
+async function delay(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function stringEntries(entries: Record<string, unknown>): Record<string, string> {

@@ -72,12 +72,23 @@ export function Users() {
   if (catalog.isError) return <ErrorNotice error={catalog.error} onRetry={() => catalog.refetch()} />;
 
   const people = users.data!.people;
+  // Each endpoint derives from one registry snapshot, but two independent HTTP
+  // requests can straddle a TTL/recovery boundary. Surface that accepted race so
+  // the operator can refresh instead of silently mixing vocabularies.
+  const registryMismatch =
+    users.data!.registryAvailable !== catalog.data!.registryAvailable ||
+    users.data!.registryVersion !== catalog.data!.registryVersion ||
+    users.data!.registryCapabilityCount !== catalog.data!.registryCapabilityCount;
 
   return (
     <div className="route users">
       <div className="route-head">
         <h1>Users</h1>
         <p className="muted">People, identities, and live capability grants. Every change takes effect at codex-chat's next side-effect check.</p>
+        <p className="muted small registry-line">
+          Registry: {catalog.data!.registryAvailable ? `v${catalog.data!.registryVersion} · ${catalog.data!.registryCapabilityCount} capabilities · reachable` : "unreachable · showing store-derived fallback"}
+          {registryMismatch ? " · refresh recommended" : ""}
+        </p>
       </div>
 
       <AddUser />

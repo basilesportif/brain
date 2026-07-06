@@ -9,10 +9,10 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { authorizeBrainAdminRequest, isBrainAdminAuthConfigured, parseAdminAllowedEmails, type ClerkUserLookup, type VerifyClerkToken } from "./admin-auth.js";
 import { actorContextFromExternalId, evaluateAuthorization, parseCapabilityStore, type CapabilityStore } from "./capability-store.js";
-import { buildCapabilityCatalog } from "./capability-catalog.js";
+import { buildCapabilityCatalog, catalogDefinitionsForSource, type CapabilityCatalogRegistrySource } from "./capability-catalog.js";
 import { buildAuditFeed, buildUsersResponse, type AuditOutcome, type AuditType } from "./capability-admin-reads.js";
 import { commitMutation, createCapabilityStoreIfMissing, previewMutation, migrateCapabilityStore, CapabilityWriteError, type MigrationResult, type MutationResult, type MutationSpec } from "./capability-store-write.js";
-import { DEFAULT_CODEX_CHAT_IPC_TIMEOUT_MS, isCodexChatIpcError, sendSetConfig, type CodexChatIpcError, type CodexChatSetConfigResult } from "./codex-chat-ipc.js";
+import { DEFAULT_CODEX_CHAT_IPC_TIMEOUT_MS, getCapabilityRegistry, isCodexChatIpcError, sendSetConfig, type CodexChatIpcError, type CodexChatSetConfigResult } from "./codex-chat-ipc.js";
 import { atomicWriteFile, envFileMetadata, expandHomePath, parseEnvKeys, readEnvKeyPresence, resolveEnvFilePath, writeMergedEnvFile } from "./env-file.js";
 import { buildEnvSchema, SECRETISH_RE, validateEnvUpdates, type EnvFieldError } from "./env-schema.js";
 import { DEFAULT_ADMIN_ROUTE_PATH, ADMIN_V2_REDIRECT_ROUTE_PATH, isPathAtMount, normalizeAdminRoutePath, redirectPathFromAdminV2 } from "./admin-routes.js";
@@ -382,6 +382,7 @@ async function serviceSettings(config: BrainAdminServiceConfig) {
   const [
     env,
     capabilityStatus,
+    capabilityRegistry,
     repoRegistry,
     slack,
     mainLoopModel,
@@ -389,6 +390,7 @@ async function serviceSettings(config: BrainAdminServiceConfig) {
   ] = await Promise.all([
     codexChatEnvSummary(config),
     capabilityEnforcementStatus(config),
+    capabilityRegistrySnapshot(config),
     repoRegistrySummary(config.repoRegistryPath),
     slackSettingsSummary(config),
     mainLoopModelSummary(config),
@@ -431,6 +433,7 @@ async function serviceSettings(config: BrainAdminServiceConfig) {
       lastLoaded: capabilityStatus.lastLoaded ?? null,
       recentDenials: capabilityStatus.recentDenials,
       error: capabilityStatus.error ?? null,
+      registry: capabilityRegistrySummary(capabilityRegistry),
       role: "live enforced codex-chat capability store; admin writes persist through Brain's guarded write path",
     },
   };
@@ -458,6 +461,7 @@ interface StatusComponent {
   message: string;
   lastChecked: string;
   action?: { label: string; route: string };
+  registry?: ReturnType<typeof capabilityRegistrySummary>;
 }
 
 async function brainStatus(config: BrainAdminServiceConfig): Promise<{ components: StatusComponent[] }> {
@@ -579,7 +583,10 @@ async function serviceStatusComponent(config: BrainAdminServiceConfig, now: stri
 }
 
 async function capabilityEnforcementComponent(config: BrainAdminServiceConfig, now: string): Promise<StatusComponent> {
-  const status = await capabilityEnforcementStatus(config);
+  const [status, registry] = await Promise.all([capabilityEnforcementStatus(config), capabilityRegistrySnapshot(config)]);
+  const registryLine = registry.available
+    ? ` Registry v${registry.registryVersion} reachable (${registry.capabilities.length} capabilities).`
+    : ` Registry unavailable (${registry.error?.code ?? "unknown"}).`;
   if (status.enforcementEnabled && (!status.storePresent || !status.storeValid)) {
     const message = !status.storePresent
       ? "Capability store is missing while enforcement is on; the assistant is fail-closed (down)."
@@ -589,22 +596,24 @@ async function capabilityEnforcementComponent(config: BrainAdminServiceConfig, n
     return {
       id: "capability_enforcement",
       state: "error",
-      message,
+      message: `${message}${registryLine}`,
       lastChecked: now,
       action: { label: "Open operations", route: "/operations" },
+      registry: capabilityRegistrySummary(registry),
     };
   }
   if (!status.enforcementEnabled) {
-    return { id: "capability_enforcement", state: "warn", message: "Capability enforcement is disabled.", lastChecked: now };
+    return { id: "capability_enforcement", state: "warn", message: `Capability enforcement is disabled.${registryLine}`, lastChecked: now, registry: capabilityRegistrySummary(registry) };
   }
   const loaded = status.lastLoaded ? ` (loaded ${status.lastLoaded})` : "";
   const denials = status.recentDenials === 1 ? "1 denial" : `${status.recentDenials} denials`;
   return {
     id: "capability_enforcement",
     state: "ok",
-    message: `Enforcement on; store valid${loaded}; ${denials} in the last hour.`,
+    message: `Enforcement on; store valid${loaded}; ${denials} in the last hour.${registryLine}`,
     lastChecked: now,
     action: status.recentDenials > 0 ? { label: `Review ${denials}`, route: "/operations" } : undefined,
+    registry: capabilityRegistrySummary(registry),
   };
 }
 
@@ -649,6 +658,15 @@ interface CapabilityEnforcementStatus {
 
 const CAPABILITY_STATUS_CACHE_TTL_MS = 5_000;
 const capabilityStatusCache = new Map<string, { expiresAt: number; value?: CapabilityEnforcementStatus; promise?: Promise<CapabilityEnforcementStatus> }>();
+const CAPABILITY_REGISTRY_CACHE_TTL_MS = 60_000;
+
+interface CapabilityRegistrySnapshot extends CapabilityCatalogRegistrySource {
+  checkedAt: string;
+  error?: { kind: string; code: string; message: string };
+}
+
+const capabilityRegistryCache = new Map<string, { expiresAt: number; value: CapabilityRegistrySnapshot }>();
+const capabilityRegistryInflight = new Map<string, Promise<CapabilityRegistrySnapshot>>();
 
 function capabilityStatusCacheKey(config: BrainAdminServiceConfig): string {
   return JSON.stringify({
@@ -661,6 +679,74 @@ function capabilityStatusCacheKey(config: BrainAdminServiceConfig): string {
 
 function clearCapabilityStatusCache(): void {
   capabilityStatusCache.clear();
+}
+
+function capabilityRegistrySummary(snapshot: CapabilityRegistrySnapshot): {
+  available: boolean;
+  registryVersion: number | null;
+  capabilityCount: number;
+  checkedAt: string;
+  error: { kind: string; code: string; message: string } | null;
+} {
+  return {
+    available: snapshot.available,
+    registryVersion: snapshot.registryVersion,
+    capabilityCount: snapshot.capabilities.length,
+    checkedAt: snapshot.checkedAt,
+    error: snapshot.error ?? null,
+  };
+}
+
+async function capabilityRegistrySnapshot(config: BrainAdminServiceConfig): Promise<CapabilityRegistrySnapshot> {
+  const key = resolveEnvFilePath(config.codexChatIpcSocket);
+  const now = Date.now();
+  const cached = capabilityRegistryCache.get(key);
+  if (cached && cached.expiresAt > now) return cached.value;
+  const inflight = capabilityRegistryInflight.get(key);
+  if (inflight) return inflight;
+
+  // TTL-only cache: registryVersion-based invalidation is unnecessary for this
+  // small metadata payload. Only successful snapshots are cached; failures are
+  // returned but not cached so codex-chat recovery is visible on the next read.
+  const promise = readCapabilityRegistrySnapshot(config).finally(() => {
+    capabilityRegistryInflight.delete(key);
+  });
+  capabilityRegistryInflight.set(key, promise);
+  const value = await promise;
+  if (value.available) {
+    capabilityRegistryCache.set(key, { expiresAt: Date.now() + CAPABILITY_REGISTRY_CACHE_TTL_MS, value });
+  }
+  return value;
+}
+
+async function readCapabilityRegistrySnapshot(config: BrainAdminServiceConfig): Promise<CapabilityRegistrySnapshot> {
+  const checkedAt = new Date().toISOString();
+  try {
+    const registry = await getCapabilityRegistry(resolveEnvFilePath(config.codexChatIpcSocket), { timeoutMs: DEFAULT_CODEX_CHAT_IPC_TIMEOUT_MS });
+    return {
+      available: true,
+      registryVersion: registry.registryVersion,
+      capabilities: registry.capabilities,
+      checkedAt,
+    };
+  } catch (error) {
+    if (isCodexChatIpcError(error)) {
+      return {
+        available: false,
+        registryVersion: null,
+        capabilities: [],
+        checkedAt,
+        error: { kind: error.kind, code: error.code, message: error.message },
+      };
+    }
+    return {
+      available: false,
+      registryVersion: null,
+      capabilities: [],
+      checkedAt,
+      error: { kind: "FAILED", code: "UNKNOWN", message: error instanceof Error ? error.message : String(error) },
+    };
+  }
 }
 
 async function capabilityEnforcementStatus(config: BrainAdminServiceConfig): Promise<CapabilityEnforcementStatus> {
@@ -807,15 +893,15 @@ function httpStoreReason(reason: string): string {
 }
 
 async function handleCapabilityCatalog(response: ServerResponse, config: BrainAdminServiceConfig): Promise<void> {
-  const { store, error } = await loadCapabilityStore(config);
+  const [{ store, error }, registry] = await Promise.all([loadCapabilityStore(config), capabilityRegistrySnapshot(config)]);
   if (error) return sendJson(response, 503, { error: "capability_store_unavailable", reason: httpStoreReason(error) });
-  return sendJson(response, 200, buildCapabilityCatalog(store));
+  return sendJson(response, 200, buildCapabilityCatalog(store, registry));
 }
 
 async function handleCapabilityUsers(response: ServerResponse, config: BrainAdminServiceConfig): Promise<void> {
-  const { store, error } = await loadCapabilityStore(config);
+  const [{ store, error }, registry] = await Promise.all([loadCapabilityStore(config), capabilityRegistrySnapshot(config)]);
   if (error) return sendJson(response, 503, { error: "capability_store_unavailable", reason: httpStoreReason(error) });
-  return sendJson(response, 200, buildUsersResponse(store));
+  return sendJson(response, 200, buildUsersResponse(store, catalogDefinitionsForSource(store, registry), undefined, registry));
 }
 
 async function handleCapabilityCheck(response: ServerResponse, config: BrainAdminServiceConfig, payload: Record<string, unknown>): Promise<void> {
@@ -1032,7 +1118,8 @@ async function handleCapabilityUserMutation(
       const body = await readJsonBodyOptional(request);
       const target = optionalString(body.groupId) ?? optionalString(body.capabilityId) ?? optionalString(body.target) ?? "";
       const selectors = body.selectors && typeof body.selectors === "object" && !Array.isArray(body.selectors) ? (body.selectors as Record<string, unknown>) : undefined;
-      const spec: MutationSpec = { kind: "grant", personId, target, selectors, adminEmail };
+      const registry = await capabilityRegistrySnapshot(config);
+      const spec: MutationSpec = { kind: "grant", personId, target, selectors, registry, adminEmail };
       await runMutation(response, config, url, body, spec);
       return true;
     }

@@ -1736,35 +1736,150 @@ async function writeLiveStore(root: string): Promise<void> {
   await writeFile(path.join(root, "capabilities.json"), LIVE_CAPABILITY_STORE_JSON);
 }
 
-test("brain capability catalog endpoint serves groups as data from the store vocabulary", async () => {
+const SYNTHETIC_REGISTRY = {
+  registryVersion: 7,
+  capabilities: [
+    { id: "output.text.send", family: "output", description: "Send text output.", selectorKeys: ["surfaceKind", "channelId"], riskTier: "medium" },
+    { id: "runtime.admin", family: "runtime", description: "Administer runtime.", selectorKeys: ["surfaceKind"], riskTier: "high", deprecated: true },
+  ],
+};
+
+function registryCatalogStore(): unknown {
+  return {
+    schemaVersion: 2,
+    people: [],
+    externalIdentities: [],
+    subjects: [{ id: "person:test", kind: "person", status: "active" }],
+    grantBundles: [],
+    grants: [
+      { id: "g_output", subjectId: "person:test", capabilityId: "output.text.send", grantKind: "capability", resource: { selectors: { surfaceKind: "*" } }, actions: ["*"], status: "active", enforcement: "enforcing" },
+      { id: "g_drift", subjectId: "person:test", capabilityId: "madeup.capability", grantKind: "capability", resource: { selectors: {} }, actions: ["*"], status: "active", enforcement: "enforcing" },
+    ],
+  };
+}
+
+test("brain capability catalog endpoint serves vocabulary from the codex-chat registry", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-catalog-"));
+  let ipc: FakeCodexChatIpcServer | undefined;
   try {
-    await writeLiveStore(root);
+    await writeJson(path.join(root, "capabilities.json"), registryCatalogStore());
+    ipc = await startFakeCodexChatIpc(root, { capabilityRegistry: SYNTHETIC_REGISTRY });
     await withServer(config(root), authDeps(), async (baseUrl) => {
       const res = await fetch(`${baseUrl}/api/admin/brain/capabilities/catalog`, { headers: authHeaders() });
       assert.equal(res.status, 200);
       const payload = await res.json() as {
         storeAvailable: boolean;
-        groups: Array<{ id: string; status: string; childCount: number; presentChildCount: number; children: Array<{ id: string; present: boolean }> }>;
+        registryAvailable: boolean;
+        registryVersion: number | null;
+        registryCapabilityCount: number;
+        groups: Array<{ id: string; status: string; synthetic?: boolean; childCount: number; presentChildCount: number; children: Array<{ id: string; present: boolean; description?: string; selectorKeys: string[]; riskTier?: string; deprecated?: boolean; grantable: boolean; registryKnown: boolean; provenance: string }> }>;
         counts: { groups: number; uncategorized: number };
       };
       assert.equal(payload.storeAvailable, true);
+      assert.equal(payload.registryAvailable, true);
+      assert.equal(payload.registryVersion, 7);
+      assert.equal(payload.registryCapabilityCount, SYNTHETIC_REGISTRY.capabilities.length);
       const groupIds = payload.groups.map((group) => group.id);
-      // Plan §2.3 canonical group list renders first, in order, as data.
-      assert.deepEqual(groupIds.slice(0, 8), ["projects", "crm", "calendar", "slack", "todos", "finance", "health", "capability-admin"]);
+      assert.deepEqual(groupIds.slice(0, 2), ["output", "runtime"]);
+      assert.ok(groupIds.includes("crm"), "curated crm group present alongside registry groups");
+      assert.ok(groupIds.includes("projects"), "curated projects group present alongside registry groups");
+      assert.equal(groupIds.at(-1), "other");
       const byId = Object.fromEntries(payload.groups.map((group) => [group.id, group]));
-      // Finance/Health are ordinary not-yet-connected placeholder groups (empty).
-      assert.equal(byId.finance.status, "placeholder");
-      assert.equal(byId.finance.childCount, 0);
-      assert.equal(byId.health.status, "placeholder");
-      // Real grant vocabulary is marked present under human groups.
-      assert.equal(byId.projects.children.find((child) => child.id === "projects.read")?.present, true);
+      // Registry entries carry metadata from codex-chat.
       assert.equal(byId.output.children.find((child) => child.id === "output.text.send")?.present, true);
-      assert.equal(byId.events.children.find((child) => child.id === "telegram.event.receive")?.present, true);
-      // Every capability id the store references maps to a catalog group.
-      assert.equal(payload.counts.uncategorized, 0);
+      assert.equal(byId.output.children.find((child) => child.id === "output.text.send")?.description, "Send text output.");
+      assert.deepEqual(byId.output.children.find((child) => child.id === "output.text.send")?.selectorKeys, ["surfaceKind", "channelId"]);
+      assert.equal(byId.output.children.find((child) => child.id === "output.text.send")?.riskTier, "medium");
+      assert.equal(byId.output.children.find((child) => child.id === "output.text.send")?.provenance, "registry");
+      assert.equal(byId.crm.children.find((child) => child.id === "crm.contact.read")?.provenance, "curated");
+      assert.deepEqual(byId.crm.children.find((child) => child.id === "crm.contact.read")?.selectorKeys, ["scope", "contactId"]);
+      assert.equal(byId.runtime.children.find((child) => child.id === "runtime.admin")?.deprecated, true);
+      assert.equal(byId.runtime.children.find((child) => child.id === "runtime.admin")?.grantable, false);
+      // Store ids absent from the registry surface as synthetic drift, not hidden.
+      assert.equal(byId.other.synthetic, true);
+      const drift = byId.other.children.find((child) => child.id === "madeup.capability");
+      assert.equal(drift?.present, true);
+      assert.equal(drift?.registryKnown, false);
+      assert.equal(drift?.provenance, "store");
+      assert.equal(drift?.grantable, true);
+      assert.equal(payload.counts.uncategorized, 1);
     });
   } finally {
+    if (ipc) await ipc.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain capability catalog degrades to store ids when the registry socket is unavailable", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-catalog-degraded-"));
+  try {
+    await writeJson(path.join(root, "capabilities.json"), registryCatalogStore());
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/brain/capabilities/catalog`, { headers: authHeaders() });
+      assert.equal(res.status, 200);
+      const payload = await res.json() as {
+        registryAvailable: boolean;
+        registryVersion: number | null;
+        groups: Array<{ id: string; synthetic?: boolean; children: Array<{ id: string; riskTier?: string; description?: string; selectorKeys: string[] }> }>;
+        counts: { uncategorized: number };
+      };
+      assert.equal(payload.registryAvailable, false);
+      assert.equal(payload.registryVersion, null);
+      assert.equal(payload.counts.uncategorized, 1);
+      assert.ok(payload.groups.some((group) => group.id === "projects"), "curated vocabulary remains visible without registry");
+      assert.equal(payload.groups.at(-1)?.id, "other");
+      const output = payload.groups.find((group) => group.id === "output");
+      assert.deepEqual(output?.children.find((child) => child.id === "output.text.send")?.selectorKeys, ["scope"]);
+      assert.equal(output?.children.find((child) => child.id === "output.text.send")?.description, undefined);
+      assert.equal(output?.children.find((child) => child.id === "output.text.send")?.riskTier, undefined);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain capability registry failures are not cached across recovery", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-registry-recovery-"));
+  let ipc: FakeCodexChatIpcServer | undefined;
+  try {
+    await writeJson(path.join(root, "capabilities.json"), registryCatalogStore());
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const down = await fetch(`${baseUrl}/api/admin/brain/capabilities/catalog`, { headers: authHeaders() });
+      assert.equal(down.status, 200);
+      assert.equal(((await down.json()) as any).registryAvailable, false);
+
+      ipc = await startFakeCodexChatIpc(root, { capabilityRegistry: SYNTHETIC_REGISTRY });
+      const recovered = await fetch(`${baseUrl}/api/admin/brain/capabilities/catalog`, { headers: authHeaders() });
+      assert.equal(recovered.status, 200);
+      const payload = await recovered.json() as { registryAvailable: boolean; registryVersion: number | null };
+      assert.equal(payload.registryAvailable, true);
+      assert.equal(payload.registryVersion, SYNTHETIC_REGISTRY.registryVersion);
+    });
+  } finally {
+    if (ipc) await ipc.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain capability registry concurrent callers share one in-flight fetch", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-registry-singleflight-"));
+  let ipc: FakeCodexChatIpcServer | undefined;
+  try {
+    await writeJson(path.join(root, "capabilities.json"), registryCatalogStore());
+    ipc = await startFakeCodexChatIpc(root, { capabilityRegistry: SYNTHETIC_REGISTRY, responseDelayMs: 50 });
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const [catalog, users, status] = await Promise.all([
+        fetch(`${baseUrl}/api/admin/brain/capabilities/catalog`, { headers: authHeaders() }),
+        fetch(`${baseUrl}/api/admin/brain/users`, { headers: authHeaders() }),
+        fetch(`${baseUrl}/api/admin/brain/status`, { headers: authHeaders() }),
+      ]);
+      assert.equal(catalog.status, 200);
+      assert.equal(users.status, 200);
+      assert.equal(status.status, 200);
+      assert.equal(ipc?.requests.filter((request) => request.type === "get_capability_registry").length, 1);
+    });
+  } finally {
+    if (ipc) await ipc.close();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -1778,11 +1893,17 @@ test("brain users endpoint summarizes people, identities, grants, and system sub
       assert.equal(res.status, 200);
       const payload = await res.json() as {
         storeAvailable: boolean;
+        registryAvailable: boolean;
+        registryVersion: number | null;
+        registryCapabilityCount: number;
         people: Array<{ id: string; displayName: string; identities: Array<{ provider: string; externalId: string; linkedAt?: string }>; grants: { total: number; grantedGroupCount: number; totalGroupCount: number; byGroup: Array<{ id: string; granted: boolean }> } }>;
         systemSubjects: Array<{ id: string; grants: { total: number; capabilityIds: string[] } }>;
         counts: { people: number; systemSubjects: number };
       };
       assert.equal(payload.storeAvailable, true);
+      assert.equal(payload.registryAvailable, false);
+      assert.equal(payload.registryVersion, null);
+      assert.equal(payload.registryCapabilityCount, 0);
       assert.equal(payload.counts.people, 1);
       const tim = payload.people.find((person) => person.id === "person_alpha");
       assert.ok(tim, "person_alpha present");
@@ -1847,8 +1968,10 @@ function disabledSubjectStore(): unknown {
 
 test("brain users endpoint excludes disabled subjects and surfaces unmapped grants under 'other'", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-users-disabled-"));
+  let ipc: FakeCodexChatIpcServer | undefined;
   try {
     await writeJson(path.join(root, "capabilities.json"), disabledSubjectStore());
+    ipc = await startFakeCodexChatIpc(root, { capabilityRegistry: { registryVersion: 1, capabilities: SYNTHETIC_REGISTRY.capabilities.slice(0, 1) } });
     await withServer(config(root), authDeps(), async (baseUrl) => {
       const catalogRes = await fetch(`${baseUrl}/api/admin/brain/capabilities/catalog`, { headers: authHeaders() });
       assert.equal(catalogRes.status, 200);
@@ -1885,6 +2008,7 @@ test("brain users endpoint excludes disabled subjects and surfaces unmapped gran
       assert.equal(person.grants.inForce, 1);
     });
   } finally {
+    if (ipc) await ipc.close();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -2405,8 +2529,10 @@ test("brain batch revoke is atomic with one combined impact preview and partial-
 
 test("brain batch revoke pins the preview store hash and 409s a stale commit (A3)", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-batch-hash-"));
+  let ipc: FakeCodexChatIpcServer | undefined;
   try {
     await writeFile(path.join(root, "capabilities.json"), overlappingGrantsStore());
+    ipc = await startFakeCodexChatIpc(root, { capabilityRegistry: SYNTHETIC_REGISTRY });
     await withServer(config(root), authDeps(), async (baseUrl) => {
       // Preview against the current store; capture the hash it was computed against.
       const preview = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/person_ov/grants/revoke-batch?preview=true", { grantIds: ["g_ov_a", "g_ov_b"] });
@@ -2435,6 +2561,7 @@ test("brain batch revoke pins the preview store hash and 409s a stale commit (A3
       assert.equal(ok.payload.changed, true);
     });
   } finally {
+    if (ipc) await ipc.close();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -2636,23 +2763,28 @@ test("brain migration refuses to strip the last capability-admin (lockout rail)"
 // authorized; an explicit selectors object is preserved verbatim.
 test("brain grant defaults broad selectors that cover concrete resource keys; explicit selectors preserved", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-selectors-"));
+  let ipc: FakeCodexChatIpcServer | undefined;
   try {
     await writeLiveStore(root);
+    ipc = await startFakeCodexChatIpc(root, { capabilityRegistry: SYNTHETIC_REGISTRY });
     await withServer(config(root), authDeps(), async (baseUrl) => {
       const created = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users", { displayName: "Selector Person" });
       const personId = created.payload.detail.personId as string;
       const subjectId = created.payload.detail.subjectId as string;
       await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/identities`, { provider: "telegram", externalId: "900000400" });
-      await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/grants`, { groupId: "crm" });
+      const grantCrm = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/grants`, { groupId: "crm" });
+      assert.equal(grantCrm.status, 200);
+      assert.equal(grantCrm.payload.detail.expandedFromGroup, true);
+      assert.deepEqual([...grantCrm.payload.detail.grantedCapabilityIds].sort(), ["crm.contact.read", "crm.contact.write", "crm.note.write"]);
 
-      // A live-shaped request carrying concrete resource keys is authorized by
-      // the default template ({ scope: "*", contactId: "*" } covers both keys).
+      // A live-shaped request carrying curated selector keys is authorized by
+      // the default template ({ scope: "*", contactId: "*" }).
       const check = await jsonRequest(baseUrl, "POST", "/api/admin/brain/capabilities/check", { actorId: "telegram:user:900000400", operation: "crm.contact.read", resource: { scope: "workspace", contactId: "c_123" } });
       assert.equal(check.payload.allowed, true);
 
-      // The impact preview carries the fixed empty-resource caveat.
+      // The impact preview carries the fixed selector/live-resource caveat.
       const preview = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/grants?preview=true`, { capabilityId: "todos.item.read" });
-      assert.match(preview.payload.impact.previewCaveat as string, /empty resource/);
+      assert.match(preview.payload.impact.previewCaveat as string, /selector/);
 
       // Explicit narrower selectors are stored verbatim.
       const grantNarrow = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/grants`, { capabilityId: "calendar.event.read", selectors: { calendarId: "cal_1" } });
@@ -2660,11 +2792,76 @@ test("brain grant defaults broad selectors that cover concrete resource keys; ex
       const stored = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8"));
       const narrow = stored.grants.find((g: any) => g.id === narrowId);
       assert.deepEqual(narrow.resource.selectors, { calendarId: "cal_1" });
-      // The default crm grant on this new subject stores the broad template.
+      assert.ok(grantNarrow.payload.impact.summary.newlyAllowedCount > 0);
+      // The default crm grant on this new subject stores the curated broad template.
       const crmGrant = stored.grants.find((g: any) => g.subjectId === subjectId && g.capabilityId === "crm.contact.read");
       assert.deepEqual(crmGrant.resource.selectors, { scope: "*", contactId: "*" });
     });
   } finally {
+    if (ipc) await ipc.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain grant validates registry capability ids and selector keys server-side", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-registry-grant-"));
+  let ipc: FakeCodexChatIpcServer | undefined;
+  try {
+    await writeLiveStore(root);
+    ipc = await startFakeCodexChatIpc(root, { capabilityRegistry: SYNTHETIC_REGISTRY });
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const created = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users", { displayName: "Scoped Grant Person" });
+      const personId = created.payload.detail.personId as string;
+      await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/identities`, { provider: "telegram", externalId: "900000401" });
+
+      const unknown = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/grants`, { capabilityId: "not.in.registry" });
+      assert.equal(unknown.status, 400);
+      assert.equal(unknown.payload.error, "unknown_capability");
+
+      const badSelector = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/grants`, { capabilityId: "todos.item.read", selectors: { channelId: "C123" } });
+      assert.equal(badSelector.status, 400);
+      assert.equal(badSelector.payload.error, "invalid_selector");
+      assert.equal(badSelector.payload.selectorKey, "channelId");
+      assert.deepEqual(badSelector.payload.allowedSelectorKeys, ["scope", "listId"]);
+
+      const emptySelectors = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/grants`, { capabilityId: "todos.item.read", selectors: {} });
+      assert.equal(emptySelectors.status, 400);
+      assert.equal(emptySelectors.payload.error, "invalid_selector");
+
+      const beforeForbidden = await readFile(path.join(root, "capabilities.json"));
+      for (const key of ["__proto__", "constructor", "prototype"]) {
+        const selectors = Object.create(null) as Record<string, string>;
+        selectors[key] = "blocked";
+        const bad = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/grants`, { capabilityId: "todos.item.read", selectors });
+        assert.equal(bad.status, 400, `${key} selector rejected`);
+        assert.equal(bad.payload.error, "invalid_selector");
+        assert.equal(bad.payload.selectorKey, key);
+      }
+      assert.ok(beforeForbidden.equals(await readFile(path.join(root, "capabilities.json"))), "forbidden selector keys wrote nothing");
+
+      const preview = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/grants?preview=true`, { capabilityId: "todos.item.read", selectors: { scope: "personal", listId: "list_1" } });
+      assert.equal(preview.status, 200);
+      assert.ok(preview.payload.impact.surfaces.some((surface: any) => surface.newlyAllowed.includes("todos.item.read")));
+
+      const grant = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/grants`, { capabilityId: "todos.item.read", selectors: { scope: "personal", listId: "list_1" } });
+      assert.equal(grant.status, 200);
+      assert.equal(grant.payload.detail.selectors.scope, "personal");
+      assert.equal(grant.payload.detail.selectors.listId, "list_1");
+      const stored = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8"));
+      const written = stored.grants.find((row: any) => row.id === grant.payload.detail.grantIds[0]);
+      assert.deepEqual(written.resource.selectors, { scope: "personal", listId: "list_1" });
+
+      const createdDefault = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users", { displayName: "Default Selector Person" });
+      const defaultPersonId = createdDefault.payload.detail.personId as string;
+      await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${defaultPersonId}/identities`, { provider: "telegram", externalId: "900000402" });
+      const omitted = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${defaultPersonId}/grants`, { capabilityId: "todos.item.read" });
+      assert.equal(omitted.status, 200);
+      const storedAfterOmitted = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8"));
+      const omittedGrant = storedAfterOmitted.grants.find((row: any) => row.id === omitted.payload.detail.grantIds[0]);
+      assert.deepEqual(omittedGrant.resource.selectors, { scope: "*", listId: "*" });
+    });
+  } finally {
+    if (ipc) await ipc.close();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -2768,8 +2965,10 @@ function badPrimarySubjectStore(subjects: readonly unknown[]): unknown {
 
 test("brain grant materializes a missing primary subject before writing", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-missing-primary-"));
+  let ipc: FakeCodexChatIpcServer | undefined;
   try {
     await writeJson(path.join(root, "capabilities.json"), badPrimarySubjectStore([]));
+    ipc = await startFakeCodexChatIpc(root, { capabilityRegistry: SYNTHETIC_REGISTRY });
     await withServer(config(root), authDeps(), async (baseUrl) => {
       const grant = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/person_bad_primary/grants", { capabilityId: "todos.item.read" });
       assert.equal(grant.status, 200);
@@ -2785,14 +2984,17 @@ test("brain grant materializes a missing primary subject before writing", async 
       assert.match(audit, /materializedPrimarySubject/);
     });
   } finally {
+    if (ipc) await ipc.close();
     await rm(root, { recursive: true, force: true });
   }
 });
 
 test("brain grant refuses a suspended primary subject instead of reactivating it", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-suspended-primary-"));
+  let ipc: FakeCodexChatIpcServer | undefined;
   try {
     await writeJson(path.join(root, "capabilities.json"), badPrimarySubjectStore([{ id: "person:bad_primary", personId: "person_bad_primary", kind: "person", status: "suspended" }]));
+    ipc = await startFakeCodexChatIpc(root, { capabilityRegistry: SYNTHETIC_REGISTRY });
     await withServer(config(root), authDeps(), async (baseUrl) => {
       const grant = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/person_bad_primary/grants", { capabilityId: "todos.item.read" });
       assert.equal(grant.status, 400);
@@ -2802,6 +3004,7 @@ test("brain grant refuses a suspended primary subject instead of reactivating it
       assert.equal(stored.subjects.find((subject: any) => subject.id === "person:bad_primary").status, "suspended");
     });
   } finally {
+    if (ipc) await ipc.close();
     await rm(root, { recursive: true, force: true });
   }
 });
