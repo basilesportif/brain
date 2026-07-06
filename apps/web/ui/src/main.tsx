@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { App } from "./App";
 import { SignInScreen } from "./components/Auth";
 import { DebugProvider } from "./lib/debug";
-import { ROUTER_BASENAME, readUiConfig } from "./config";
+import { readUiConfig } from "./config";
 import "./styles.css";
 
 const config = readUiConfig();
@@ -50,7 +50,7 @@ function Root() {
             <SignInScreen />
           </SignedOut>
           <SignedIn>
-            <BrowserRouter basename={ROUTER_BASENAME}>
+            <BrowserRouter basename={config.routePath}>
               <App />
             </BrowserRouter>
           </SignedIn>

@@ -24,6 +24,7 @@ pnpm run build
 BRAIN_ADMIN_ENABLED=true \
 BRAIN_ADMIN_HOST=127.0.0.1 \
 BRAIN_ADMIN_PORT=49347 \
+BRAIN_ADMIN_ROUTE_PATH=/admin \
 BRAIN_ADMIN_PUBLIC_BASE_URL=https://brain.decisive-outcomes.com \
 CLERK_PUBLISHABLE_KEY=pk_... \
 CLERK_SECRET_KEY=sk_... \
@@ -49,8 +50,11 @@ pnpm run brain-admin
 Routes:
 
 - `GET /healthz` — process liveness, no secrets.
-- `GET /admin` — server-authenticated Clerk admin page.
-- `GET /admin/auth/sign-in` — app-hosted Clerk sign-in.
+- `GET /admin` and `/admin/*` — unauthenticated React SPA shell by default.
+  Override with `BRAIN_ADMIN_ROUTE_PATH`; Clerk signs in client-side and all
+  admin data remains server-gated under `/api/admin/brain/*`.
+- `GET /admin-v2` and `/admin-v2/*` — permanent redirects to the matching
+  configured admin route path for old bookmarks.
 - `GET /api/admin/brain/me` — current allowlisted admin.
 - `GET /api/admin/brain/health` — Brain instance and codex-chat health/settings metadata.
 - `GET /api/admin/brain/settings` — Brain instance paths, local codex-chat host/IP/path/service, repo-registry read-only context, and operation settings.
@@ -64,10 +68,14 @@ Routes:
 - `GET /api/admin/brain/slack/telemetry` — read-only Slack runtime telemetry summary from codex-chat state; redacted metadata only.
 - `GET /api/admin/brain/slack/manifest` — render the codex-chat-owned Slack manifest contract with Brain's public Events URL.
 - `GET /api/admin/brain/slack/manifest/download` — download the rendered manifest JSON.
-- `GET /api/admin/brain/capabilities` — enforcing Phase 5 v2 capability
-  foundation: people/users, Telegram/Slack identities, proofs, channels,
-  private local subject/bundle/grant store metadata, group/bundle effective
-  view, and audit event schema. No grant/link writes are exposed by this route; runtime enforcement reads this store.
+- `GET /api/admin/brain/capabilities/catalog` — enforcing Phase 5 v2 capability catalog.
+- `GET /api/admin/brain/users` — people/users, external identities, proofs,
+  channels, grants, and effective capability views.
+- `POST /api/admin/brain/users...` — guarded identity/link/grant mutations
+  through Brain's canonical validated, backed-up write path.
+- `POST /api/admin/brain/capabilities/check` — observe an authorization
+  decision against the live capability store.
+- `GET /api/admin/brain/audit` — recent capability mutation/audit events.
 
 The service fails closed when Clerk keys or `CLERK_ALLOWED_EMAILS` are missing.
 Env values are write-only in API responses and audit records; responses expose
@@ -76,15 +84,39 @@ only key names and presence. Update the writable key allowlist with
 
 Auth UX rules:
 
-- Every admin auth state must show the current Clerk account email when the
-  server or Clerk.js can identify it.
-- Every admin auth page or state must offer a sign-out/switch-account action,
-  including sign-in, loading, access-denied, and allowed-admin states.
-- A signed-in Clerk user who is not allowlisted must see a fail-closed access
-  denied page that names the current account and offers a switch-account path,
-  never an ambiguous generic sign-in screen.
+- The React SPA owns sign-in, loading, and denied states through Clerk.
+- Server-rendered admin sign-in and denied pages have been removed with the
+  legacy console; `/admin/auth/sign-in` is just a client-side SPA route.
+- A signed-in Clerk user who is not allowlisted must see a fail-closed denied
+  state that names the current account and offers a switch-account path.
 - API auth failures may include the verified Clerk email for UX context, but
   must not expose Clerk secrets or env values.
+
+## Capability store startup
+
+Brain admin initializes the configured `BRAIN_CAPABILITY_STORE_PATH` before it
+starts listening, but initialization failure never crash-loops the admin service.
+The console remains available as the repair surface; capability data endpoints
+fail closed with `503 capability_store_unavailable` until the store is fixed.
+
+Startup behavior:
+
+- If the store is missing, Brain creates a schema-v2 store through the canonical
+  validated, atomic, backed-up writer.
+- If `CLERK_ALLOWED_EMAILS` / `BRAIN_CLERK_ALLOWED_EMAILS` contains at least
+  one email, the first normalized email is seeded as an active person with a
+  linked Clerk-email identity, a materialized primary subject, and enforcing
+  capability-admin child grants.
+- If the allowlist is empty, Brain creates a valid empty store with no admins
+  and logs a warning. Configure the allowlist and restart to bootstrap the first
+  admin.
+- If the store exists, Brain runs the canonical placeholder cleanup and
+  non-enforcing-to-enforcing normalization. It writes only when the migration
+  plan has real changes, and appends a secret-free capability audit event for
+  startup normalization changes.
+- If the existing store is invalid or unreadable, Brain logs a structured error
+  without store contents and leaves the store and last-known-good backup
+  untouched.
 
 ## Operation approvals
 
@@ -144,8 +176,9 @@ Brain owns the user-facing Slack setup/install checklist. The canonical runbook
 is `docs/slack-setup-runbook.md`; it covers Slack UI install steps, OAuth
 scopes/events, where to find the signing secret and bot token, install-to-
 workspace flow, Brain Events URL, manifest render/copy/download, write-only env
-updates, restart semantics, and live canaries. codex-chat owns only the runtime
-adapter and no-secret manifest contract/scripts that Brain renders for users.
+updates, restart semantics, and manual live canaries. codex-chat owns the
+runtime adapter, runtime event telemetry, and no-secret manifest
+contract/scripts that Brain renders for users.
 
 Do not infer those values from remote repo-registry deployment records when the
 Brain admin service is already running. Update the Brain admin env/settings for
@@ -161,10 +194,10 @@ rejected/outbound attempt/success/failure metadata plus a health summary.
 
 This is observational only. Brain does not send Slack requests, verify Slack
 signatures, parse Slack business payloads for runtime behavior, enqueue work,
-retry outbound sends, or change message routing. `codex-chat` remains the Slack
-runtime engine and signature verifier. Dedicated active canary/test-event
-telemetry is still future work in `plans/brain-control-plane.md`; until then
-canary status is reported as `not_observable`.
+retry outbound sends, change message routing, or persist operator canary notes.
+`codex-chat` remains the Slack runtime engine, signature verifier, and source
+of runtime event telemetry. Dedicated active canary/test-event telemetry is
+runtime-owned future work in `plans/brain-control-plane.md`.
 
 Telemetry responses must not include Slack tokens, signing secrets, signatures,
 headers, request bodies, challenge values, message text, channel names, or user
@@ -207,15 +240,14 @@ Implemented in this slice:
   generate per-project capability IDs.
 - Enforcing owner/all bundle grant for Tim. The effective view expands the
   bundle into ordinary group/child capabilities; it is not a runtime bypass.
-- Enforcing seed grants only. The UI is read-only; there is no POST grant or
-  identity-link route exposed here; runtime Telegram/Slack authorization reads
-  this store.
+- Enforcing seed grants plus guarded admin grant/identity mutations exposed
+  through `/api/admin/brain/users...`; runtime Telegram/Slack authorization
+  reads the same store.
 - Audit event schema persisted in the private store, including
   `identity.link.seeded`, `identity.proof.observed`,
   `capability.bundle.granted`, `capability.catalog.viewed`,
   `capability.grant.proposed`, and `capability.check.observed`. Append-only
-  link/grant mutation audit records should be written to
-  `BRAIN_CAPABILITY_AUDIT_LOG` only after explicit writes are implemented.
+  link/grant mutation audit records are written to `BRAIN_CAPABILITY_AUDIT_LOG`.
 
 Capability responses must not include secrets, Slack message bodies, raw health
 or finance data, tokens, cookies, or credential values.

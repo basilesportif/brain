@@ -2,14 +2,14 @@
   "name": "@brain/web-ui",
   "version": "0.0.0",
   "private": true,
-  "description": "Brain admin operator console (React + Vite), served under /admin-v2.",
+  "description": "Brain admin operator console (React + Vite), served under /admin.",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test:e2e": "node e2e/admin-v2-smoke.mjs"
+    "test:e2e": "node e2e/admin-smoke.mjs"
   },
   "dependencies": {
     "@clerk/clerk-react": "5.61.8",

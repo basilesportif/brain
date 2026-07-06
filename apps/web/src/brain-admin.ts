@@ -5,5 +5,5 @@ const config = loadBrainAdminServiceConfig();
 await initializeBrainAdminCapabilityStore(config);
 const server = createBrainAdminServer(config);
 server.listen(config.port, config.host, () => {
-  console.log(JSON.stringify({ ok: true, service: "brain-admin", host: config.host, port: config.port, routePath: config.routePath, authFailClosed: true }));
+  console.log(JSON.stringify({ ok: true, service: "brain-admin", host: config.host, port: config.port, adminPath: config.routePath, authFailClosed: true }));
 });

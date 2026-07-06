@@ -155,6 +155,111 @@ export async function atomicWriteStore(storePath: string, store: CapabilityStore
   return text;
 }
 
+export interface CapabilityStoreSeedResult {
+  created: boolean;
+  storePath: string;
+  adminEmail?: string;
+  storeHash?: string;
+  backup?: BackupPaths;
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
+}
+
+function seedSuffix(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex").slice(0, 12);
+}
+
+function capabilityAdminSeedCapabilityIds(): string[] {
+  const group = CAPABILITY_GROUP_DEFINITIONS.find((definition) => definition.id === "capability-admin");
+  return group?.capabilities.map((capability) => capability.id) ?? ["capability.catalog.read"];
+}
+
+function buildSeedStore(adminEmail: string | undefined, now: Date = new Date()): CapabilityStore {
+  const at = now.toISOString();
+  const store: CapabilityStore = {
+    schemaVersion: 2,
+    storeId: `brain_capability_store_${seedSuffix(at)}`,
+    mode: "enforcing",
+    createdAt: at,
+    updatedAt: at,
+    writesEnabled: true,
+    enforcementEnabled: true,
+    people: [],
+    externalIdentities: [],
+    subjects: [],
+    grantBundles: [],
+    grants: [],
+  };
+  if (!adminEmail) return store;
+
+  const suffix = seedSuffix(adminEmail);
+  const personId = `person_admin_${suffix}`;
+  const subjectId = `person:${personId}`;
+  const identityId = `identity_clerk_${suffix}`;
+  store.people = [{
+    id: personId,
+    displayName: adminEmail,
+    status: "active",
+    personType: "human",
+    primarySubjectId: subjectId,
+    identityIds: [identityId],
+    subjectIds: [subjectId],
+  }];
+  store.externalIdentities = [{
+    id: identityId,
+    provider: "clerk",
+    providerUserId: adminEmail,
+    personId,
+    status: "linked",
+    label: "Clerk admin email",
+    createdAt: at,
+    updatedAt: at,
+  }];
+  store.subjects = [{ id: subjectId, personId, status: "active", kind: "person", source: "startup_seed" }];
+  store.grants = capabilityAdminSeedCapabilityIds().map((capabilityId) => ({
+    id: `grant_startup_${capabilityId.replaceAll(".", "_")}_${suffix}`,
+    subjectId,
+    capabilityId,
+    grantKind: "capability",
+    resource: { selectors: defaultSelectorsForCapability(capabilityId) },
+    actions: ["*"],
+    status: "active",
+    enforcement: "enforcing",
+    grantedBy: "brain-admin-startup",
+    grantedAt: at,
+    source: { kind: "startup_seed", id: "brain-admin" },
+    reason: "Seeded from first Clerk allowlisted admin email",
+  }));
+  return store;
+}
+
+export async function createCapabilityStoreIfMissing(options: { storePath: string; adminEmail?: string }): Promise<CapabilityStoreSeedResult> {
+  return enqueueMutation(async () => {
+    try {
+      await readFile(options.storePath, "utf8");
+      return { created: false, storePath: options.storePath };
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "ENOENT") {
+        throw new CapabilityWriteError("capability_store_unavailable", 503, "Capability store is unreachable");
+      }
+    }
+
+    const store = buildSeedStore(options.adminEmail);
+    assertValidStore(store);
+    const writtenText = await atomicWriteStore(options.storePath, store);
+    const backup = await backupStore(options.storePath, writtenText);
+    return {
+      created: true,
+      storePath: options.storePath,
+      adminEmail: options.adminEmail,
+      storeHash: hashStoreText(writtenText),
+      backup,
+    };
+  });
+}
+
 // Guard against a rare copyFile-based rollback needing the raw file; exported so
 // callers can restore the last-known-good copy (plan's revert contract).
 export async function restoreLastKnownGood(storePath: string): Promise<void> {
@@ -779,6 +884,7 @@ export interface MigrationChange {
   removedGrantIds: string[];
   removedIdentityIds: string[];
   convertedGrantIds: string[];
+  enforcementTransitions: Array<{ grantId: string; from: string | null; to: "enforcing" }>;
 }
 
 export interface MigrationResult {
@@ -818,7 +924,7 @@ function isPlaceholderIdentity(identity: StoreExternalIdentity): boolean {
 // dry-run and the write share it.
 export function planMigration(store: CapabilityStore): { store: CapabilityStore; changes: MigrationChange } {
   const migrated = structuredClone(store);
-  const changes: MigrationChange = { removedSubjectIds: [], removedGrantIds: [], removedIdentityIds: [], convertedGrantIds: [] };
+  const changes: MigrationChange = { removedSubjectIds: [], removedGrantIds: [], removedIdentityIds: [], convertedGrantIds: [], enforcementTransitions: [] };
 
   // Subjects that hold at least one ACTIVE grant must never be removed: an
   // active grant is a live authorization something depends on (e.g.
@@ -869,8 +975,10 @@ export function planMigration(store: CapabilityStore): { store: CapabilityStore;
   // Convert retained non-enforcing grants to enforcing form.
   for (const grant of migrated.grants ?? []) {
     if (grant.enforcement !== "enforcing") {
+      const from = typeof grant.enforcement === "string" ? grant.enforcement : null;
       grant.enforcement = "enforcing";
       changes.convertedGrantIds.push(grant.id);
+      changes.enforcementTransitions.push({ grantId: grant.id, from, to: "enforcing" });
     }
   }
 
@@ -891,7 +999,7 @@ function migrationChanged(changes: MigrationChange): boolean {
 // enforcing, re-validate, and write atomically via the same safe write path.
 // Running it on an already-migrated store is a no-op. `dryRun` reports without
 // writing.
-export async function migrateCapabilityStore(options: { storePath: string; dryRun?: boolean }): Promise<MigrationResult> {
+export async function migrateCapabilityStore(options: { storePath: string; dryRun?: boolean; allowZeroAdminsBefore?: boolean }): Promise<MigrationResult> {
   const dryRun = Boolean(options.dryRun);
   const loaded = await loadStoreForWrite(options.storePath);
   const { store: migrated, changes } = planMigration(loaded.store);
@@ -908,7 +1016,9 @@ export async function migrateCapabilityStore(options: { storePath: string; dryRu
   // the suspended-subject rule): a migration must never leave the store with no
   // capability-admin who can still reach the admin surface — that would brick the
   // console. Refuse (and let the CLI exit non-zero); the dry-run reports it too.
-  if (effectiveCapabilityAdmins(migrated).size === 0) {
+  const adminsBefore = effectiveCapabilityAdmins(loaded.store);
+  const allowAlreadyZeroAdmins = Boolean(options.allowZeroAdminsBefore && adminsBefore.size === 0);
+  if (effectiveCapabilityAdmins(migrated).size === 0 && !allowAlreadyZeroAdmins) {
     throw new CapabilityWriteError(
       "migration_would_lock_out_admins",
       422,
