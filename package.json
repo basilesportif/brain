@@ -10,7 +10,7 @@
     "brainctl": "dist/brainctl.js"
   },
   "scripts": {
-    "build": "tsc -b tsconfig.build.json",
+    "build": "tsc -b tsconfig.build.json && pnpm --filter @brain/web-ui build",
     "check": "node scripts/check-skeleton.mjs && pnpm run build && node --test \"dist/**/*.test.js\" \"packages/*/dist/**/*.test.js\" \"packages/config/*/dist/**/*.test.js\" \"packages/providers/*/dist/**/*.test.js\" \"entrypoints/*/dist/**/*.test.js\" \"apps/*/dist/**/*.test.js\" && node dist/brainctl.js doctor --config examples/config/runtime.yaml --pack assistant-packs/core",
     "test": "pnpm run check",
     "brainctl": "node dist/brainctl.js",

@@ -37,33 +37,51 @@ export function mergeEnvFileText(sourceText: string, updates: Record<string, str
   const lines = sourceText.replace(/\r\n/g, "\n").split("\n");
   if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
 
-  const out = lines.map((line) => {
+  const out: string[] = [];
+  for (const line of lines) {
     const match = ENV_LINE_RE.exec(line);
     const key = match?.[2];
-    if (!key || !updateKeys.has(key)) return line;
+    if (!key || !updateKeys.has(key)) {
+      out.push(line);
+      continue;
+    }
     seen.add(key);
-    return formatEnvLine(key, updates[key] ?? "");
-  });
+    const value = updates[key] ?? "";
+    if (value !== "") out.push(formatEnvLine(key, value));
+  }
 
-  const missing = Object.keys(updates).filter((key) => !seen.has(key));
+  const missing = Object.keys(updates).filter((key) => !seen.has(key) && (updates[key] ?? "") !== "");
   if (missing.length > 0) {
     if (out.length > 0 && out[out.length - 1]?.trim() !== "") out.push("");
     out.push(`# Managed by ${managedBy}. Values are write-only in the admin UI.`);
     for (const key of missing) out.push(formatEnvLine(key, updates[key] ?? ""));
   }
 
-  return `${out.join("\n")}\n`;
+  return out.length > 0 ? `${out.join("\n")}\n` : "";
 }
 
+export async function atomicWriteFile(filePath: string, content: string, options: { mode?: number; dirMode?: number } = {}): Promise<void> {
+  const mode = options.mode ?? 0o600;
+  const resolved = resolveEnvFilePath(filePath);
+  await mkdir(dirname(resolved), { recursive: true, mode: options.dirMode ?? 0o700 });
+  const tmp = `${resolved}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmp, content, { mode });
+  await rename(tmp, resolved);
+  // writeFile({ mode }) controls newly-created temp files; after rename, chmod
+  // once to correct a pre-existing target whose mode was broader.
+  await chmod(resolved, mode).catch(() => undefined);
+}
+
+/**
+ * Fallback-only writer per admin UI redesign plan §6.7. The normal codex-chat
+ * config path is IPC `set_config`; this direct env-file merge is retained for
+ * bootstrap when codex-chat is not running or has not created its IPC token.
+ */
 export async function writeMergedEnvFile(filePath: string, updates: Record<string, string>, managedBy?: string): Promise<void> {
   const resolved = resolveEnvFilePath(filePath);
-  await mkdir(dirname(resolved), { recursive: true, mode: 0o700 });
   const current = await readTextIfPresent(resolved);
   const merged = mergeEnvFileText(current, updates, managedBy);
-  const tmp = `${resolved}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tmp, merged, { mode: 0o600 });
-  await rename(tmp, resolved);
-  await chmod(resolved, 0o600);
+  await atomicWriteFile(resolved, merged);
 }
 
 export async function readEnvKeyPresence(filePath: string, keys: readonly string[]): Promise<Record<string, boolean>> {

@@ -1,13 +1,23 @@
 import { spawn } from "node:child_process";
-import { appendFile, chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { appendFile, mkdir, open, readdir, readFile, realpath, stat } from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 import { authorizeBrainAdminRequest, isBrainAdminAuthConfigured, parseAdminAllowedEmails, type ClerkUserLookup, type VerifyClerkToken } from "./admin-auth.js";
 import { capabilityAdminSummary } from "./capabilities.js";
-import { envFileMetadata, readEnvKeyPresence, resolveEnvFilePath, writeMergedEnvFile } from "./env-file.js";
+import { actorContextFromExternalId, evaluateAuthorization, parseCapabilityStore, type CapabilityStore } from "./capability-store.js";
+import { buildCapabilityCatalog } from "./capability-catalog.js";
+import { buildAuditFeed, buildUsersResponse, type AuditOutcome, type AuditType } from "./capability-admin-reads.js";
+import { commitMutation, previewMutation, CapabilityWriteError, type MutationResult, type MutationSpec } from "./capability-store-write.js";
+import { DEFAULT_CODEX_CHAT_IPC_TIMEOUT_MS, isCodexChatIpcError, sendSetConfig, type CodexChatIpcError, type CodexChatSetConfigResult } from "./codex-chat-ipc.js";
+import { atomicWriteFile, envFileMetadata, expandHomePath, parseEnvKeys, readEnvKeyPresence, resolveEnvFilePath, writeMergedEnvFile } from "./env-file.js";
+import { buildEnvSchema, SECRETISH_RE, validateEnvUpdates, type EnvFieldError } from "./env-schema.js";
 import { renderBrainAdminDeniedPage, renderBrainAdminPage, renderBrainAdminSignInPage } from "./admin-page.js";
+import { redactSecretText } from "./redaction.js";
 
 const SLACK_EVENTS_BASE_URL = "https://brain.decisive-outcomes.com";
 const SLACK_EVENTS_PATH = "/api/slack/events";
@@ -38,6 +48,21 @@ const OPENROUTER_ENV_KEYS = [
   "CODEX_CHAT_SUBAGENTS_ALLOWED_CODEX_PROFILES",
   "CODEX_CHAT_SUBAGENTS_ALLOWED_MODEL_PROVIDERS",
 ] as const;
+// The exact key set the OpenRouter settings write governs (the confirmation
+// token pins this). Served verbatim to the client as `confirmationKeys` so the
+// client never recomputes the list; the actual written keys are a subset that
+// depends on whether an API key / backend is supplied (computed server-side).
+const OPENROUTER_SETTINGS_CONFIRMATION_KEYS = [
+  "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL",
+  "CODEX_CHAT_SUBAGENTS_DEFAULT_CODEX_PROFILE",
+  "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL_PROVIDER",
+  "CODEX_CHAT_SUBAGENTS_SERVICE_TIER_MODE",
+  "CODEX_CHAT_SUBAGENTS_ALLOW_PROVIDER_OVERRIDE",
+  "CODEX_CHAT_SUBAGENTS_ALLOWED_CODEX_PROFILES",
+  "CODEX_CHAT_SUBAGENTS_ALLOWED_MODEL_PROVIDERS",
+  "OPENROUTER_API_KEY",
+  "CODEX_CHAT_SUBAGENTS_BACKEND",
+] as const;
 const DEFAULT_ENV_KEYS = [
   "CODEX_CHAT_API_ENABLED",
   ...SLACK_ENV_KEYS,
@@ -47,8 +72,8 @@ const DEFAULT_ENV_KEYS = [
   "OPENAI_API_KEY",
 ] as const;
 
-const SECRETISH_RE = /(SECRET|TOKEN|KEY|PASSWORD|COOKIE|SESSION|CREDENTIAL)/i;
 const MAX_BODY_BYTES = 128 * 1024;
+const CODEX_CHAT_ENV_CONFIRMATION_TOKEN = "brain-admin-codex-chat-env-confirmed-v1";
 const LIVE_OPERATION_CONFIRMATION_TOKEN = "brain-admin-live-operation-confirmed-v1";
 const SLACK_SETTINGS_CONFIRMATION_TOKEN = "brain-admin-slack-settings-confirmed-v1";
 const OPENROUTER_SETTINGS_CONFIRMATION_TOKEN = "brain-admin-openrouter-settings-confirmed-v1";
@@ -72,7 +97,12 @@ export interface BrainAdminServiceConfig {
   codexChatHost: string;
   codexChatIp: string;
   codexChatPath: string;
+  // Bootstrap/fallback env-file pointer. In normal operation Brain writes via
+  // codexChatIpcSocket; both paths must target the same codex-chat deployment.
   codexChatEnvFile: string;
+  // Local codex-chat IPC socket for config writes. Keep this aligned with
+  // codexChatEnvFile so fallback/bootstrap reads observe the same deployment.
+  codexChatIpcSocket: string;
   codexChatConfigFile?: string;
   codexHomePath: string;
   codexChatServiceName: string;
@@ -86,8 +116,13 @@ export interface BrainAdminServiceConfig {
   slackEventsPath: string;
   slackAppId?: string;
   slackCanaryPath: string;
+  slackSetupStatePath: string;
   capabilityStorePath: string;
   capabilityAuditLogPath: string;
+  capabilityDecisionsDir: string;
+  // Built React/Vite SPA assets served under `/admin-v2` (plan §6.6, §8 step 4).
+  // Defaults to the sibling `ui/dist` produced by `pnpm --filter @brain/web-ui build`.
+  adminV2Dir: string;
 }
 
 export interface BrainAdminServiceDeps {
@@ -132,6 +167,7 @@ export function loadBrainAdminServiceConfig(env: NodeJS.ProcessEnv = process.env
     codexChatIp: env.BRAIN_CODEX_CHAT_IP || env.BRAIN_INSTANCE_IP || localIp,
     codexChatPath,
     codexChatEnvFile: env.BRAIN_CODEX_CHAT_ENV_FILE || "/home/tim/.config/codex-chat/env",
+    codexChatIpcSocket: env.BRAIN_CODEX_CHAT_IPC_SOCKET || path.join(codexChatPath, "data/run/codex-chat.sock"),
     codexChatConfigFile: env.BRAIN_CODEX_CHAT_CONFIG_FILE || path.join(codexChatPath, "config/codex-chat.toml"),
     codexHomePath: env.BRAIN_CODEX_HOME || env.CODEX_HOME || path.join(os.homedir(), ".codex"),
     codexChatServiceName: env.BRAIN_CODEX_CHAT_SERVICE_NAME || "codex-chat.service",
@@ -145,9 +181,18 @@ export function loadBrainAdminServiceConfig(env: NodeJS.ProcessEnv = process.env
     slackEventsPath: normalizeRoutePath(env.BRAIN_SLACK_EVENTS_PATH || SLACK_EVENTS_PATH),
     slackAppId: normalizeSlackAppId(env.BRAIN_SLACK_APP_ID || env.SLACK_APP_ID || env.CODEX_CHAT_SLACK_APP_ID || ""),
     slackCanaryPath: env.BRAIN_SLACK_CANARY_PATH || path.join(path.dirname(auditLogPath), "slack-canary.json"),
+    slackSetupStatePath: env.BRAIN_SLACK_SETUP_STATE_PATH || path.join(path.dirname(auditLogPath), "slack-setup.json"),
     capabilityStorePath,
     capabilityAuditLogPath,
+    capabilityDecisionsDir: env.BRAIN_CAPABILITY_DECISIONS_DIR || "capability_decisions",
+    adminV2Dir: env.BRAIN_ADMIN_V2_DIR || defaultAdminV2Dir(),
   };
+}
+
+// The built SPA lives next to the compiled service: this module compiles to
+// `apps/web/dist/admin-service.js`, so the UI build output is `../ui/dist`.
+function defaultAdminV2Dir(): string {
+  return path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "ui", "dist");
 }
 
 export function createBrainAdminServer(config: BrainAdminServiceConfig = loadBrainAdminServiceConfig(), deps: BrainAdminServiceDeps = {}): http.Server {
@@ -155,6 +200,9 @@ export function createBrainAdminServer(config: BrainAdminServiceConfig = loadBra
     try {
       await handleRequest(request, response, config, deps);
     } catch (error) {
+      if (error instanceof CapabilityWriteError) {
+        return sendJson(response, error.status, { error: error.code, message: error.message, ...(error.details ?? {}) });
+      }
       sendJson(response, 500, { error: "internal_error", message: error instanceof Error ? error.message : String(error) });
     }
   });
@@ -190,6 +238,14 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     return sendHtml(response, 200, renderBrainAdminSignInPage(config, redirectUrl));
   }
 
+  // New React/Vite console (plan §8 step 4). The SPA shell is served
+  // unauthenticated so Clerk can boot in the browser; every data API under
+  // `/api/admin/brain/*` stays fail-closed behind the server allowlist, so
+  // nothing is granted client-side. The legacy `/admin` console is untouched.
+  if (request.method === "GET" && (url.pathname === "/admin-v2" || url.pathname.startsWith("/admin-v2/"))) {
+    return serveAdminV2(response, url, config);
+  }
+
   if (url.pathname.startsWith("/api/admin/brain/")) {
     const auth = await authorizeBrainAdminRequest(request, config, deps);
     if (!auth.ok) return sendJson(response, auth.statusCode, { error: auth.error, email: auth.admin?.email });
@@ -209,6 +265,19 @@ async function handleAdminApi(request: IncomingMessage, response: ServerResponse
   }
   if (request.method === "GET" && url.pathname === "/api/admin/brain/health") {
     return sendJson(response, 200, await serviceHealth(config));
+  }
+  if (request.method === "GET" && url.pathname === "/api/admin/brain/status") {
+    return sendJson(response, 200, await brainStatus(config));
+  }
+  if (request.method === "GET" && url.pathname === "/api/admin/brain/env/schema") {
+    return sendJson(response, 200, await envSchemaResponse(config));
+  }
+  if (request.method === "GET" && url.pathname === "/api/admin/brain/slack/setup") {
+    return sendJson(response, 200, await slackSetupSummary(config));
+  }
+  if (request.method === "POST" && url.pathname === "/api/admin/brain/slack/setup") {
+    const payload = await readJsonBody(request);
+    return handleSlackSetupWrite(response, config, adminEmail, payload);
   }
   if (request.method === "GET" && url.pathname === "/api/admin/brain/settings") {
     return sendJson(response, 200, await serviceSettings(config));
@@ -261,6 +330,31 @@ async function handleAdminApi(request: IncomingMessage, response: ServerResponse
   if (request.method === "GET" && url.pathname === "/api/admin/brain/capabilities") {
     return sendJson(response, 200, await capabilityAdminSummary({ storePath: config.capabilityStorePath, auditLogPath: config.capabilityAuditLogPath, adminEmail, codexChatPath: config.codexChatPath, workspacePath: config.workspacePath }));
   }
+  if (request.method === "GET" && url.pathname === "/api/admin/brain/capabilities/catalog") {
+    return handleCapabilityCatalog(response, config);
+  }
+  if (request.method === "GET" && url.pathname === "/api/admin/brain/users") {
+    return handleCapabilityUsers(response, config);
+  }
+  if (url.pathname === "/api/admin/brain/users" || url.pathname.startsWith("/api/admin/brain/users/")) {
+    try {
+      if (await handleCapabilityUserMutation(request, response, url, config, adminEmail)) return;
+    } catch (error) {
+      // A body-parse failure (invalid JSON / non-object / oversized) surfaces as
+      // a typed 400 rather than the generic 500 the top-level catch would send.
+      if (error instanceof CapabilityWriteError) {
+        return sendJson(response, error.status, { error: error.code, message: error.message, ...(error.details ?? {}) });
+      }
+      throw error;
+    }
+  }
+  if (request.method === "POST" && url.pathname === "/api/admin/brain/capabilities/check") {
+    const payload = await readJsonBody(request);
+    return handleCapabilityCheck(response, config, payload);
+  }
+  if (request.method === "GET" && url.pathname === "/api/admin/brain/audit") {
+    return handleCapabilityAudit(response, config, url);
+  }
   if (request.method === "POST" && url.pathname === "/api/admin/brain/codex-chat/operation") {
     const payload = await readJsonBody(request);
     return handleOperation(response, config, deps, adminEmail, payload);
@@ -284,6 +378,7 @@ async function serviceHealth(config: BrainAdminServiceConfig) {
       path: config.codexChatPath,
       serviceName: config.codexChatServiceName,
       envFile,
+      ipcSocket: { path: config.codexChatIpcSocket },
       configFile: config.codexChatConfigFile ? { path: config.codexChatConfigFile, configured: true } : { configured: false },
       codexHome: { path: config.codexHomePath },
     },
@@ -291,13 +386,29 @@ async function serviceHealth(config: BrainAdminServiceConfig) {
 }
 
 async function serviceSettings(config: BrainAdminServiceConfig) {
-  const env = await codexChatEnvSummary(config);
+  const [
+    env,
+    capabilityStatus,
+    repoRegistry,
+    slack,
+    slackCanary,
+    mainLoopModel,
+    openRouter,
+  ] = await Promise.all([
+    codexChatEnvSummary(config),
+    capabilityEnforcementStatus(config),
+    repoRegistrySummary(config.repoRegistryPath),
+    slackSettingsSummary(config),
+    slackCanarySummary(config),
+    mainLoopModelSummary(config),
+    openRouterSettingsSummary(config),
+  ]);
   return {
     routePath: config.routePath,
     publicBaseUrl: config.publicBaseUrl || null,
     instance: instanceSummary(config),
     repoRegistry: {
-      ...(await repoRegistrySummary(config.repoRegistryPath)),
+      ...repoRegistry,
       sourceOfTruth: false,
       role: "read-only context only; this running Brain instance is configured by its own env/settings",
     },
@@ -308,29 +419,842 @@ async function serviceSettings(config: BrainAdminServiceConfig) {
       path: config.codexChatPath,
       serviceName: config.codexChatServiceName,
       env,
+      ipcSocket: { path: config.codexChatIpcSocket },
       configFile: config.codexChatConfigFile ? { path: config.codexChatConfigFile, configured: true } : { configured: false },
       codexHome: { path: config.codexHomePath },
       deployCommandConfigured: Boolean(config.codexChatDeployCommand),
       operationCommands: operationCommandSummary(config),
       restartCommand: operationCommand(config, "restart") ? redactedCommand(operationCommand(config, "restart") ?? "") : null,
     },
-    slack: await slackSettingsSummary(config),
-    slackCanary: await slackCanarySummary(config),
-    mainLoopModel: await mainLoopModelSummary(config),
-    openRouter: await openRouterSettingsSummary(config),
+    slack,
+    slackCanary,
+    mainLoopModel,
+    openRouter,
     capabilities: {
       schemaVersion: 2,
       storePath: resolveEnvFilePath(config.capabilityStorePath),
       auditLogPath: resolveEnvFilePath(config.capabilityAuditLogPath),
-      writesEnabled: false,
-      enforcementEnabled: false,
-      role: "read-only Phase 5 catalog/store/admin surface; codex-chat runtime enforcement is not connected",
+      writesEnabled: capabilityStatus.storePresent && capabilityStatus.storeValid,
+      enforcementEnabled: capabilityStatus.enforcementEnabled,
+      storePresent: capabilityStatus.storePresent,
+      storeValid: capabilityStatus.storeValid,
+      lastLoaded: capabilityStatus.lastLoaded ?? null,
+      recentDenials: capabilityStatus.recentDenials,
+      error: capabilityStatus.error ?? null,
+      role: "live enforced codex-chat capability store; admin writes persist through Brain's guarded write path",
     },
   };
 }
 
 async function codexChatEnvSummary(config: BrainAdminServiceConfig) {
-  return envPresenceSummary(config, config.allowedEnvKeys);
+  const env = await envPresenceSummary(config, config.allowedEnvKeys);
+  return {
+    ...env,
+    confirmation: {
+      token: CODEX_CHAT_ENV_CONFIRMATION_TOKEN,
+      action: "codex-chat.env.write",
+      envFile: env.envFile,
+    },
+  };
+}
+
+// --- §6.1 structured status endpoint -----------------------------------------
+
+type StatusComponentState = "ok" | "warn" | "error";
+
+interface StatusComponent {
+  id: "brain" | "slack" | "model" | "service" | "capability_enforcement";
+  state: StatusComponentState;
+  message: string;
+  lastChecked: string;
+  action?: { label: string; route: string };
+}
+
+async function brainStatus(config: BrainAdminServiceConfig): Promise<{ components: StatusComponent[] }> {
+  const now = new Date().toISOString();
+  // Each component builder is wrapped so an unexpected failure in one degrades
+  // only that component (state "error") instead of rejecting the whole endpoint.
+  const [brain, slack, model, service, enforcement] = await Promise.all([
+    safeStatusComponent("brain", now, () => brainStatusComponent(config, now)),
+    safeStatusComponent("slack", now, () => slackStatusComponent(config, now)),
+    safeStatusComponent("model", now, () => modelStatusComponent(config, now)),
+    safeStatusComponent("service", now, () => serviceStatusComponent(config, now)),
+    safeStatusComponent("capability_enforcement", now, () => capabilityEnforcementComponent(config, now)),
+  ]);
+  return { components: [brain, slack, model, service, enforcement] };
+}
+
+async function safeStatusComponent(id: StatusComponent["id"], now: string, build: () => StatusComponent | Promise<StatusComponent>): Promise<StatusComponent> {
+  try {
+    return await build();
+  } catch (error) {
+    return { id, state: "error", message: `Status check failed: ${briefStatusError(error)}`, lastChecked: now };
+  }
+}
+
+// Brief, single-line failure reason for a status component: no stack, no secrets.
+function briefStatusError(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException)?.code;
+  if (typeof code === "string" && code) return code;
+  const message = error instanceof Error ? error.message : String(error);
+  return (message.split("\n")[0] ?? "").slice(0, 120) || "unknown error";
+}
+
+function brainStatusComponent(config: BrainAdminServiceConfig, now: string): StatusComponent {
+  const configured = isBrainAdminAuthConfigured(config);
+  return {
+    id: "brain",
+    state: configured ? "ok" : "error",
+    message: configured
+      ? `Brain admin service is up (${config.instanceName}).`
+      : "Brain admin auth is not fully configured; the console is fail-closed.",
+    lastChecked: now,
+  };
+}
+
+async function slackStatusComponent(config: BrainAdminServiceConfig, now: string): Promise<StatusComponent> {
+  const action = { label: "Fix Slack setup", route: "/setup" };
+  const present = await readEnvKeyPresence(config.codexChatEnvFile, ["SLACK_SIGNING_SECRET", "SLACK_BOT_TOKEN"]);
+  const missing = ["SLACK_SIGNING_SECRET", "SLACK_BOT_TOKEN"].filter((key) => !present[key]);
+  if (missing.length > 0) {
+    return { id: "slack", state: "error", message: `Slack setup incomplete: missing ${missing.join(", ")}.`, lastChecked: now, action };
+  }
+  const setup = await readSlackSetupStore(config.slackSetupStatePath);
+  if (!setup.setupComplete) {
+    return { id: "slack", state: "warn", message: "Slack secrets are present but setup has not been marked complete.", lastChecked: now, action };
+  }
+  const telemetry = await slackTelemetrySummary(config);
+  const health = telemetry.health.state;
+  if (health === "degraded") {
+    return { id: "slack", state: "error", message: telemetry.health.summary, lastChecked: now, action };
+  }
+  if (health === "attention" || health === "stale" || health === "unknown") {
+    return { id: "slack", state: "warn", message: telemetry.health.summary, lastChecked: now, action };
+  }
+  return { id: "slack", state: "ok", message: "Slack is connected and recent telemetry looks healthy.", lastChecked: now };
+}
+
+async function modelStatusComponent(config: BrainAdminServiceConfig, now: string): Promise<StatusComponent> {
+  const summary = await mainLoopModelSummary(config);
+  const preset = summary.activePreset;
+  // Derive OpenRouter dependence the same way the summary classifies presets:
+  // either the active preset requires OpenRouter, or the effective main-loop
+  // provider is openrouter (covers a "custom" config that still runs OpenRouter).
+  const activePresetMeta = summary.presets.find((entry) => entry.id === preset);
+  const effectiveProvider = String(summary.effective.modelProvider ?? "").toLowerCase();
+  const needsOpenRouter = Boolean(activePresetMeta?.requiresOpenRouter) || effectiveProvider === "openrouter";
+  if (needsOpenRouter && summary.openRouter.readiness !== "ready") {
+    return {
+      id: "model",
+      state: "error",
+      message: `Main-loop preset ${preset} needs OpenRouter, but ${summary.openRouter.readiness}.`,
+      lastChecked: now,
+      action: { label: "Fix model settings", route: "/settings" },
+    };
+  }
+  if (preset === "custom") {
+    return { id: "model", state: "warn", message: "Main-loop model is a custom configuration (not a known preset).", lastChecked: now, action: { label: "Review model settings", route: "/settings" } };
+  }
+  return { id: "model", state: "ok", message: `Main-loop model preset: ${preset}.`, lastChecked: now };
+}
+
+async function serviceStatusComponent(config: BrainAdminServiceConfig, now: string): Promise<StatusComponent> {
+  const state = await readLastOperationState(config);
+  if (state.lastOperation && state.lastOperation.status !== 0) {
+    return {
+      id: "service",
+      state: "error",
+      message: `Last ${state.lastOperation.operation} of ${config.codexChatServiceName} failed (exit ${state.lastOperation.status ?? "unknown"}).`,
+      lastChecked: now,
+      action: { label: "Open operations", route: "/operations" },
+    };
+  }
+  if (state.restartPending) {
+    return {
+      id: "service",
+      state: "warn",
+      message: "Config changed since the last restart; restart codex-chat to apply.",
+      lastChecked: now,
+      action: { label: "Restart codex-chat", route: "/operations" },
+    };
+  }
+  return {
+    id: "service",
+    state: "ok",
+    message: state.lastOperation
+      ? `Last ${state.lastOperation.operation} of ${config.codexChatServiceName} succeeded.`
+      : "No recent service operations recorded.",
+    lastChecked: now,
+  };
+}
+
+async function capabilityEnforcementComponent(config: BrainAdminServiceConfig, now: string): Promise<StatusComponent> {
+  const status = await capabilityEnforcementStatus(config);
+  if (status.enforcementEnabled && (!status.storePresent || !status.storeValid)) {
+    const message = !status.storePresent
+      ? "Capability store is missing while enforcement is on; the assistant is fail-closed (down)."
+      : status.error
+        ? `Capability store is unreadable while enforcement is on (${status.error}); the assistant is fail-closed (down).`
+        : "Capability store is invalid while enforcement is on; the assistant is fail-closed (down).";
+    return {
+      id: "capability_enforcement",
+      state: "error",
+      message,
+      lastChecked: now,
+      action: { label: "Open operations", route: "/operations" },
+    };
+  }
+  if (!status.enforcementEnabled) {
+    return { id: "capability_enforcement", state: "warn", message: "Capability enforcement is disabled.", lastChecked: now };
+  }
+  const loaded = status.lastLoaded ? ` (loaded ${status.lastLoaded})` : "";
+  const denials = status.recentDenials === 1 ? "1 denial" : `${status.recentDenials} denials`;
+  return {
+    id: "capability_enforcement",
+    state: "ok",
+    message: `Enforcement on; store valid${loaded}; ${denials} in the last hour.`,
+    lastChecked: now,
+    action: status.recentDenials > 0 ? { label: `Review ${denials}`, route: "/operations" } : undefined,
+  };
+}
+
+async function readLastOperationState(config: BrainAdminServiceConfig): Promise<{ lastOperation?: { operation: string; status: number | null }; restartPending: boolean }> {
+  // The audit log is an append-only JSONL file; the last operation, last restart,
+  // and last config write we need all live at the tail. Read only the final
+  // window instead of the whole file so a long-lived log doesn't grow /status
+  // poll cost unbounded.
+  const raw = await readFileTail(resolveEnvFilePath(config.auditLogPath), AUDIT_TAIL_BYTES);
+  if (!raw) return { restartPending: false };
+  let lastOperation: { operation: string; status: number | null } | undefined;
+  let lastRestartAtMs = Number.NEGATIVE_INFINITY;
+  let lastConfigWriteAtMs = Number.NEGATIVE_INFINITY;
+  const writeActions = new Set(["codex-chat.env.write", "slack.settings.write", "openrouter.settings.write", "codex-chat.main_loop_model.write"]);
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let record: Record<string, unknown>;
+    try { record = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
+    const action = typeof record.action === "string" ? record.action : "";
+    const atMs = typeof record.at === "string" ? Date.parse(record.at) : NaN;
+    if (action === "codex-chat.operation.execute") {
+      const status = typeof record.status === "number" ? record.status : null;
+      lastOperation = { operation: typeof record.operation === "string" ? record.operation : "operation", status };
+      // A successful deploy restarts the service, so it clears restartPending
+      // just like a successful restart.
+      if ((record.operation === "restart" || record.operation === "deploy") && status === 0 && Number.isFinite(atMs)) lastRestartAtMs = atMs;
+    } else if (writeActions.has(action) && Number.isFinite(atMs)) {
+      lastConfigWriteAtMs = atMs;
+    }
+  }
+  return { lastOperation, restartPending: lastConfigWriteAtMs > lastRestartAtMs };
+}
+
+interface CapabilityEnforcementStatus {
+  enforcementEnabled: boolean;
+  storePresent: boolean;
+  storeValid: boolean;
+  lastLoaded?: string;
+  recentDenials: number;
+  error?: string;
+}
+
+const CAPABILITY_STATUS_CACHE_TTL_MS = 5_000;
+const capabilityStatusCache = new Map<string, { expiresAt: number; value?: CapabilityEnforcementStatus; promise?: Promise<CapabilityEnforcementStatus> }>();
+
+function capabilityStatusCacheKey(config: BrainAdminServiceConfig): string {
+  return JSON.stringify({
+    storePath: resolveEnvFilePath(config.capabilityStorePath),
+    configFile: config.codexChatConfigFile ? resolveEnvFilePath(config.codexChatConfigFile) : "",
+    decisionsDir: config.capabilityDecisionsDir,
+    codexChatPath: resolveEnvFilePath(config.codexChatPath),
+  });
+}
+
+function clearCapabilityStatusCache(): void {
+  capabilityStatusCache.clear();
+}
+
+async function capabilityEnforcementStatus(config: BrainAdminServiceConfig): Promise<CapabilityEnforcementStatus> {
+  const key = capabilityStatusCacheKey(config);
+  const now = Date.now();
+  const cached = capabilityStatusCache.get(key);
+  if (cached && cached.expiresAt > now) {
+    if (cached.value) return cached.value;
+    if (cached.promise) return cached.promise;
+  }
+  const promise = readCapabilityEnforcementStatus(config);
+  capabilityStatusCache.set(key, { expiresAt: now + CAPABILITY_STATUS_CACHE_TTL_MS, promise });
+  try {
+    const value = await promise;
+    capabilityStatusCache.set(key, { expiresAt: Date.now() + CAPABILITY_STATUS_CACHE_TTL_MS, value });
+    return value;
+  } catch (error) {
+    capabilityStatusCache.delete(key);
+    throw error;
+  }
+}
+
+async function readCapabilityEnforcementStatus(config: BrainAdminServiceConfig): Promise<CapabilityEnforcementStatus> {
+  const enforcementEnabled = await readEnforcementEnabled(config);
+  const storePath = resolveEnvFilePath(config.capabilityStorePath);
+  let storePresent = false;
+  let storeValid = false;
+  let lastLoaded: string | undefined;
+  try {
+    const info = await stat(storePath);
+    storePresent = true;
+    lastLoaded = info.mtime.toISOString();
+    const raw = await readFile(storePath, "utf8");
+    storeValid = isValidCapabilityStoreShape(raw);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      return { enforcementEnabled, storePresent, storeValid, lastLoaded, recentDenials: 0, error: (error as Error).message };
+    }
+  }
+  const recentDenials = await recentCapabilityDenialCount(config);
+  return { enforcementEnabled, storePresent, storeValid, lastLoaded, recentDenials };
+}
+
+async function readEnforcementEnabled(config: BrainAdminServiceConfig): Promise<boolean> {
+  // codex-chat owns this setting; it defaults to true (enforcement is live).
+  // Read an explicit override from codex-chat's config TOML when present.
+  const configFile = config.codexChatConfigFile ?? "";
+  if (!configFile) return true;
+  const text = await readTextIfPresent(resolveEnvFilePath(configFile));
+  // Accept both the [brain] section form and the top-level dotted form
+  // `brain.enforcementEnabled = false` (both are valid to codex-chat's TOML parser).
+  const raw = readTomlValue(text, "brain", "enforcementEnabled") ?? readTopLevelDottedTomlValue(text, "brain.enforcementEnabled");
+  if (raw === null) return true;
+  return !/^(false|0|no|off)$/i.test(raw.trim());
+}
+
+// Mirror codex-chat's `loadBrainCapabilityStore` schema check so Brain's "store
+// valid" verdict matches what the enforcer would accept.
+function isValidCapabilityStoreShape(raw: string): boolean {
+  try {
+    parseCapabilityStore(raw);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function capabilityDecisionsDirPath(config: BrainAdminServiceConfig): Promise<string> {
+  // Mirror codexChatStateDir: a relative decisions dir (the codex-chat default
+  // "capability_decisions") is resolved under codex-chat's state dir; a "~"-home
+  // or absolute override is used as-is (with home expanded).
+  const configured = config.capabilityDecisionsDir;
+  if (configured.startsWith("~") || path.isAbsolute(expandHomePath(configured))) return resolveEnvFilePath(configured);
+  const stateDir = await codexChatStateDir(config);
+  return path.join(stateDir, configured);
+}
+
+async function recentCapabilityDenialCount(config: BrainAdminServiceConfig): Promise<number> {
+  const dir = await capabilityDecisionsDirPath(config);
+  const cutoffMs = Date.now() - 60 * 60_000;
+  // Decision records are written to per-day JSONL files (YYYY-MM-DD.jsonl); only
+  // today and yesterday can hold a decision from the last hour.
+  const now = new Date();
+  const days = [now, new Date(now.getTime() - 24 * 60 * 60_000)].map((date) => date.toISOString().slice(0, 10));
+  const counts = await Promise.all(days.map((day) => countCapabilityDenialsInFile(path.join(dir, `${day}.jsonl`), cutoffMs)));
+  return counts.reduce((sum, value) => sum + value, 0);
+}
+
+async function countCapabilityDenialsInFile(filePath: string, cutoffMs: number): Promise<number> {
+  try {
+    const info = await stat(filePath);
+    if (!info.isFile()) return 0;
+    let count = 0;
+    const input = createReadStream(filePath, { encoding: "utf8" });
+    const lines = createInterface({ input, crlfDelay: Infinity });
+    for await (const line of lines) {
+      if (!line.trim()) continue;
+      let record: Record<string, unknown>;
+      try { record = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
+      if (record.allowed !== false) continue;
+      const checkedAtMs = typeof record.checkedAt === "string" ? Date.parse(record.checkedAt) : NaN;
+      if (Number.isFinite(checkedAtMs) && checkedAtMs >= cutoffMs) count += 1;
+    }
+    return count;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw error;
+  }
+}
+
+// --- §6.5 capability READ endpoints (catalog, users, dry-run, audit) ---------
+
+// Load the live enforced capability store. Returns the parsed store, or an error
+// reason when the store is missing/unreadable/invalid (fail-closed: a store
+// problem is surfaced, never treated as an empty allow-list). Every read failure
+// (ENOENT, EACCES, EISDIR, corrupt JSON) maps to a fail-closed reason rather than
+// throwing. The internal reason follows codex-chat's vocabulary
+// (`brain_store_unavailable:<path>`, `brain_store_invalid`,
+// `brain_store_invalid_schema`); `httpStoreReason` strips the path before it is
+// surfaced over HTTP.
+async function loadCapabilityStore(config: BrainAdminServiceConfig): Promise<{ store?: CapabilityStore; error?: string }> {
+  const storePath = resolveEnvFilePath(config.capabilityStorePath);
+  let text: string;
+  try {
+    text = await readFile(storePath, "utf8");
+  } catch {
+    // Any read failure fails closed. The raw error (which can include the path,
+    // errno details, etc.) is never surfaced.
+    return { error: `brain_store_unavailable:${storePath}` };
+  }
+  try {
+    return { store: parseCapabilityStore(text) };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    // Anchor the unavailable reason to the store path exactly as codex-chat does.
+    return { error: reason === "brain_store_unavailable" ? `brain_store_unavailable:${storePath}` : reason };
+  }
+}
+
+// Reason to surface over HTTP: strip codex-chat's `:<path>` suffix from the
+// unavailable reason so responses never echo the store path.
+function httpStoreReason(reason: string): string {
+  return reason.startsWith("brain_store_unavailable:") ? "brain_store_unavailable" : reason;
+}
+
+async function handleCapabilityCatalog(response: ServerResponse, config: BrainAdminServiceConfig): Promise<void> {
+  const { store, error } = await loadCapabilityStore(config);
+  if (error) return sendJson(response, 503, { error: "capability_store_unavailable", reason: httpStoreReason(error) });
+  return sendJson(response, 200, buildCapabilityCatalog(store));
+}
+
+async function handleCapabilityUsers(response: ServerResponse, config: BrainAdminServiceConfig): Promise<void> {
+  const { store, error } = await loadCapabilityStore(config);
+  if (error) return sendJson(response, 503, { error: "capability_store_unavailable", reason: httpStoreReason(error) });
+  return sendJson(response, 200, buildUsersResponse(store));
+}
+
+async function handleCapabilityCheck(response: ServerResponse, config: BrainAdminServiceConfig, payload: Record<string, unknown>): Promise<void> {
+  const subjectId = typeof payload.subjectId === "string" && payload.subjectId.trim() ? payload.subjectId.trim() : undefined;
+  const actorId = typeof payload.actorId === "string" && payload.actorId.trim() ? payload.actorId.trim() : undefined;
+  const operation = typeof payload.operation === "string" ? payload.operation.trim() : "";
+  const action = typeof payload.action === "string" && payload.action.trim() ? payload.action.trim() : undefined;
+  if (!operation) return sendJson(response, 400, { error: "operation_required" });
+  if (!subjectId && !actorId) return sendJson(response, 400, { error: "subject_or_actor_required" });
+  // A missing resource defaults to {} in old code, which the live runtime never
+  // sends and which neuters strict selector coverage (can report allow where the
+  // runtime denies). Require the concrete resource the runtime would send.
+  if (!payload.resource || typeof payload.resource !== "object" || Array.isArray(payload.resource)) {
+    return sendJson(response, 400, { error: "resource_required", hint: "Pass the concrete resource keys the runtime would send (source, surfaceKind, actorId, teamId, channelId, ...) as a JSON object of string values." });
+  }
+  const resource = payload.resource as Record<string, unknown>;
+
+  const identifier = subjectId ?? actorId ?? "";
+  const { store, error } = await loadCapabilityStore(config);
+  if (!store) {
+    // Store unreachable/invalid while enforcement is live means fail-closed deny.
+    return sendJson(response, 200, { allowed: false, reason: httpStoreReason(error ?? "brain_store_unavailable"), grantIds: [], subjectId: identifier });
+  }
+  const actor = subjectId ? { id: subjectId } : actorContextFromExternalId(actorId as string);
+  const result = evaluateAuthorization(store, { actor, requirement: { operation, action, resource } });
+  return sendJson(response, 200, { allowed: result.allowed, reason: result.reason, grantIds: result.grantIds, subjectId: identifier, subjectIds: result.subjectIds });
+}
+
+// Bound how much of each source we read for the merged audit feed.
+const AUDIT_MAX_DECISION_FILES = 30;
+
+function parseJsonlRecords(text: string): Record<string, unknown>[] {
+  const records: Record<string, unknown>[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const record = JSON.parse(line) as unknown;
+      if (record && typeof record === "object" && !Array.isArray(record)) records.push(record as Record<string, unknown>);
+    } catch {
+      // Skip malformed lines rather than fail the whole feed.
+    }
+  }
+  return records;
+}
+
+async function readCapabilityDecisionRecords(config: BrainAdminServiceConfig): Promise<Record<string, unknown>[]> {
+  const dir = await capabilityDecisionsDirPath(config);
+  let entries: string[];
+  try {
+    entries = (await readdir(dir)).filter((name) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name)).sort().reverse();
+  } catch {
+    return [];
+  }
+  // Read the per-day files in parallel (bounded by AUDIT_MAX_DECISION_FILES and
+  // each file's tail window) instead of awaiting them one at a time.
+  const texts = await Promise.all(entries.slice(0, AUDIT_MAX_DECISION_FILES).map((name) => readFileTail(path.join(dir, name), AUDIT_TAIL_BYTES)));
+  const records: Record<string, unknown>[] = [];
+  for (const text of texts) records.push(...parseJsonlRecords(text));
+  return records;
+}
+
+function encodeAuditCursor(offset: number, newestTimeMs: number | null): string {
+  return Buffer.from(JSON.stringify({ o: offset, t: newestTimeMs }), "utf8").toString("base64url");
+}
+
+function decodeAuditCursor(token: string | null): { offset: number; anchorMs: number | null } {
+  if (!token) return { offset: 0, anchorMs: null };
+  try {
+    const parsed = JSON.parse(Buffer.from(token, "base64url").toString("utf8")) as { o?: unknown; t?: unknown };
+    const offsetRaw = typeof parsed.o === "number" && Number.isFinite(parsed.o) ? Math.floor(parsed.o) : 0;
+    const anchorMs = typeof parsed.t === "number" && Number.isFinite(parsed.t) ? parsed.t : null;
+    return { offset: offsetRaw > 0 ? offsetRaw : 0, anchorMs };
+  } catch {
+    return { offset: 0, anchorMs: null };
+  }
+}
+
+async function handleCapabilityAudit(response: ServerResponse, config: BrainAdminServiceConfig, url: URL): Promise<void> {
+  const typeParam = url.searchParams.get("type");
+  const type: AuditType | undefined = typeParam === "capability" || typeParam === "operations" ? typeParam : undefined;
+  const outcomeParam = url.searchParams.get("outcome");
+  const outcome: AuditOutcome | undefined = outcomeParam === "allowed" || outcomeParam === "denied" ? outcomeParam : undefined;
+  const actor = url.searchParams.get("actor")?.trim() || undefined;
+  const operation = url.searchParams.get("operation")?.trim() || undefined;
+  const limitRaw = Number.parseInt(url.searchParams.get("limit") ?? "", 10);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 200) : 50;
+  const { offset, anchorMs } = decodeAuditCursor(url.searchParams.get("cursor"));
+
+  const includeOperations = type !== "capability";
+  const includeCapability = type !== "operations";
+  // Read the three audit sources in parallel rather than one after another.
+  const [operationsRecords, capabilityDecisionRecords, capabilityAuditRecords] = await Promise.all([
+    includeOperations ? readFileTail(resolveEnvFilePath(config.auditLogPath), AUDIT_TAIL_BYTES).then(parseJsonlRecords) : Promise.resolve([] as Record<string, unknown>[]),
+    includeCapability ? readCapabilityDecisionRecords(config) : Promise.resolve([] as Record<string, unknown>[]),
+    includeCapability ? readFileTail(resolveEnvFilePath(config.capabilityAuditLogPath), AUDIT_TAIL_BYTES).then(parseJsonlRecords) : Promise.resolve([] as Record<string, unknown>[]),
+  ]);
+
+  const feed = buildAuditFeed({ operationsRecords, capabilityDecisionRecords, capabilityAuditRecords, query: { type, outcome, actor, operation, offset, limit, anchorMs } });
+  return sendJson(response, 200, {
+    schemaVersion: 1,
+    rows: feed.rows,
+    total: feed.total,
+    limit,
+    nextCursor: feed.nextOffset === null ? null : encodeAuditCursor(feed.nextOffset, feed.newestTimeMs),
+    filters: { type: type ?? "both", outcome: outcome ?? null, actor: actor ?? null, operation: operation ?? null },
+  });
+}
+
+// --- §6.5 capability WRITE endpoints (person/identity/grant mutations) --------
+//
+// Every mutation runs behind the write-path safety rails in
+// capability-store-write.ts: schema-validated atomic write, last-known-good +
+// timestamped backup, optimistic-concurrency (content-hash) conflict, impact
+// preview, and self-lockout refusal. `?preview=true` (or `preview:true` in the
+// body) returns the would-be decision diffs WITHOUT writing.
+
+// Read a JSON body but tolerate an empty body (DELETE with no payload), where
+// the write parameters come entirely from the path + query string.
+async function readJsonBodyOptional(request: IncomingMessage): Promise<Record<string, unknown>> {
+  return readJsonBodyInternal(request, { allowEmpty: true });
+}
+
+async function readJsonBodyInternal(request: IncomingMessage, options: { allowEmpty: boolean }): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buffer.length;
+    // A malformed/oversized/non-object body is a client error (400), not a 500.
+    if (total > MAX_BODY_BYTES) throw new CapabilityWriteError("invalid_body", 400, "Request body too large");
+    chunks.push(buffer);
+  }
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) {
+    if (options.allowEmpty) return {};
+    throw new CapabilityWriteError("invalid_body", 400, "Request body is required");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    throw new CapabilityWriteError("invalid_body", 400, "Request body must be valid JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new CapabilityWriteError("invalid_body", 400, "JSON body must be an object");
+  return parsed as Record<string, unknown>;
+}
+
+// Append a capability audit event to Brain's capability audit JSONL — the same
+// file the step-2 /audit feed already merges (config.capabilityAuditLogPath).
+// Never writes secret values.
+async function appendCapabilityAudit(config: BrainAdminServiceConfig, event: Record<string, unknown>): Promise<void> {
+  const filePath = resolveEnvFilePath(config.capabilityAuditLogPath);
+  await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const record = { at: new Date().toISOString(), ...event, secretValuesLogged: false };
+  await appendFile(filePath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+// Route the /api/admin/brain/users(/:id/...) write surface. Returns true when it
+// handled the request (so the caller stops); false when the path/method is not
+// a user-mutation route (letting the shared 404 handle it).
+async function handleCapabilityUserMutation(
+  request: IncomingMessage,
+  response: ServerResponse,
+  url: URL,
+  config: BrainAdminServiceConfig,
+  adminEmail: string,
+): Promise<boolean> {
+  const method = request.method ?? "GET";
+  const rest = url.pathname.slice("/api/admin/brain/users".length).replace(/^\//, "");
+  const segments = rest ? rest.split("/").map((segment) => decodeURIComponent(segment)) : [];
+
+  // POST /users — create a person.
+  if (segments.length === 0) {
+    if (method !== "POST") return false;
+    const body = await readJsonBodyOptional(request);
+    const spec: MutationSpec = { kind: "create_person", displayName: String((body.displayName as string) ?? ""), adminEmail };
+    await runMutation(response, config, url, body, spec);
+    return true;
+  }
+
+  const personId = segments[0];
+  // POST /users/:id/identities  |  DELETE /users/:id/identities/:identityId
+  if (segments[1] === "identities") {
+    if (segments.length === 2 && method === "POST") {
+      const body = await readJsonBodyOptional(request);
+      const spec: MutationSpec = {
+        kind: "link_identity",
+        personId,
+        provider: String((body.provider as string) ?? ""),
+        externalId: String((body.externalId as string) ?? (body.externalIdentifier as string) ?? ""),
+        teamId: optionalString(body.teamId),
+        adminEmail,
+      };
+      await runMutation(response, config, url, body, spec);
+      return true;
+    }
+    if (segments.length === 3 && method === "DELETE") {
+      const body = await readJsonBodyOptional(request);
+      const spec: MutationSpec = { kind: "unlink_identity", personId, identityId: segments[2], adminEmail };
+      await runMutation(response, config, url, body, spec);
+      return true;
+    }
+    return false;
+  }
+
+  // POST /users/:id/grants  |  POST /users/:id/grants/revoke-batch
+  //                          |  DELETE /users/:id/grants/:grantId
+  if (segments[1] === "grants") {
+    if (segments.length === 2 && method === "POST") {
+      const body = await readJsonBodyOptional(request);
+      const target = optionalString(body.groupId) ?? optionalString(body.capabilityId) ?? optionalString(body.target) ?? "";
+      const selectors = body.selectors && typeof body.selectors === "object" && !Array.isArray(body.selectors) ? (body.selectors as Record<string, unknown>) : undefined;
+      const spec: MutationSpec = { kind: "grant", personId, target, selectors, adminEmail };
+      await runMutation(response, config, url, body, spec);
+      return true;
+    }
+    // Atomic batch revoke: one store write + one combined impact preview + one
+    // audit event for a set of exact grant ids (from GET /users grant entries).
+    if (segments.length === 3 && segments[2] === "revoke-batch" && method === "POST") {
+      const body = await readJsonBodyOptional(request);
+      const grantIds = Array.isArray(body.grantIds) ? body.grantIds.filter((id): id is string => typeof id === "string") : [];
+      const reason = optionalString(body.reason);
+      const spec: MutationSpec = { kind: "revoke_batch", personId, grantIds, reason, adminEmail };
+      await runMutation(response, config, url, body, spec);
+      return true;
+    }
+    if (segments.length === 3 && method === "DELETE") {
+      const body = await readJsonBodyOptional(request);
+      const spec: MutationSpec = { kind: "revoke", personId, grantId: segments[2], adminEmail };
+      await runMutation(response, config, url, body, spec);
+      return true;
+    }
+    return false;
+  }
+
+  return false;
+}
+
+function isPreviewRequest(url: URL, body: Record<string, unknown>): boolean {
+  return url.searchParams.get("preview") === "true" || body.preview === true;
+}
+
+// Shared preview/commit runner: maps CapabilityWriteError to the right HTTP
+// status, appends a capability audit event on a successful (non-preview) write,
+// and never echoes secret values.
+async function runMutation(
+  response: ServerResponse,
+  config: BrainAdminServiceConfig,
+  url: URL,
+  body: Record<string, unknown>,
+  spec: MutationSpec,
+): Promise<void> {
+  const preview = isPreviewRequest(url, body);
+  const expectedHash = optionalString(body.expectedStoreHash) ?? url.searchParams.get("ifMatch") ?? undefined;
+  try {
+    let result: MutationResult;
+    if (preview) {
+      result = await previewMutation(resolveEnvFilePath(config.capabilityStorePath), spec);
+      return sendJson(response, 200, { ok: true, preview: true, impact: result.impact, detail: result.outcome.detail, storeHash: result.storeHash });
+    }
+    result = await commitMutation(resolveEnvFilePath(config.capabilityStorePath), spec, { expectedHash: expectedHash ?? undefined });
+    if (result.outcome.changed) clearCapabilityStatusCache();
+    // Audit the successful mutation with its impact summary — never secrets. The
+    // store write already SUCCEEDED, so an audit-append failure must not turn a
+    // committed write into a 500 (which would prompt a retry that duplicates
+    // people/grants). Surface it as a non-fatal flag instead.
+    let auditWriteFailed = false;
+    try {
+      await appendCapabilityAudit(config, {
+        ...result.outcome.audit,
+        impact: result.impact.summary,
+      });
+    } catch (auditError) {
+      auditWriteFailed = true;
+      console.error("capability audit append failed after a successful store write", auditError);
+    }
+    return sendJson(response, 200, {
+      ok: true,
+      preview: false,
+      changed: result.outcome.changed,
+      impact: result.impact,
+      detail: result.outcome.detail,
+      storeHash: result.storeHash,
+      ...(auditWriteFailed ? { auditWriteFailed: true } : {}),
+    });
+  } catch (error) {
+    if (error instanceof CapabilityWriteError) {
+      return sendJson(response, error.status, { error: error.code, message: error.message, ...(error.details ?? {}) });
+    }
+    throw error;
+  }
+}
+
+// --- §6.4 env schema response ------------------------------------------------
+
+async function envSchemaResponse(config: BrainAdminServiceConfig): Promise<ReturnType<typeof buildEnvSchema>> {
+  // Plan §6.4: return the bare schema array (no { envFile, schema } wrapper).
+  const envFile = resolveEnvFilePath(config.codexChatEnvFile);
+  const presentKeys = parseEnvKeys(await readTextIfPresent(envFile));
+  return buildEnvSchema(presentKeys, config.allowedEnvKeys);
+}
+
+// --- §6.2 Slack setup state --------------------------------------------------
+
+interface SlackSetupStore {
+  schemaVersion: 1;
+  setupComplete: boolean;
+  completedAt?: string;
+  completedBy?: string;
+  // Provenance of the most recent completion, retained when setup is later marked
+  // incomplete (Reconfigure) so the "who/when last completed" history is not
+  // erased by re-opening the wizard.
+  lastCompletedAt?: string;
+  lastCompletedBy?: string;
+  updatedAt?: string;
+}
+
+async function readSlackSetupStore(filePath: string): Promise<SlackSetupStore> {
+  const raw = await readTextIfPresent(resolveEnvFilePath(filePath));
+  if (!raw) return { schemaVersion: 1, setupComplete: false };
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return {
+      schemaVersion: 1,
+      setupComplete: parsed.setupComplete === true,
+      completedAt: typeof parsed.completedAt === "string" ? redactTelemetryText(parsed.completedAt) : undefined,
+      completedBy: typeof parsed.completedBy === "string" ? redactTelemetryText(parsed.completedBy) : undefined,
+      lastCompletedAt: typeof parsed.lastCompletedAt === "string" ? redactTelemetryText(parsed.lastCompletedAt) : undefined,
+      lastCompletedBy: typeof parsed.lastCompletedBy === "string" ? redactTelemetryText(parsed.lastCompletedBy) : undefined,
+      updatedAt: typeof parsed.updatedAt === "string" ? redactTelemetryText(parsed.updatedAt) : undefined,
+    };
+  } catch {
+    return { schemaVersion: 1, setupComplete: false };
+  }
+}
+
+async function writeSlackSetupStore(filePath: string, store: SlackSetupStore): Promise<void> {
+  const resolved = resolveEnvFilePath(filePath);
+  await atomicWriteFile(resolved, `${JSON.stringify(store, null, 2)}\n`);
+}
+
+async function slackSetupSummary(config: BrainAdminServiceConfig) {
+  const [store, present, telemetry] = await Promise.all([
+    readSlackSetupStore(config.slackSetupStatePath),
+    readEnvKeyPresence(config.codexChatEnvFile, ["SLACK_SIGNING_SECRET", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"]),
+    slackTelemetrySummary(config),
+  ]);
+  const steps = [
+    {
+      id: "public_url",
+      label: "Confirm public base URL + events path",
+      done: Boolean(config.slackEventsBaseUrl && config.slackEventsPath),
+    },
+    {
+      id: "secrets",
+      label: "Enter required Slack secrets",
+      done: Boolean(present.SLACK_SIGNING_SECRET) && Boolean(present.SLACK_BOT_TOKEN),
+    },
+    {
+      id: "install_app",
+      label: "Install the Slack app (manifest)",
+      done: Boolean(config.slackAppId) || Boolean(present.SLACK_APP_TOKEN),
+    },
+    {
+      id: "event_subscriptions",
+      label: "Configure Event Subscriptions + verify with a test event",
+      done: Boolean(telemetry.lastAcceptedEvent),
+    },
+    {
+      id: "restart",
+      label: "Restart codex-chat if needed",
+      done: store.setupComplete,
+    },
+  ];
+  return {
+    source: "brain-private-file",
+    path: resolveEnvFilePath(config.slackSetupStatePath),
+    values: "setup completion flag and derived per-step state only; no secrets or message bodies",
+    setupComplete: store.setupComplete,
+    completedAt: store.completedAt,
+    completedBy: store.completedBy,
+    lastCompletedAt: store.lastCompletedAt,
+    lastCompletedBy: store.lastCompletedBy,
+    updatedAt: store.updatedAt,
+    steps,
+    verification: {
+      lastAcceptedEvent: Boolean(telemetry.lastAcceptedEvent),
+      lastOutboundSuccess: Boolean(telemetry.lastOutboundSuccess),
+    },
+  };
+}
+
+async function handleSlackSetupWrite(response: ServerResponse, config: BrainAdminServiceConfig, adminEmail: string, payload: Record<string, unknown>): Promise<void> {
+  if (typeof payload.complete !== "boolean") {
+    return sendJson(response, 400, { error: "invalid_setup_state", expected: { complete: "boolean" } });
+  }
+  const now = new Date().toISOString();
+  // Read the prior state so marking setup incomplete (Reconfigure) preserves the
+  // most recent completion provenance instead of erasing it.
+  const prior = await readSlackSetupStore(config.slackSetupStatePath);
+  let store: SlackSetupStore;
+  if (payload.complete) {
+    store = {
+      schemaVersion: 1,
+      setupComplete: true,
+      completedAt: now,
+      completedBy: adminEmail,
+      ...(prior.lastCompletedAt ? { lastCompletedAt: prior.lastCompletedAt } : {}),
+      ...(prior.lastCompletedBy ? { lastCompletedBy: prior.lastCompletedBy } : {}),
+      updatedAt: now,
+    };
+  } else {
+    const lastCompletedAt = prior.completedAt ?? prior.lastCompletedAt;
+    const lastCompletedBy = prior.completedBy ?? prior.lastCompletedBy;
+    store = {
+      schemaVersion: 1,
+      setupComplete: false,
+      ...(lastCompletedAt ? { lastCompletedAt } : {}),
+      ...(lastCompletedBy ? { lastCompletedBy } : {}),
+      updatedAt: now,
+    };
+  }
+  await writeSlackSetupStore(config.slackSetupStatePath, store);
+  await appendAudit(config, { action: "slack.setup.update", adminEmail, setupComplete: store.setupComplete, storePath: resolveEnvFilePath(config.slackSetupStatePath) });
+  return sendJson(response, 200, { ok: true, setup: await slackSetupSummary(config) });
 }
 
 async function slackSettingsSummary(config: BrainAdminServiceConfig) {
@@ -345,6 +1269,7 @@ async function slackSettingsSummary(config: BrainAdminServiceConfig) {
     runtimeOwner: "codex-chat verifies Slack signatures and normalizes runtime events",
     values: "write-only; presence only",
     env,
+    confirmation: { token: SLACK_SETTINGS_CONFIRMATION_TOKEN, action: "slack.settings.write" },
   };
 }
 
@@ -542,11 +1467,7 @@ function parseTomlStringValue(value: string | null): string | undefined {
 }
 
 function redactTelemetryText(value: string): string {
-  return value
-    .replace(/xox[baprs]-[A-Za-z0-9-]+/g, "[redacted-slack-token]")
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
-    .replace(/v0=[a-f0-9]{32,}/gi, "v0=[redacted-signature]")
-    .slice(0, 240);
+  return redactSecretText(value).slice(0, 240);
 }
 
 type SlackCanaryStatus = "pending" | "passed" | "failed" | "blocked" | "not_applicable";
@@ -736,11 +1657,7 @@ async function readSlackCanaryStore(filePath: string): Promise<SlackCanaryStore>
 
 async function writeSlackCanaryStore(filePath: string, store: SlackCanaryStore): Promise<void> {
   const resolved = resolveEnvFilePath(filePath);
-  await mkdir(path.dirname(resolved), { recursive: true, mode: 0o700 });
-  const tmp = `${resolved}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tmp, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
-  await chmod(tmp, 0o600).catch(() => undefined);
-  await rename(tmp, resolved);
+  await atomicWriteFile(resolved, `${JSON.stringify(store, null, 2)}\n`);
 }
 
 function sanitizeCanaryFreeform(value: unknown): string | undefined {
@@ -803,6 +1720,10 @@ async function mainLoopModelSummary(config: BrainAdminServiceConfig) {
     selectors,
     effective,
     activePreset,
+    // Served verbatim so the client echoes it back in the confirmation instead
+    // of hand-mirroring the server's key list (fix).
+    confirmationKeys: [...MAIN_LOOP_MODEL_ENV_KEYS],
+    confirmation: { token: MAIN_LOOP_MODEL_CONFIRMATION_TOKEN, action: "codex-chat.main-loop-model.write" },
     restartRequiredForChanges: true,
     presets: Object.entries(MAIN_LOOP_PRESETS).map(([id, preset]) => ({ id, label: preset.label, description: preset.description, updates: preset.updates, requiresOpenRouter: preset.requiresOpenRouter })),
     openRouter: {
@@ -813,6 +1734,102 @@ async function mainLoopModelSummary(config: BrainAdminServiceConfig) {
     },
     rollback: "Select codex-openai-default, confirm the write, then restart codex-chat.service.",
   };
+}
+
+type ConfigWritePath = "ipc" | "bootstrap_fallback";
+
+interface CodexChatConfigWriteSuccess {
+  configWritePath: ConfigWritePath;
+}
+
+async function writeCodexChatEnvConfig(
+  response: ServerResponse,
+  config: BrainAdminServiceConfig,
+  updates: Record<string, string>,
+  managedBy: string,
+): Promise<CodexChatConfigWriteSuccess | null> {
+  let ipcResult: CodexChatSetConfigResult;
+  try {
+    ipcResult = await sendSetConfig(config.codexChatIpcSocket, updates, { timeoutMs: DEFAULT_CODEX_CHAT_IPC_TIMEOUT_MS });
+  } catch (error) {
+    if (isCodexChatIpcError(error) && error.kind === "UNAVAILABLE") {
+      const keys = Object.keys(updates);
+      console.warn("[brain-admin] codex-chat IPC unavailable; using bootstrap env-file fallback", {
+        socketPath: config.codexChatIpcSocket,
+        envFile: resolveEnvFilePath(config.codexChatEnvFile),
+        keys,
+        reason: codexChatIpcPublicReason(error),
+      });
+      await writeMergedEnvFile(config.codexChatEnvFile, updates, managedBy);
+      return { configWritePath: "bootstrap_fallback" };
+    }
+    const reason = isCodexChatIpcError(error) ? codexChatIpcPublicReason(error) : "codex-chat IPC config write failed";
+    console.warn("[brain-admin] codex-chat IPC config write failed", {
+      socketPath: config.codexChatIpcSocket,
+      keys: Object.keys(updates),
+      ...(isCodexChatIpcError(error) ? { kind: error.kind, code: error.code, message: error.message, mayHaveApplied: error.mayHaveApplied } : { message: "unknown IPC failure" }),
+    });
+    const mayHaveApplied = isCodexChatIpcError(error) ? error.mayHaveApplied : false;
+    sendJson(response, 502, {
+      error: "codex_chat_config_write_failed",
+      message: mayHaveApplied
+        ? "codex-chat may have applied the env update before the IPC response failed; retry the write to reconverge env and companion config."
+        : reason,
+      configWritePath: "ipc",
+      mayHaveApplied,
+      ...(mayHaveApplied ? { retry: "Retry the same write; set_config is idempotent." } : {}),
+    });
+    return null;
+  }
+
+  if (!ipcResult.ok) {
+    sendCodexChatIpcValidationError(response, ipcResult.fieldErrors);
+    return null;
+  }
+  return { configWritePath: "ipc" };
+}
+
+function sendCodexChatIpcValidationError(response: ServerResponse, fieldErrors: Record<string, string>): void {
+  sendJson(response, 400, {
+    error: "validation_failed",
+    fieldErrors: Object.entries(fieldErrors).map(([key, message]) => ({ key, code: codexChatFieldErrorCode(message), message })),
+  });
+}
+
+function codexChatFieldErrorCode(message: string): EnvFieldError["code"] {
+  if (message === "unknown configuration key") return "unknown_key";
+  if (message === "value must be a string") return "invalid_type";
+  return "invalid_format";
+}
+
+async function readPresenceAfterConfigWrite(config: BrainAdminServiceConfig, updates: Record<string, string>, keys: readonly string[]): Promise<Record<string, boolean>> {
+  const filePresence = await readEnvKeyPresence(config.codexChatEnvFile, keys);
+  return mergePresenceWithRequestedUpdates(filePresence, updates, keys);
+}
+
+function mergePresenceWithRequestedUpdates(filePresence: Record<string, boolean>, updates: Record<string, string>, keys: readonly string[]): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  for (const key of keys) {
+    out[key] = Object.prototype.hasOwnProperty.call(updates, key) ? (updates[key]?.length ?? 0) > 0 : Boolean(filePresence[key]);
+  }
+  return out;
+}
+
+function codexChatIpcPublicReason(error: CodexChatIpcError): string {
+  switch (error.code) {
+    case "TOKEN_UNAVAILABLE":
+      return "codex-chat IPC token file is unavailable";
+    case "SOCKET_UNAVAILABLE":
+      return "codex-chat IPC socket is unavailable";
+    case "AUTH_REJECTED":
+      return "codex-chat IPC authorization failed";
+    case "TIMEOUT":
+      return "codex-chat IPC request timed out";
+    case "MALFORMED_RESPONSE":
+      return "codex-chat IPC response was malformed";
+    default:
+      return "codex-chat IPC config write failed";
+  }
 }
 
 async function handleMainLoopModelWrite(response: ServerResponse, config: BrainAdminServiceConfig, adminEmail: string, payload: Record<string, unknown>): Promise<void> {
@@ -834,13 +1851,18 @@ async function handleMainLoopModelWrite(response: ServerResponse, config: BrainA
     });
   }
 
-  await writeMergedEnvFile(config.codexChatEnvFile, preset.updates, "Brain codex-chat main-loop model switcher");
+  const fieldErrors = validateEnvUpdates(preset.updates);
+  if (fieldErrors.length > 0) return sendEnvValidationError(response, fieldErrors);
+
+  const configWrite = await writeCodexChatEnvConfig(response, config, preset.updates, "Brain codex-chat main-loop model switcher");
+  if (!configWrite) return;
   await appendAudit(config, {
     action: "codex-chat.main_loop_model.write",
     adminEmail,
     preset: presetId,
     envFile,
     keys,
+    configWritePath: configWrite.configWritePath,
     values: "redacted non-secret selectors; no provider API keys handled by this action",
     scope: "main-loop-only",
   });
@@ -849,8 +1871,9 @@ async function handleMainLoopModelWrite(response: ServerResponse, config: BrainA
     preset: presetId,
     envFile,
     writtenKeys: keys,
+    configWritePath: configWrite.configWritePath,
     values: "non-secret selectors redacted in audit; no API keys written",
-    presence: await readEnvKeyPresence(config.codexChatEnvFile, keys),
+    presence: await readPresenceAfterConfigWrite(config, preset.updates, keys),
     restartRequired: true,
     rollbackPreset: "codex-openai-default",
     scope: "main-loop-only; subagent settings unchanged",
@@ -950,9 +1973,65 @@ function parseTomlStringValueAllowEmpty(value: string | null): string | undefine
 }
 
 
+// The current (non-secret) OpenRouter subagent config the write manages. These
+// are config values, not secrets, so the summary exposes them and the form
+// initializes from them — an untouched form then round-trips current values
+// instead of clobbering them with hardcoded defaults (plan §5.3 / fix). The
+// OpenRouter API key is never included here; it stays presence-only.
+async function readOpenRouterCurrentConfig(config: BrainAdminServiceConfig): Promise<{
+  model: string;
+  codexProfile: string;
+  modelProvider: string;
+  serviceTierMode: string;
+  allowedCodexProfiles: string;
+  allowedModelProviders: string;
+  backend: string;
+}> {
+  const values = await readEnvSelectedValues(config.codexChatEnvFile, [
+    "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL",
+    "CODEX_CHAT_SUBAGENTS_DEFAULT_CODEX_PROFILE",
+    "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL_PROVIDER",
+    "CODEX_CHAT_SUBAGENTS_SERVICE_TIER_MODE",
+    "CODEX_CHAT_SUBAGENTS_ALLOWED_CODEX_PROFILES",
+    "CODEX_CHAT_SUBAGENTS_ALLOWED_MODEL_PROVIDERS",
+    "CODEX_CHAT_SUBAGENTS_BACKEND",
+  ]);
+  const pick = (key: string, fallback: string) => (values[key]?.present ? values[key]!.value : fallback);
+  return {
+    model: pick("CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL", "z-ai/glm-5.2"),
+    codexProfile: pick("CODEX_CHAT_SUBAGENTS_DEFAULT_CODEX_PROFILE", "openrouter"),
+    modelProvider: pick("CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL_PROVIDER", "openrouter"),
+    serviceTierMode: pick("CODEX_CHAT_SUBAGENTS_SERVICE_TIER_MODE", "omit"),
+    allowedCodexProfiles: pick("CODEX_CHAT_SUBAGENTS_ALLOWED_CODEX_PROFILES", ""),
+    allowedModelProviders: pick("CODEX_CHAT_SUBAGENTS_ALLOWED_MODEL_PROVIDERS", ""),
+    backend: pick("CODEX_CHAT_SUBAGENTS_BACKEND", ""),
+  };
+}
+
+function splitOpenRouterProfiles(value: string): string[] {
+  return value
+    .split(/[,\s]+/)
+    .map((entry) => entry.trim())
+    .filter((entry) => /^[A-Za-z0-9._-]+$/.test(entry));
+}
+
+function openRouterProfileTargets(codexHomePath: string, current: { codexProfile: string; allowedCodexProfiles: string }): Array<{ codexProfile: string; profilePath: string }> {
+  const profiles = new Set<string>(["openrouter", current.codexProfile, ...splitOpenRouterProfiles(current.allowedCodexProfiles)]);
+  return [...profiles]
+    .filter((profile) => /^[A-Za-z0-9._-]+$/.test(profile))
+    .sort()
+    .map((codexProfile) => ({ codexProfile, profilePath: codexProfilePath(codexHomePath, codexProfile) }));
+}
+
 async function openRouterSettingsSummary(config: BrainAdminServiceConfig) {
   const env = await envPresenceSummary(config, OPENROUTER_ENV_KEYS);
-  const codexProfile = await codexProfileMetadata(config.codexHomePath, "openrouter");
+  const current = await readOpenRouterCurrentConfig(config);
+  // The summary exposes server-computed absolute write targets. Clients echo
+  // one of these paths back in the confirmation instead of reconstructing local
+  // filesystem paths in browser JavaScript.
+  const currentProfilePath = codexProfilePath(config.codexHomePath, current.codexProfile);
+  const profileTargets = openRouterProfileTargets(config.codexHomePath, current);
+  const codexProfile = await codexProfileMetadata(config.codexHomePath, current.codexProfile);
   const codexChatConfig = config.codexChatConfigFile ? await codexChatProviderConfigSummary(config.codexChatConfigFile) : { configured: false };
   return {
     values: "write-only; presence only",
@@ -960,6 +2039,11 @@ async function openRouterSettingsSummary(config: BrainAdminServiceConfig) {
     recommendedCodexProfile: "openrouter",
     recommendedModelProvider: "openrouter",
     recommendedServiceTierMode: "omit",
+    current,
+    profilePath: currentProfilePath,
+    profileTargets,
+    confirmationKeys: [...OPENROUTER_SETTINGS_CONFIRMATION_KEYS],
+    confirmation: { token: OPENROUTER_SETTINGS_CONFIRMATION_TOKEN, action: "openrouter.settings.write" },
     codexProfile,
     codexChatConfig,
     env,
@@ -977,8 +2061,14 @@ async function handleOpenRouterSettingsWrite(response: ServerResponse, config: B
   }
   const confirmation = parseOpenRouterSettingsConfirmation(payload.confirmation);
   const envFile = resolveEnvFilePath(config.codexChatEnvFile);
-  const configFile = config.codexChatConfigFile ?? "";
-  const profilePath = codexProfilePath(config.codexHomePath, input.codexProfile);
+  // The path of the profile file actually written, derived from the submitted
+  // codexProfile. The confirmation must pin this write target, so a stale or
+  // tampered payload cannot redirect the write to a different profile file.
+  const writtenProfilePath = codexProfilePath(config.codexHomePath, input.codexProfile);
+  // Compare the keys against the static governed set the summary advertises, not
+  // only the conditional written subset, so the React client can echo
+  // `confirmationKeys` verbatim. The legacy console still sends the conditional
+  // subset until it is retired.
   const writtenEnvKeys = [
     ...(input.apiKey ? ["OPENROUTER_API_KEY"] : []),
     "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL",
@@ -990,15 +2080,22 @@ async function handleOpenRouterSettingsWrite(response: ServerResponse, config: B
     "CODEX_CHAT_SUBAGENTS_ALLOWED_MODEL_PROVIDERS",
     ...(input.backend ? ["CODEX_CHAT_SUBAGENTS_BACKEND"] : [])
   ];
+  // Accept the governed static key set the summary advertises (React client) OR
+  // the conditional written subset — the still-live legacy `/admin` console
+  // computes the latter client-side, and must keep working until the step-7
+  // cutover. The token/action/envFile/profilePath pins are unchanged either way.
+  const keysOk = sameStringSet(confirmation?.keys ?? [], [...OPENROUTER_SETTINGS_CONFIRMATION_KEYS])
+    || sameStringSet(confirmation?.keys ?? [], writtenEnvKeys);
   if (!confirmation
     || confirmation.token !== OPENROUTER_SETTINGS_CONFIRMATION_TOKEN
     || confirmation.action !== "openrouter.settings.write"
     || confirmation.envFile !== envFile
-    || confirmation.profilePath !== profilePath
-    || !sameStringSet(confirmation.keys, writtenEnvKeys)) {
+    || confirmation.codexProfile !== input.codexProfile
+    || confirmation.profilePath !== writtenProfilePath
+    || !keysOk) {
     return sendJson(response, 400, {
       error: "confirmation_required",
-      required: { token: OPENROUTER_SETTINGS_CONFIRMATION_TOKEN, action: "openrouter.settings.write", envFile, profilePath, keys: writtenEnvKeys }
+      required: { token: OPENROUTER_SETTINGS_CONFIRMATION_TOKEN, action: "openrouter.settings.write", envFile, codexProfile: input.codexProfile, profilePath: writtenProfilePath, keys: [...OPENROUTER_SETTINGS_CONFIRMATION_KEYS] }
     });
   }
 
@@ -1014,7 +2111,11 @@ async function handleOpenRouterSettingsWrite(response: ServerResponse, config: B
   if (input.apiKey) updates.OPENROUTER_API_KEY = input.apiKey;
   if (input.backend) updates.CODEX_CHAT_SUBAGENTS_BACKEND = input.backend;
 
-  await writeMergedEnvFile(config.codexChatEnvFile, updates, "Brain OpenRouter settings");
+  const fieldErrors = validateEnvUpdates(updates);
+  if (fieldErrors.length > 0) return sendEnvValidationError(response, fieldErrors);
+
+  const configWrite = await writeCodexChatEnvConfig(response, config, updates, "Brain OpenRouter settings");
+  if (!configWrite) return;
   await writeOpenRouterCodexProfile(config.codexHomePath, input);
   if (config.codexChatConfigFile) await writeCodexChatProviderConfig(config.codexChatConfigFile, input);
   await appendAudit(config, {
@@ -1022,19 +2123,21 @@ async function handleOpenRouterSettingsWrite(response: ServerResponse, config: B
     adminEmail,
     envFile,
     configFile: config.codexChatConfigFile ?? null,
-    profilePath,
+    profilePath: writtenProfilePath,
     keys: writtenEnvKeys,
+    configWritePath: configWrite.configWritePath,
     values: "write-only"
   });
   return sendJson(response, 200, {
     ok: true,
     envFile,
     configFile: config.codexChatConfigFile ?? null,
-    profilePath,
+    profilePath: writtenProfilePath,
     writtenKeys: writtenEnvKeys,
+    configWritePath: configWrite.configWritePath,
     values: "write-only",
-    presence: await readEnvKeyPresence(config.codexChatEnvFile, writtenEnvKeys),
-    apiKeyPresent: Boolean(input.apiKey) || Boolean((await readEnvKeyPresence(config.codexChatEnvFile, ["OPENROUTER_API_KEY"])).OPENROUTER_API_KEY),
+    presence: await readPresenceAfterConfigWrite(config, updates, writtenEnvKeys),
+    apiKeyPresent: (await readPresenceAfterConfigWrite(config, updates, ["OPENROUTER_API_KEY"])).OPENROUTER_API_KEY,
     restartRequired: true
   });
 }
@@ -1047,23 +2150,54 @@ async function envPresenceSummary(config: BrainAdminServiceConfig, keysToRead: r
 }
 
 async function handleEnvWrite(response: ServerResponse, config: BrainAdminServiceConfig, adminEmail: string, payload: Record<string, unknown>): Promise<void> {
-  const approval = typeof payload.approval === "string" ? payload.approval.trim() : "";
-  if (approval !== "write env" && approval !== `write ${config.codexChatServiceName} env`) {
-    return sendJson(response, 400, { error: "approval_required", expected: ["write env", `write ${config.codexChatServiceName} env`] });
-  }
   const entries = parseEntries(payload.entries);
+  const writtenKeys = Object.keys(entries);
+  const envFile = resolveEnvFilePath(config.codexChatEnvFile);
+  // Plan §6.4 / §8 step 4: env writes overwrite secrets in one request, so they
+  // stay behind a server-side confirmation gate. The React console echoes the
+  // server-issued token/action/env-file/key-set; the still-live legacy `/admin`
+  // page may use the exact approval phrase until that surface is retired.
+  const approval = typeof payload.approval === "string" ? payload.approval.trim() : "";
+  const approvalPhraseOk = approval === "write env" || approval === `write ${config.codexChatServiceName} env`;
+  const confirmation = parseEnvWriteConfirmation(payload.confirmation);
+  const confirmationOk = Boolean(confirmation
+    && confirmation.token === CODEX_CHAT_ENV_CONFIRMATION_TOKEN
+    && confirmation.action === "codex-chat.env.write"
+    && confirmation.envFile === envFile
+    && sameStringSet(confirmation.keys, writtenKeys));
+  if (!approvalPhraseOk && !confirmationOk) {
+    return sendJson(response, 400, {
+      error: "confirmation_required",
+      required: { token: CODEX_CHAT_ENV_CONFIRMATION_TOKEN, action: "codex-chat.env.write", envFile, keys: writtenKeys },
+      legacyApproval: ["write env", `write ${config.codexChatServiceName} env`],
+    });
+  }
   const allowed = new Set(config.allowedEnvKeys);
   const updates: Record<string, string> = {};
   for (const [key, value] of Object.entries(entries)) {
     if (!isEnvKey(key)) return sendJson(response, 400, { error: "invalid_env_key", key });
     if (!allowed.has(key)) return sendJson(response, 403, { error: "env_key_not_allowed", key, allowedKeys: config.allowedEnvKeys });
-    if (typeof value !== "string" || value.length === 0) return sendJson(response, 400, { error: "env_value_required", key });
+    if (typeof value !== "string") return sendJson(response, 400, { error: "env_value_required", key });
     updates[key] = value;
   }
   if (Object.keys(updates).length === 0) return sendJson(response, 400, { error: "no_entries" });
-  await writeMergedEnvFile(config.codexChatEnvFile, updates, "Brain control plane");
-  await appendAudit(config, { action: "codex-chat.env.write", adminEmail, keys: Object.keys(updates), envFile: resolveEnvFilePath(config.codexChatEnvFile) });
-  return sendJson(response, 200, { ok: true, envFile: resolveEnvFilePath(config.codexChatEnvFile), writtenKeys: Object.keys(updates), values: "write-only", presence: await readEnvKeyPresence(config.codexChatEnvFile, Object.keys(updates)), restartRequired: true });
+  const fieldErrors = validateEnvUpdates(updates, { requireNonEmpty: true });
+  if (fieldErrors.length > 0) return sendEnvValidationError(response, fieldErrors);
+  const configWrite = await writeCodexChatEnvConfig(response, config, updates, "Brain control plane");
+  if (!configWrite) return;
+  await appendAudit(config, { action: "codex-chat.env.write", adminEmail, keys: Object.keys(updates), envFile, configWritePath: configWrite.configWritePath });
+  return sendJson(response, 200, { ok: true, envFile, writtenKeys: Object.keys(updates), configWritePath: configWrite.configWritePath, values: "write-only", presence: await readPresenceAfterConfigWrite(config, updates, Object.keys(updates)), restartRequired: true });
+}
+
+function parseEnvWriteConfirmation(value: unknown): { token?: string; action?: string; envFile?: string; keys: string[] } | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  return {
+    token: typeof record.token === "string" ? record.token : undefined,
+    action: typeof record.action === "string" ? record.action : undefined,
+    envFile: typeof record.envFile === "string" ? record.envFile : undefined,
+    keys: Array.isArray(record.keys) ? record.keys.filter((key): key is string => typeof key === "string") : [],
+  };
 }
 
 async function handleSlackSettingsWrite(response: ServerResponse, config: BrainAdminServiceConfig, adminEmail: string, payload: Record<string, unknown>): Promise<void> {
@@ -1092,9 +2226,13 @@ async function handleSlackSettingsWrite(response: ServerResponse, config: BrainA
     });
   }
 
-  await writeMergedEnvFile(config.codexChatEnvFile, updates, "Brain Slack settings");
-  await appendAudit(config, { action: "slack.settings.write", adminEmail, keys: writtenKeys, envFile, values: "write-only" });
-  return sendJson(response, 200, { ok: true, envFile, writtenKeys, values: "write-only", presence: await readEnvKeyPresence(config.codexChatEnvFile, writtenKeys), restartRequired: true });
+  const fieldErrors = validateEnvUpdates(updates, { requireNonEmpty: true });
+  if (fieldErrors.length > 0) return sendEnvValidationError(response, fieldErrors);
+
+  const configWrite = await writeCodexChatEnvConfig(response, config, updates, "Brain Slack settings");
+  if (!configWrite) return;
+  await appendAudit(config, { action: "slack.settings.write", adminEmail, keys: writtenKeys, envFile, configWritePath: configWrite.configWritePath, values: "write-only" });
+  return sendJson(response, 200, { ok: true, envFile, writtenKeys, configWritePath: configWrite.configWritePath, values: "write-only", presence: await readPresenceAfterConfigWrite(config, updates, writtenKeys), restartRequired: true });
 }
 
 async function renderSlackManifestForBrain(config: BrainAdminServiceConfig): Promise<{ requestUrl: string; eventsPath: string; renderer: string; validation?: unknown; manifest: unknown; text: string }> {
@@ -1182,7 +2320,7 @@ async function handleOperation(response: ServerResponse, config: BrainAdminServi
 
   const result = await (deps.runCommand ?? runShellCommand)(command, config.operationTimeoutMs);
   await appendAudit(config, { action: "codex-chat.operation.execute", adminEmail, operation, command: redactedCommand(command), status: result.status, signal: result.signal, timedOut: result.timedOut, freshPlan: Boolean(confirmation.freshPlan), bypassedFreshPlan: Boolean(confirmation.bypassedFreshPlan) });
-  return sendJson(response, result.status === 0 ? 200 : 500, { ok: result.status === 0, operation, status: result.status, signal: result.signal, timedOut: result.timedOut, stdout: redactOutput(result.stdout), stderr: redactOutput(result.stderr) });
+  return sendJson(response, 200, { ok: result.status === 0, operation, status: result.status, signal: result.signal, timedOut: result.timedOut, stdout: redactOutput(result.stdout), stderr: redactOutput(result.stderr) });
 }
 
 
@@ -1217,13 +2355,14 @@ function stringField(value: unknown, name: string, fallback: string): string {
   return out;
 }
 
-function parseOpenRouterSettingsConfirmation(value: unknown): { token?: string; action?: string; envFile?: string; profilePath?: string; keys: string[] } | null {
+function parseOpenRouterSettingsConfirmation(value: unknown): { token?: string; action?: string; envFile?: string; codexProfile?: string; profilePath?: string; keys: string[] } | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   return {
     token: typeof record.token === "string" ? record.token : undefined,
     action: typeof record.action === "string" ? record.action : undefined,
     envFile: typeof record.envFile === "string" ? record.envFile : undefined,
+    codexProfile: typeof record.codexProfile === "string" ? record.codexProfile : undefined,
     profilePath: typeof record.profilePath === "string" ? record.profilePath : undefined,
     keys: Array.isArray(record.keys) ? record.keys.filter((key): key is string => typeof key === "string") : [],
   };
@@ -1234,6 +2373,7 @@ function codexProfilePath(codexHomePath: string, profile: string): string {
 }
 
 async function writeOpenRouterCodexProfile(codexHomePath: string, input: OpenRouterSettingsInput): Promise<void> {
+  // TODO(§6.7): needs a codex-chat IPC command for TOML config.
   const filePath = codexProfilePath(codexHomePath, input.codexProfile);
   const body = [
     "# Managed by Brain control plane. No API key value is stored here.",
@@ -1249,14 +2389,11 @@ async function writeOpenRouterCodexProfile(codexHomePath: string, input: OpenRou
     "env_key_instructions = \"Set OPENROUTER_API_KEY in the codex-chat service environment.\"",
     ""
   ].join("\n");
-  await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tmp, body, { mode: 0o600 });
-  await rename(tmp, filePath);
-  await chmod(filePath, 0o600);
+  await atomicWriteFile(filePath, body);
 }
 
 async function writeCodexChatProviderConfig(filePath: string, input: OpenRouterSettingsInput): Promise<void> {
+  // TODO(§6.7): needs a codex-chat IPC command for TOML config.
   const resolved = resolveEnvFilePath(filePath);
   await mkdir(path.dirname(resolved), { recursive: true, mode: 0o700 });
   const current = await readTextIfPresent(resolved);
@@ -1270,10 +2407,7 @@ async function writeCodexChatProviderConfig(filePath: string, input: OpenRouterS
     allowedModelProviders: [input.modelProvider],
     ...(input.backend ? { backend: input.backend } : {})
   });
-  const tmp = `${resolved}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tmp, next, { mode: 0o600 });
-  await rename(tmp, resolved);
-  await chmod(resolved, 0o600);
+  await atomicWriteFile(resolved, next);
 }
 
 async function codexProfileMetadata(codexHomePath: string, profile: string): Promise<{ path: string; present: boolean; mode?: string; size?: number }> {
@@ -1343,6 +2477,16 @@ function readTomlValue(sourceText: string, section: string, key: string): string
   return keyMatch?.[1] ?? null;
 }
 
+// Read a top-level dotted key (e.g. `brain.enforcementEnabled = false`) defined
+// in the document preamble, before any [section] header (where a dotted key
+// binds from the TOML document root).
+function readTopLevelDottedTomlValue(sourceText: string, dottedKey: string): string | null {
+  const firstSection = sourceText.search(/^\s*\[[^\]]+\]\s*$/m);
+  const preamble = firstSection >= 0 ? sourceText.slice(0, firstSection) : sourceText;
+  const keyMatch = new RegExp(`^\\s*${escapeRegExp(dottedKey)}\\s*=\\s*(.+?)\\s*$`, "m").exec(preamble);
+  return keyMatch?.[1] ?? null;
+}
+
 function tomlValue(value: string | boolean | string[]): string {
   if (typeof value === "boolean") return value ? "true" : "false";
   if (Array.isArray(value)) return `[${value.map(tomlString).join(", ")}]`;
@@ -1363,6 +2507,50 @@ async function readTextIfPresent(filePath: string): Promise<string> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
     throw error;
+  }
+}
+
+// Bound how much of the append-only audit log we read on each /status poll.
+const AUDIT_TAIL_BYTES = 256 * 1024;
+
+// Read only the trailing window of a file. When the file is larger than the
+// window we start mid-file and drop the first (partial) line so callers only
+// parse whole lines. Missing files read as "".
+type TailReadHandle = {
+  stat(): Promise<{ size: number }>;
+  read(buffer: Buffer, offset: number, length: number, position: number): Promise<{ bytesRead: number }>;
+  close(): Promise<void>;
+};
+
+type TailOpen = (filePath: string, flags: "r") => Promise<TailReadHandle>;
+
+export async function readFileTail(filePath: string, maxBytes: number, openFile: TailOpen = open): Promise<string> {
+  let handle: TailReadHandle | undefined;
+  try {
+    handle = await openFile(filePath, "r");
+    const { size } = await handle.stat();
+    const start = size > maxBytes ? size - maxBytes : 0;
+    const length = size - start;
+    if (length <= 0) return "";
+    const buffer = Buffer.allocUnsafe(length);
+    let total = 0;
+    while (total < length) {
+      const { bytesRead } = await handle.read(buffer, total, length - total, start + total);
+      if (bytesRead <= 0) break;
+      total += bytesRead;
+    }
+    if (total <= 0) return "";
+    let text = buffer.subarray(0, total).toString("utf8");
+    if (start > 0) {
+      const newline = text.indexOf("\n");
+      text = newline >= 0 ? text.slice(newline + 1) : "";
+    }
+    return text;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+    throw error;
+  } finally {
+    await handle?.close();
   }
 }
 
@@ -1470,17 +2658,7 @@ async function runShellCommand(command: string, timeoutMs: number): Promise<Comm
 }
 
 async function readJsonBody(request: IncomingMessage): Promise<Record<string, unknown>> {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for await (const chunk of request) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    total += buffer.length;
-    if (total > MAX_BODY_BYTES) throw new Error("request body too large");
-    chunks.push(buffer);
-  }
-  const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("JSON body must be an object");
-  return parsed as Record<string, unknown>;
+  return readJsonBodyInternal(request, { allowEmpty: false });
 }
 
 function parseEntries(value: unknown): Record<string, unknown> {
@@ -1584,6 +2762,10 @@ function firstHeader(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
 
+function sendEnvValidationError(response: ServerResponse, fieldErrors: EnvFieldError[]): void {
+  sendJson(response, 400, { error: "validation_failed", fieldErrors });
+}
+
 function sendJson(response: ServerResponse, statusCode: number, body: unknown): void {
   response.statusCode = statusCode;
   response.setHeader("content-type", "application/json; charset=utf-8");
@@ -1594,6 +2776,123 @@ function sendHtml(response: ServerResponse, statusCode: number, html: string): v
   response.statusCode = statusCode;
   response.setHeader("content-type", "text/html; charset=utf-8");
   response.end(html);
+}
+
+// --- §6.6 / §8 step 4: serve the built React SPA under /admin-v2 --------------
+
+// Serve the built React console under `/admin-v2` with SPA-history fallback.
+// Path-traversal safe: only files that resolve inside the build dir are served;
+// anything else falls back to the injected index.html. When the build output is
+// absent, returns a clear 503 page instead of crashing.
+async function serveAdminV2(response: ServerResponse, url: URL, config: BrainAdminServiceConfig): Promise<void> {
+  const dir = path.resolve(resolveEnvFilePath(config.adminV2Dir));
+  let indexHtml: string;
+  let realDir: string;
+  try {
+    indexHtml = await readFile(path.join(dir, "index.html"), "utf8");
+    // Realpath the build root so symlink containment (below) compares like with
+    // like; if the dir can't be realpathed, treat the console as unbuilt.
+    realDir = await realpath(dir);
+  } catch {
+    // The absolute build path is operator-only; log it server-side and keep it
+    // out of this unauthenticated response body (fix).
+    console.error(`[brain-admin] /admin-v2 build output missing or unreadable at ${dir}`);
+    return sendHtml(response, 503, adminV2NotBuiltPage());
+  }
+
+  const rawRel = url.pathname.slice("/admin-v2".length);
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(rawRel);
+  } catch {
+    return sendHtml(response, 400, adminV2ShellHtml(indexHtml, config));
+  }
+  const rel = decoded.replace(/^\/+/, "");
+  if (rel === "" || rel.includes("\0")) {
+    if (rel.includes("\0")) return sendJson(response, 400, { error: "bad_request" });
+    return sendAdminV2Shell(response, indexHtml, config);
+  }
+
+  const resolved = path.resolve(dir, rel);
+  if (resolved !== dir && !resolved.startsWith(dir + path.sep)) {
+    // Attempted escape from the build dir (lexical path traversal) — never serve it.
+    return sendJson(response, 403, { error: "forbidden" });
+  }
+
+  const realIndexPath = path.join(realDir, "index.html");
+  try {
+    // Realpath the target so a symlink inside dist pointing outside the build
+    // root is caught even though the lexical check above passed (fix). ENOENT
+    // (no such file) falls through to the SPA history fallback.
+    const real = await realpath(resolved);
+    if (real !== realDir && !real.startsWith(realDir + path.sep)) {
+      return sendJson(response, 403, { error: "forbidden" });
+    }
+    const info = await stat(real);
+    if (info.isFile()) {
+      // Any request resolving to index.html — directly or otherwise — goes
+      // through the injected, no-store shell path, never served raw/long-cached (fix).
+      if (real === realIndexPath) return sendAdminV2Shell(response, indexHtml, config);
+      const data = await readFile(real);
+      response.statusCode = 200;
+      response.setHeader("content-type", contentTypeForPath(resolved));
+      // Hashed assets are immutable; index.html is handled via the shell path above.
+      response.setHeader("cache-control", "public, max-age=86400");
+      response.end(data);
+      return;
+    }
+  } catch {
+    // Missing file → fall through to the SPA history fallback below.
+  }
+  return sendAdminV2Shell(response, indexHtml, config);
+}
+
+function sendAdminV2Shell(response: ServerResponse, indexHtml: string, config: BrainAdminServiceConfig): void {
+  response.statusCode = 200;
+  response.setHeader("content-type", "text/html; charset=utf-8");
+  response.setHeader("cache-control", "no-store");
+  response.end(adminV2ShellHtml(indexHtml, config));
+}
+
+// Inject the non-secret bootstrap config (publishable key + sign-in URL) into
+// the SPA shell so the browser can boot Clerk without a rebuild. The Clerk
+// publishable key is non-secret by definition; no secret ever crosses here.
+function adminV2ShellHtml(indexHtml: string, config: BrainAdminServiceConfig): string {
+  const uiConfig = { clerkPublishableKey: config.clerkPublishableKey, signInUrl: "/admin-v2" };
+  const json = JSON.stringify(uiConfig).replace(/</g, "\\u003c");
+  const snippet = `<script>window.__BRAIN_UI_CONFIG__=${json};</script>`;
+  if (indexHtml.includes("</head>")) return indexHtml.replace("</head>", `${snippet}</head>`);
+  return `${snippet}${indexHtml}`;
+}
+
+function contentTypeForPath(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  const map: Record<string, string> = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".map": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".txt": "text/plain; charset=utf-8",
+  };
+  return map[ext] ?? "application/octet-stream";
+}
+
+// Note: the build path is deliberately NOT in this body — this route is
+// unauthenticated, so the absolute server path is logged server-side instead.
+function adminV2NotBuiltPage(): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Brain console not built</title><style>body{font:16px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;margin:3rem auto;max-width:640px;padding:0 1rem;background:#08111f;color:#e8eef8}.card{border:1px solid #29405e;border-radius:16px;padding:24px;background:#0f1b2d}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#06101f;border:1px solid #253a57;border-radius:6px;padding:2px 6px}.muted{color:#99a8bd}</style></head><body><section class="card"><h1>Brain console is not built yet</h1><p>The <code>/admin-v2</code> React console has no build output.</p><p class="muted">Run <code>pnpm --filter @brain/web-ui build</code> (or <code>pnpm run build</code> from the repo root) to produce it, then reload. The legacy console remains available at <code>/admin</code>.</p></section></body></html>`;
 }
 
 function sendDownload(response: ServerResponse, filename: string, body: string): void {
@@ -1618,16 +2917,13 @@ function shellArg(value: string): string {
 }
 
 function redactedCommand(command: string): string {
-  return command
-    .replace(/((?:TOKEN|SECRET|KEY|PASSWORD|COOKIE|SESSION|CREDENTIAL)[A-Z0-9_]*=)(?:"[^"]*"|\'[^\']*\'|[^\s]+)/gi, "$1<redacted>")
-    .replace(/\b(sk-(?:proj-)?[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{20,})\b/g, "<redacted-token>");
+  return redactSecretText(
+    command.replace(/((?:TOKEN|SECRET|KEY|PASSWORD|COOKIE|SESSION|CREDENTIAL)[A-Z0-9_]*=)(?:"[^"]*"|\'[^\']*\'|[^\s]+)/gi, "$1<redacted>"),
+  );
 }
 
 function redactOutput(value: string): string {
-  return truncate(value)
-    .replace(/\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/g, "<redacted-openai-key>")
-    .replace(/\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g, "<redacted-github-token>")
-    .replace(/\bxox[baprs]-[A-Za-z0-9-]{20,}\b/g, "<redacted-slack-token>");
+  return redactSecretText(truncate(value));
 }
 
 function truncate(value: string, max = 16_000): string {
