@@ -1,18 +1,57 @@
-import { useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useLinkIdentity } from "../../lib/queries";
 import { RawJson, describeError } from "../../components/common";
 import { useDebug } from "../../lib/debug";
 import { useCapabilityActions, type PreviewResult } from "./actions";
 import { ImpactDialog } from "./ImpactDialog";
-import type { CapabilityCatalogResponse, CatalogGroup, UserGrantEntry, UserSummary } from "../../api-types";
+import type { CapabilityCatalogResponse, CatalogCapability, CatalogGroup, UserGrantEntry, UserSummary } from "../../api-types";
 
 interface ActionState {
   title: string;
   confirmLabel: string;
   danger?: boolean;
   description: ReactNode;
-  loadPreview: () => Promise<PreviewResult>;
-  onCommit: (expectedStoreHash: string) => Promise<void>;
+  selectorKeys?: string[];
+  loadPreview: (selectors?: Record<string, string>) => Promise<PreviewResult>;
+  onCommit: (expectedStoreHash: string, selectors?: Record<string, string>) => Promise<void>;
+}
+
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(value), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [delayMs, value]);
+  return debounced;
+}
+
+function SelectorFields({
+  selectorKeys,
+  values,
+  onChange,
+}: {
+  selectorKeys: string[];
+  values: Record<string, string>;
+  onChange: (key: string, value: string) => void;
+}) {
+  if (selectorKeys.length === 0) return <p className="muted small">No registry selector keys for this capability.</p>;
+  return (
+    <div className="selector-fields">
+      {selectorKeys.map((key) => (
+        <div className="field selector-field" key={key}>
+          <label htmlFor={`selector-${key}`}>{key}</label>
+          <input
+            id={`selector-${key}`}
+            type="text"
+            autoComplete="off"
+            value={values[key] ?? "*"}
+            onChange={(event) => onChange(key, event.target.value)}
+            placeholder="*"
+          />
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function IdentitiesSection({ user, onUnlink }: { user: UserSummary; onUnlink: (identityId: string, label: string) => void }) {
@@ -89,7 +128,7 @@ interface GroupRowProps {
   group: CatalogGroup;
   onGrantGroup: (group: CatalogGroup) => void;
   onRevokeGroup: (group: CatalogGroup) => void;
-  onGrantCapability: (capabilityId: string, label: string) => void;
+  onGrantCapability: (capability: CatalogCapability) => void;
   onRevokeCapability: (capabilityId: string, label: string, grantIds: string[]) => void;
 }
 
@@ -109,6 +148,7 @@ function GroupRow({ user, group, onGrantGroup, onRevokeGroup, onGrantCapability,
   const granted = byGroup?.granted ?? false;
   const grantedChild = byGroup?.grantedChildCount ?? 0;
   const syntheticGroup = group.synthetic === true || group.id === "other";
+  const grantableChildren = group.children.filter((child) => child.grantable !== false && child.deprecated !== true);
   // The exact grant entries a group revoke would delete (bundles excluded server-
   // side); no directly-revocable entries means the group is provided only via a
   // bundle, so the group Revoke is disabled rather than silently deleting it.
@@ -140,8 +180,8 @@ function GroupRow({ user, group, onGrantGroup, onRevokeGroup, onGrantCapability,
               className="btn sm"
               type="button"
               onClick={() => onGrantGroup(group)}
-              disabled={group.children.length === 0 || syntheticGroup}
-              title={syntheticGroup ? "Unmapped capabilities must be added to the catalog before they can be granted" : undefined}
+              disabled={grantableChildren.length === 0 || syntheticGroup}
+              title={syntheticGroup ? "Unregistered store capabilities cannot be granted as a group" : undefined}
             >
               Grant group
             </button>
@@ -159,17 +199,22 @@ function GroupRow({ user, group, onGrantGroup, onRevokeGroup, onGrantCapability,
               return (
                 <div className="cap-advanced-row" key={child.id}>
                   <span className="cap-advanced-label">
-                    <span className="mono small">{child.id}</span>
-                    <span className="muted small"> — {child.label}</span>
+                    <span className="cap-title">
+                      <span className="mono small">{child.id}</span>
+                      {child.provenance !== "registry" ? <span className="badge">{child.provenance}</span> : null}
+                      {child.riskTier ? <span className={`badge risk-${child.riskTier}`}>{child.riskTier}</span> : null}
+                      {child.deprecated ? <span className="badge warn">deprecated</span> : null}
+                    </span>
+                    {child.description ? <span className="muted small">{child.description}</span> : <span className="muted small">{child.label}</span>}
                   </span>
                   <span className="cap-advanced-actions">
                     {!childGranted ? (
                       <button
                         className="btn ghost sm"
                         type="button"
-                        onClick={() => onGrantCapability(child.id, child.label)}
-                        disabled={syntheticGroup}
-                        title={syntheticGroup ? "Unmapped capabilities must be added to the catalog before they can be granted" : undefined}
+                        onClick={() => onGrantCapability(child)}
+                        disabled={syntheticGroup || child.grantable === false || child.deprecated === true}
+                        title={child.deprecated ? "Deprecated capabilities cannot be granted" : syntheticGroup ? "Unregistered store capabilities cannot be granted from the catalog" : undefined}
                       >
                         Grant
                       </button>
@@ -195,6 +240,27 @@ function GroupRow({ user, group, onGrantGroup, onRevokeGroup, onGrantCapability,
 export function UserDetail({ user, catalog }: { user: UserSummary; catalog: CapabilityCatalogResponse }) {
   const actions = useCapabilityActions(user);
   const [action, setAction] = useState<ActionState | null>(null);
+  const [selectorDraft, setSelectorDraft] = useState<Record<string, string>>({});
+
+  const selectorKeys = action?.selectorKeys ?? [];
+  const normalizedSelectors = selectorKeys.length > 0
+    ? Object.fromEntries(selectorKeys.map((key) => [key, selectorDraft[key]?.trim() || "*"]))
+    : undefined;
+  const previewKey = normalizedSelectors ? JSON.stringify(normalizedSelectors) : "";
+  const debouncedPreviewKey = useDebouncedValue(previewKey, 400);
+  const debouncedSelectors = useMemo(
+    () => (debouncedPreviewKey ? JSON.parse(debouncedPreviewKey) as Record<string, string> : undefined),
+    [debouncedPreviewKey],
+  );
+  const previewRequestPending = previewKey !== debouncedPreviewKey;
+  const loadDialogPreview = useCallback(async () => {
+    if (!action) throw new Error("No action selected.");
+    return action.loadPreview(debouncedSelectors);
+  }, [action, debouncedSelectors]);
+  const commitDialogAction = useCallback(async (hash: string) => {
+    if (!action) throw new Error("No action selected.");
+    return action.onCommit(hash, debouncedSelectors);
+  }, [action, debouncedSelectors]);
 
   const onGrantGroup = (group: CatalogGroup) => {
     setAction({
@@ -236,17 +302,20 @@ export function UserDetail({ user, catalog }: { user: UserSummary; catalog: Capa
     });
   };
 
-  const onGrantCapability = (capabilityId: string, label: string) => {
+  const onGrantCapability = (capability: CatalogCapability) => {
+    const initialSelectors = Object.fromEntries(capability.selectorKeys.map((key) => [key, "*"]));
+    setSelectorDraft(initialSelectors);
     setAction({
-      title: `Grant ${label}?`,
+      title: `Grant ${capability.id}?`,
       confirmLabel: "Grant capability",
       description: (
         <>
-          Grant <span className="mono">{capabilityId}</span> to <strong>{user.displayName}</strong>.
+          Grant <span className="mono">{capability.id}</span> to <strong>{user.displayName}</strong>.
         </>
       ),
-      loadPreview: () => actions.previewGrant(capabilityId, false),
-      onCommit: (hash) => actions.commitGrant(capabilityId, false, hash),
+      selectorKeys: capability.selectorKeys,
+      loadPreview: (selectors) => actions.previewGrant(capability.id, false, selectors),
+      onCommit: (hash, selectors) => actions.commitGrant(capability.id, false, hash, selectors),
     });
   };
 
@@ -313,10 +382,26 @@ export function UserDetail({ user, catalog }: { user: UserSummary; catalog: Capa
           title={action.title}
           confirmLabel={action.confirmLabel}
           danger={action.danger}
-          description={action.description}
-          loadPreview={action.loadPreview}
-          onCommit={action.onCommit}
-          onClose={() => setAction(null)}
+          description={
+            <>
+              {action.description}
+              {selectorKeys.length > 0 ? (
+                <SelectorFields
+                  selectorKeys={selectorKeys}
+                  values={selectorDraft}
+                  onChange={(key, value) => setSelectorDraft((current) => ({ ...current, [key]: value }))}
+                />
+              ) : null}
+            </>
+          }
+          previewKey={debouncedPreviewKey}
+          requestPending={previewRequestPending}
+          loadPreview={loadDialogPreview}
+          onCommit={commitDialogAction}
+          onClose={() => {
+            setAction(null);
+            setSelectorDraft({});
+          }}
         />
       ) : null}
     </div>

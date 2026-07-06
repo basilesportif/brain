@@ -28,6 +28,11 @@ function StatusCard({ component, extraAction }: { component: StatusComponent; ex
         <h2>{CARD_TITLES[component.id] ?? component.id}</h2>
       </header>
       <p className="status-card-message">{component.message}</p>
+      {component.registry ? (
+        <p className="muted small registry-line">
+          Registry: {component.registry.available ? `v${component.registry.registryVersion} · ${component.registry.capabilityCount} capabilities · reachable` : `unreachable · ${component.registry.error?.code ?? "unknown"}`}
+        </p>
+      ) : null}
       <footer className="status-card-foot">
         <span className="muted small">Checked {relativeTime(component.lastChecked)}</span>
         <span className="status-card-actions">

@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fakeIpcToken, startFakeCodexChatIpc, type FakeCodexChatIpcServer } from "./codex-chat-ipc.test-helpers.js";
-import { CodexChatIpcError, sendSetConfig } from "./codex-chat-ipc.js";
+import { CodexChatIpcError, getCapabilityRegistry, sendSetConfig } from "./codex-chat-ipc.js";
 
 test("sendSetConfig sends one authenticated line and returns restart metadata", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-ipc-client-success-"));
@@ -14,6 +14,45 @@ test("sendSetConfig sends one authenticated line and returns restart metadata", 
     const result = await sendSetConfig(ipc.socketPath, { CODEX_CHAT_BASE_URL: "https://brain.example.com" }, { timeoutMs: 500 });
     assert.deepEqual(result, { via: "ipc", ok: true, restartRequired: true });
     assert.deepEqual(ipc.requests, [{ type: "set_config", keys: ["CODEX_CHAT_BASE_URL"], brainSubjectIdPresent: false }]);
+  } finally {
+    if (ipc) await ipc.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("getCapabilityRegistry sends one tokenless metadata line", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-ipc-registry-success-"));
+  let ipc: FakeCodexChatIpcServer | undefined;
+  try {
+    ipc = await startFakeCodexChatIpc(root, {
+      expectedToken: fakeIpcToken("server"),
+      capabilityRegistry: {
+        registryVersion: 1,
+        capabilities: [
+          {
+            id: "output.text.send",
+            family: "output",
+            description: "Send text.",
+            selectorKeys: ["surfaceKind", "channelId"],
+            riskTier: "medium",
+          },
+        ],
+      },
+    });
+    const result = await getCapabilityRegistry(ipc.socketPath, { timeoutMs: 500 });
+    assert.deepEqual(result, {
+      registryVersion: 1,
+      capabilities: [
+        {
+          id: "output.text.send",
+          family: "output",
+          description: "Send text.",
+          selectorKeys: ["surfaceKind", "channelId"],
+          riskTier: "medium",
+        },
+      ],
+    });
+    assert.deepEqual(ipc.requests, [{ type: "get_capability_registry", keys: [], brainSubjectIdPresent: false }]);
   } finally {
     if (ipc) await ipc.close();
     await rm(root, { recursive: true, force: true });

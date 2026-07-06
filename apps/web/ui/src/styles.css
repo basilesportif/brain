@@ -293,6 +293,22 @@ select:focus {
   color: #a7f3d0;
   background: #0d2a1e;
 }
+.badge.warn,
+.badge.risk-high {
+  border-color: #8a6518;
+  color: #fde68a;
+  background: #2b210d;
+}
+.badge.risk-medium {
+  border-color: #2e5f85;
+  color: #bfdbfe;
+  background: #0b2238;
+}
+.badge.risk-low {
+  border-color: #256c48;
+  color: #a7f3d0;
+  background: #0d2a1e;
+}
 
 /* --- cards / alerts --------------------------------------------------------*/
 
@@ -809,6 +825,17 @@ select:focus {
   align-items: center;
   justify-content: space-between;
 }
+.cap-advanced-label {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.cap-title {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
 .cap-advanced-actions {
   display: inline-flex;
   gap: 6px;
@@ -851,6 +878,24 @@ select:focus {
 .impact-caveat {
   border-left: 2px solid var(--warn);
   padding-left: 8px;
+}
+.dialog-description {
+  display: grid;
+  gap: 10px;
+}
+.selector-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  padding: 10px;
+}
+.selector-field input {
+  min-width: 0;
+}
+.registry-line {
+  margin: 0;
 }
 
 /* --- audit -----------------------------------------------------------------*/

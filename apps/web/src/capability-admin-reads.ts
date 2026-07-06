@@ -3,7 +3,7 @@
 // Pure functions over already-loaded data so admin-service.ts stays thin and
 // these are directly unit-testable.
 
-import { CAPABILITY_GROUP_DEFINITIONS, mappedCatalogCapabilityIds, storeCapabilityVocabulary } from "./capability-catalog.js";
+import { CAPABILITY_GROUP_DEFINITIONS, mappedCatalogCapabilityIds, storeCapabilityVocabulary, type CapabilityCatalogRegistrySource, type CatalogGroupDefinition } from "./capability-catalog.js";
 import { grantAllowsCapability, grantInForce, grantedCapabilityIds, subjectExistsAndActive, subjectIdsForPerson, type CapabilityStore, type StoreGrant, type StoreSubject } from "./capability-store.js";
 import { SECRETISH_RE } from "./env-schema.js";
 import { redactSecretText } from "./redaction.js";
@@ -106,6 +106,9 @@ export interface SystemSubjectSummary {
 export interface UsersResponse {
   schemaVersion: 1;
   storeAvailable: boolean;
+  registryAvailable: boolean;
+  registryVersion: number | null;
+  registryCapabilityCount: number;
   people: UserSummary[];
   systemSubjects: SystemSubjectSummary[];
   counts: { people: number; systemSubjects: number };
@@ -152,9 +155,14 @@ function uniqueEntries(entries: UserGrantEntry[]): UserGrantEntry[] {
   return out;
 }
 
-export function buildUsersResponse(store: CapabilityStore | undefined, now?: Date): UsersResponse {
+export function buildUsersResponse(
+  store: CapabilityStore | undefined,
+  catalogGroups: CatalogGroupDefinition[] = CAPABILITY_GROUP_DEFINITIONS,
+  now?: Date,
+  registry: CapabilityCatalogRegistrySource = { available: false, registryVersion: null, capabilities: [] },
+): UsersResponse {
   if (!store) {
-    return { schemaVersion: 1, storeAvailable: false, people: [], systemSubjects: [], counts: { people: 0, systemSubjects: 0 } };
+    return { schemaVersion: 1, storeAvailable: false, registryAvailable: registry.available, registryVersion: registry.registryVersion, registryCapabilityCount: registry.capabilities.length, people: [], systemSubjects: [], counts: { people: 0, systemSubjects: 0 } };
   }
 
   const identitiesByPerson = new Map<string, UserIdentitySummary[]>();
@@ -172,7 +180,7 @@ export function buildUsersResponse(store: CapabilityStore | undefined, now?: Dat
     identitiesByPerson.set(identity.personId, list);
   }
 
-  const mapped = mappedCatalogCapabilityIds();
+  const mapped = mappedCatalogCapabilityIds(catalogGroups);
   const unmappedVocabulary = [...storeCapabilityVocabulary(store)].filter((id) => !mapped.has(id));
   const people: UserSummary[] = (store.people ?? []).map((person) => {
     const subjectIds = subjectIdsForPerson(store, person);
@@ -182,7 +190,7 @@ export function buildUsersResponse(store: CapabilityStore | undefined, now?: Dat
     const activeSubjectIds = subjectIds.filter((id) => subjectExistsAndActive(store, id));
     const grants = grantsForSubjects(store, activeSubjectIds);
     const inForceGrants = grants.filter((grant) => grantInForce(grant, now));
-    const byGroup: UserGroupSummary[] = CAPABILITY_GROUP_DEFINITIONS.map((definition) => {
+    const byGroup: UserGroupSummary[] = catalogGroups.map((definition) => {
       const childIds = definition.capabilities.map((child) => child.id);
       const children: UserChildGrantSummary[] = definition.capabilities.map((child) => {
         const entries = inForceGrants.filter((grant) => grantAllowsCapability(store, grant, child.id)).map(toGrantEntry);
@@ -281,6 +289,9 @@ export function buildUsersResponse(store: CapabilityStore | undefined, now?: Dat
   return {
     schemaVersion: 1,
     storeAvailable: true,
+    registryAvailable: registry.available,
+    registryVersion: registry.registryVersion,
+    registryCapabilityCount: registry.capabilities.length,
     people,
     systemSubjects,
     counts: { people: people.length, systemSubjects: systemSubjects.length },

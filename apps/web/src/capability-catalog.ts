@@ -18,10 +18,17 @@
 // covered.
 
 import type { CapabilityStore } from "./capability-store.js";
+import type { CodexChatCapabilityRegistryEntry } from "./codex-chat-ipc.js";
 
 export interface CatalogCapabilityDefinition {
   id: string;
   label: string;
+  description?: string;
+  selectorKeys?: string[];
+  riskTier?: "low" | "medium" | "high";
+  deprecated?: boolean;
+  grantable?: boolean;
+  provenance?: "registry" | "curated" | "store";
 }
 
 export interface CatalogGroupDefinition {
@@ -29,6 +36,7 @@ export interface CatalogGroupDefinition {
   label: string;
   description: string;
   status: "active" | "placeholder";
+  synthetic?: boolean;
   capabilities: CatalogCapabilityDefinition[];
 }
 
@@ -36,6 +44,13 @@ export interface CatalogCapability {
   id: string;
   label: string;
   present: boolean;
+  description?: string;
+  selectorKeys: string[];
+  riskTier?: "low" | "medium" | "high";
+  deprecated?: boolean;
+  grantable: boolean;
+  registryKnown: boolean;
+  provenance: "registry" | "curated" | "store";
 }
 
 export interface CatalogGroup {
@@ -52,6 +67,9 @@ export interface CatalogGroup {
 export interface CapabilityCatalogResponse {
   schemaVersion: 1;
   storeAvailable: boolean;
+  registryAvailable: boolean;
+  registryVersion: number | null;
+  registryCapabilityCount: number;
   groups: CatalogGroup[];
   counts: {
     groups: number;
@@ -60,6 +78,12 @@ export interface CapabilityCatalogResponse {
     placeholderGroups: number;
     uncategorized: number;
   };
+}
+
+export interface CapabilityCatalogRegistrySource {
+  available: boolean;
+  registryVersion: number | null;
+  capabilities: CodexChatCapabilityRegistryEntry[];
 }
 
 function cap(id: string, label: string): CatalogCapabilityDefinition {
@@ -253,10 +277,151 @@ export const CAPABILITY_GROUP_DEFAULT_SELECTORS: Record<string, Record<string, s
 
 const DEFAULT_SELECTOR_FALLBACK: Record<string, string> = { scope: "*" };
 
+function labelFromId(id: string): string {
+  return id
+    .replace(/[_-]/g, " ")
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join(" ") || id;
+}
+
+function fallbackFamilyForCapabilityId(capabilityId: string): string {
+  const legacyGroup = groupIdForCapability(capabilityId, CAPABILITY_GROUP_DEFINITIONS);
+  if (legacyGroup) return legacyGroup;
+  return capabilityId.split(".")[0] || "store";
+}
+
+function selectorKeysForCuratedGroup(groupId: string): string[] {
+  return Object.keys(CAPABILITY_GROUP_DEFAULT_SELECTORS[groupId] ?? DEFAULT_SELECTOR_FALLBACK);
+}
+
+export function curatedSelectorKeysForCapability(capabilityId: string): string[] {
+  const groupId = groupIdForCapability(capabilityId, CAPABILITY_GROUP_DEFINITIONS);
+  return groupId ? selectorKeysForCuratedGroup(groupId) : [];
+}
+
+function curatedDefinitions(): CatalogGroupDefinition[] {
+  return CAPABILITY_GROUP_DEFINITIONS.map((definition) => {
+    const selectorKeys = selectorKeysForCuratedGroup(definition.id);
+    return {
+      ...definition,
+      capabilities: definition.capabilities.map((child) => ({
+        ...child,
+        selectorKeys,
+        grantable: true,
+        provenance: "curated" as const,
+      })),
+    };
+  });
+}
+
+function registryDefinitions(registry: CapabilityCatalogRegistrySource): CatalogGroupDefinition[] {
+  const groups = new Map<string, CatalogGroupDefinition>();
+  for (const entry of registry.capabilities) {
+    let group = groups.get(entry.family);
+    if (!group) {
+      const label = labelFromId(entry.family);
+      group = {
+        id: entry.family,
+        label,
+        description: `${label} capabilities from the codex-chat registry.`,
+        status: "active",
+        capabilities: [],
+      };
+      groups.set(entry.family, group);
+    }
+    group.capabilities.push({
+      id: entry.id,
+      label: entry.id,
+      description: entry.description,
+      selectorKeys: entry.selectorKeys,
+      riskTier: entry.riskTier,
+      deprecated: entry.deprecated,
+      grantable: entry.deprecated !== true,
+      provenance: "registry",
+    });
+  }
+  return [...groups.values()];
+}
+
+function mergeGroupDefinition(groups: CatalogGroupDefinition[], incoming: CatalogGroupDefinition): void {
+  const existing = groups.find((group) => group.id === incoming.id);
+  if (!existing) {
+    groups.push({ ...incoming, capabilities: incoming.capabilities.map((child) => ({ ...child })) });
+    return;
+  }
+  const existingIds = new Set(existing.capabilities.map((child) => child.id));
+  for (const child of incoming.capabilities) {
+    if (existingIds.has(child.id)) continue;
+    existing.capabilities.push({ ...child });
+    existingIds.add(child.id);
+  }
+}
+
+function appendStoreOnlyCapability(groups: CatalogGroupDefinition[], capabilityId: string, selectorKeys: string[]): void {
+  const family = fallbackFamilyForCapabilityId(capabilityId);
+  const curatedGroup = CAPABILITY_GROUP_DEFINITIONS.find((definition) => definition.id === family);
+  const groupId = curatedGroup ? family : "other";
+  let group = groups.find((candidate) => candidate.id === groupId);
+  if (!group) {
+    group = curatedGroup
+      ? { ...curatedGroup, capabilities: [] }
+      : {
+          id: "other",
+          label: "Other",
+          description: "Capability ids granted in the store but absent from both the codex-chat registry and Brain curated vocabulary.",
+          status: "active",
+          synthetic: true,
+          capabilities: [],
+        };
+    groups.push(group);
+  }
+  if (group.capabilities.some((child) => child.id === capabilityId)) return;
+  group.capabilities.push({
+    id: capabilityId,
+    label: capabilityId,
+    selectorKeys,
+    grantable: true,
+    provenance: "store",
+  });
+}
+
+function storeSelectorKeys(store: CapabilityStore | undefined, capabilityId: string): string[] {
+  const keys = new Set<string>();
+  for (const grant of store?.grants ?? []) {
+    if (grant.capabilityId !== capabilityId) continue;
+    for (const key of Object.keys((grant.resource?.selectors ?? {}) as Record<string, unknown>)) keys.add(key);
+  }
+  return [...keys].sort();
+}
+
+export function catalogDefinitionsForSource(
+  store: CapabilityStore | undefined,
+  registry: CapabilityCatalogRegistrySource,
+): CatalogGroupDefinition[] {
+  const vocabulary = storeCapabilityVocabulary(store);
+  const definitions: CatalogGroupDefinition[] = [];
+  const registryIds = new Set(registry.capabilities.map((entry) => entry.id));
+  const curatedIds = mappedCatalogCapabilityIds(CAPABILITY_GROUP_DEFINITIONS);
+
+  if (registry.available) {
+    for (const definition of registryDefinitions(registry)) mergeGroupDefinition(definitions, definition);
+  }
+  for (const definition of curatedDefinitions()) mergeGroupDefinition(definitions, definition);
+
+  for (const id of [...vocabulary].sort()) {
+    if (registryIds.has(id) || curatedIds.has(id)) continue;
+    appendStoreOnlyCapability(definitions, id, storeSelectorKeys(store, id));
+  }
+
+  return definitions;
+}
+
 // The catalog group id a capability id belongs to (its own id when it is itself
 // a group id, otherwise the group whose children include it).
-export function groupIdForCapability(capabilityId: string): string | undefined {
-  for (const definition of CAPABILITY_GROUP_DEFINITIONS) {
+export function groupIdForCapability(capabilityId: string, definitions: CatalogGroupDefinition[] = CAPABILITY_GROUP_DEFINITIONS): string | undefined {
+  for (const definition of definitions) {
     if (definition.id === capabilityId) return definition.id;
     if (definition.capabilities.some((child) => child.id === capabilityId)) return definition.id;
   }
@@ -265,7 +430,8 @@ export function groupIdForCapability(capabilityId: string): string | undefined {
 
 // The default broad selector template for a capability id (fresh object per call
 // so callers can store it without sharing references).
-export function defaultSelectorsForCapability(capabilityId: string): Record<string, string> {
+export function defaultSelectorsForCapability(capabilityId: string, registryEntry?: Pick<CodexChatCapabilityRegistryEntry, "selectorKeys">): Record<string, string> {
+  if (registryEntry) return Object.fromEntries(registryEntry.selectorKeys.map((key) => [key, "*"]));
   const groupId = groupIdForCapability(capabilityId);
   const template = groupId ? CAPABILITY_GROUP_DEFAULT_SELECTORS[groupId] : undefined;
   return { ...(template ?? DEFAULT_SELECTOR_FALLBACK) };
@@ -275,9 +441,9 @@ export function defaultSelectorsForCapability(capabilityId: string): Record<stri
 // grants and bundle groupIds reference these, e.g. "projects") plus every child
 // capability id. Shared by the catalog and the per-user summary so both agree on
 // which store ids fall into the explicit "other" bucket.
-export function mappedCatalogCapabilityIds(): Set<string> {
+export function mappedCatalogCapabilityIds(definitions: CatalogGroupDefinition[] = CAPABILITY_GROUP_DEFINITIONS): Set<string> {
   const mapped = new Set<string>();
-  for (const definition of CAPABILITY_GROUP_DEFINITIONS) {
+  for (const definition of definitions) {
     mapped.add(definition.id);
     for (const child of definition.capabilities) mapped.add(child.id);
   }
@@ -298,54 +464,56 @@ export function storeCapabilityVocabulary(store: CapabilityStore | undefined): S
   return ids;
 }
 
-export function buildCapabilityCatalog(store: CapabilityStore | undefined): CapabilityCatalogResponse {
+export function buildCapabilityCatalog(
+  store: CapabilityStore | undefined,
+  registry: CapabilityCatalogRegistrySource = { available: false, registryVersion: null, capabilities: [] },
+): CapabilityCatalogResponse {
   const vocabulary = storeCapabilityVocabulary(store);
-  // A store id is "categorized" when it names a catalog group (group-level
-  // grants and bundle groupIds reference group ids like "projects") or a child
-  // capability id.
-  const mapped = mappedCatalogCapabilityIds();
-  const groups: CatalogGroup[] = CAPABILITY_GROUP_DEFINITIONS.map((definition) => {
+  const definitions = catalogDefinitionsForSource(store, registry);
+  const registryIds = new Set(registry.capabilities.map((entry) => entry.id));
+  const groups: CatalogGroup[] = definitions.map((definition) => {
     const children = definition.capabilities.map((child) => {
-      return { id: child.id, label: child.label, present: vocabulary.has(child.id) };
+      const registryKnown = registryIds.has(child.id);
+      return {
+        id: child.id,
+        label: child.label,
+        present: vocabulary.has(child.id),
+        selectorKeys: child.selectorKeys ?? [],
+        grantable: child.grantable ?? !child.deprecated,
+        registryKnown,
+        provenance: child.provenance ?? (registryKnown ? "registry" : "curated"),
+        ...(child.description ? { description: child.description } : {}),
+        ...(child.riskTier ? { riskTier: child.riskTier } : {}),
+        ...(child.deprecated === true ? { deprecated: true } : {}),
+      };
     });
     return {
       id: definition.id,
       label: definition.label,
       description: definition.description,
       status: definition.status,
+      ...(definition.synthetic === true ? { synthetic: true } : {}),
       childCount: children.length,
       presentChildCount: children.filter((child) => child.present).length,
       children,
     };
   });
 
-  // Anything the store grants that the catalog definition does not name is
-  // surfaced explicitly rather than hidden — the catalog must stay honest as the
-  // enforced vocabulary evolves.
-  const uncategorized = [...vocabulary].filter((id) => !mapped.has(id)).sort();
-  if (uncategorized.length > 0) {
-    groups.push({
-      id: "other",
-      label: "Other",
-      description: "Capability ids present in the store but not yet mapped to a catalog group.",
-      status: "active",
-      synthetic: true,
-      childCount: uncategorized.length,
-      presentChildCount: uncategorized.length,
-      children: uncategorized.map((id) => ({ id, label: id, present: true })),
-    });
-  }
+  const uncategorized = groups.find((group) => group.id === "other")?.childCount ?? 0;
 
   return {
     schemaVersion: 1,
     storeAvailable: Boolean(store),
+    registryAvailable: registry.available,
+    registryVersion: registry.registryVersion,
+    registryCapabilityCount: registry.capabilities.length,
     groups,
     counts: {
       groups: groups.length,
       capabilities: groups.reduce((sum, group) => sum + group.childCount, 0),
       activeGroups: groups.filter((group) => group.status === "active").length,
       placeholderGroups: groups.filter((group) => group.status === "placeholder").length,
-      uncategorized: uncategorized.length,
+      uncategorized,
     },
   };
 }
