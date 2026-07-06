@@ -201,6 +201,20 @@ export function createBrainAdminServer(config: BrainAdminServiceConfig = loadBra
   });
 }
 
+export async function initializeBrainAdminCapabilityStore(config: BrainAdminServiceConfig): Promise<void> {
+  await capabilityAdminSummary({
+    storePath: config.capabilityStorePath,
+    auditLogPath: config.capabilityAuditLogPath,
+    adminEmail: firstAllowedAdminEmail(config.clerkAllowedEmails),
+    codexChatPath: config.codexChatPath,
+    workspacePath: config.workspacePath,
+  });
+}
+
+function firstAllowedAdminEmail(value: string): string {
+  return parseAdminAllowedEmails(value).values().next().value ?? "brain-admin-startup";
+}
+
 async function handleRequest(request: IncomingMessage, response: ServerResponse, config: BrainAdminServiceConfig, deps: BrainAdminServiceDeps): Promise<void> {
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? config.host}`);
   if (!config.enabled) return sendJson(response, 503, { error: "brain_admin_disabled" });

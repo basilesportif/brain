@@ -39,6 +39,7 @@ data/*
 # private paths, hosts, or workspace metadata. Keep public repo guidance in
 # AGENTS.md/CLAUDE.md and docs/ instead.
 .claude/repo-registry/
+.claude/worktrees/
 
 # OS/editor noise
 .DS_Store
