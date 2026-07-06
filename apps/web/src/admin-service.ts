@@ -8,15 +8,14 @@ import process from "node:process";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { authorizeBrainAdminRequest, isBrainAdminAuthConfigured, parseAdminAllowedEmails, type ClerkUserLookup, type VerifyClerkToken } from "./admin-auth.js";
-import { capabilityAdminSummary } from "./capabilities.js";
 import { actorContextFromExternalId, evaluateAuthorization, parseCapabilityStore, type CapabilityStore } from "./capability-store.js";
 import { buildCapabilityCatalog } from "./capability-catalog.js";
 import { buildAuditFeed, buildUsersResponse, type AuditOutcome, type AuditType } from "./capability-admin-reads.js";
-import { commitMutation, previewMutation, CapabilityWriteError, type MutationResult, type MutationSpec } from "./capability-store-write.js";
+import { commitMutation, createCapabilityStoreIfMissing, previewMutation, migrateCapabilityStore, CapabilityWriteError, type MigrationResult, type MutationResult, type MutationSpec } from "./capability-store-write.js";
 import { DEFAULT_CODEX_CHAT_IPC_TIMEOUT_MS, isCodexChatIpcError, sendSetConfig, type CodexChatIpcError, type CodexChatSetConfigResult } from "./codex-chat-ipc.js";
 import { atomicWriteFile, envFileMetadata, expandHomePath, parseEnvKeys, readEnvKeyPresence, resolveEnvFilePath, writeMergedEnvFile } from "./env-file.js";
 import { buildEnvSchema, SECRETISH_RE, validateEnvUpdates, type EnvFieldError } from "./env-schema.js";
-import { renderBrainAdminDeniedPage, renderBrainAdminPage, renderBrainAdminSignInPage } from "./admin-page.js";
+import { DEFAULT_ADMIN_ROUTE_PATH, ADMIN_V2_REDIRECT_ROUTE_PATH, isPathAtMount, normalizeAdminRoutePath, redirectPathFromAdminV2 } from "./admin-routes.js";
 import { redactSecretText } from "./redaction.js";
 
 const SLACK_EVENTS_BASE_URL = "https://brain.decisive-outcomes.com";
@@ -115,14 +114,13 @@ export interface BrainAdminServiceConfig {
   slackEventsBaseUrl: string;
   slackEventsPath: string;
   slackAppId?: string;
-  slackCanaryPath: string;
   slackSetupStatePath: string;
   capabilityStorePath: string;
   capabilityAuditLogPath: string;
   capabilityDecisionsDir: string;
-  // Built React/Vite SPA assets served under `/admin-v2` (plan §6.6, §8 step 4).
+  // Built React/Vite SPA assets served under routePath (default `/admin`).
   // Defaults to the sibling `ui/dist` produced by `pnpm --filter @brain/web-ui build`.
-  adminV2Dir: string;
+  adminUiDir: string;
 }
 
 export interface BrainAdminServiceDeps {
@@ -152,7 +150,7 @@ export function loadBrainAdminServiceConfig(env: NodeJS.ProcessEnv = process.env
     enabled: boolEnv(env.BRAIN_ADMIN_ENABLED, true),
     host: env.BRAIN_ADMIN_HOST || "127.0.0.1",
     port: Number.parseInt(env.BRAIN_ADMIN_PORT || "49347", 10),
-    routePath: normalizeRoutePath(env.BRAIN_ADMIN_ROUTE_PATH || "/admin"),
+    routePath: normalizeAdminRoutePath(env.BRAIN_ADMIN_ROUTE_PATH, DEFAULT_ADMIN_ROUTE_PATH),
     publicBaseUrl: (env.BRAIN_ADMIN_PUBLIC_BASE_URL || "").trim(),
     clerkPublishableKey: (env.CLERK_PUBLISHABLE_KEY || env.BRAIN_CLERK_PUBLISHABLE_KEY || "").trim(),
     clerkSecretKey: (env.CLERK_SECRET_KEY || env.BRAIN_CLERK_SECRET_KEY || "").trim(),
@@ -178,20 +176,19 @@ export function loadBrainAdminServiceConfig(env: NodeJS.ProcessEnv = process.env
     allowedEnvKeys,
     operationTimeoutMs: Number.parseInt(env.BRAIN_ADMIN_OPERATION_TIMEOUT_MS || "120000", 10),
     slackEventsBaseUrl: (env.BRAIN_SLACK_EVENTS_BASE_URL || SLACK_EVENTS_BASE_URL).trim(),
-    slackEventsPath: normalizeRoutePath(env.BRAIN_SLACK_EVENTS_PATH || SLACK_EVENTS_PATH),
+    slackEventsPath: normalizeRoutePath(env.BRAIN_SLACK_EVENTS_PATH, SLACK_EVENTS_PATH),
     slackAppId: normalizeSlackAppId(env.BRAIN_SLACK_APP_ID || env.SLACK_APP_ID || env.CODEX_CHAT_SLACK_APP_ID || ""),
-    slackCanaryPath: env.BRAIN_SLACK_CANARY_PATH || path.join(path.dirname(auditLogPath), "slack-canary.json"),
     slackSetupStatePath: env.BRAIN_SLACK_SETUP_STATE_PATH || path.join(path.dirname(auditLogPath), "slack-setup.json"),
     capabilityStorePath,
     capabilityAuditLogPath,
     capabilityDecisionsDir: env.BRAIN_CAPABILITY_DECISIONS_DIR || "capability_decisions",
-    adminV2Dir: env.BRAIN_ADMIN_V2_DIR || defaultAdminV2Dir(),
+    adminUiDir: env.BRAIN_ADMIN_UI_DIR || env.BRAIN_ADMIN_V2_DIR || defaultAdminUiDir(),
   };
 }
 
 // The built SPA lives next to the compiled service: this module compiles to
 // `apps/web/dist/admin-service.js`, so the UI build output is `../ui/dist`.
-function defaultAdminV2Dir(): string {
+function defaultAdminUiDir(): string {
   return path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "ui", "dist");
 }
 
@@ -209,42 +206,33 @@ export function createBrainAdminServer(config: BrainAdminServiceConfig = loadBra
 }
 
 export async function initializeBrainAdminCapabilityStore(config: BrainAdminServiceConfig): Promise<void> {
-  await capabilityAdminSummary({
-    storePath: config.capabilityStorePath,
-    auditLogPath: config.capabilityAuditLogPath,
-    adminEmail: firstAllowedAdminEmail(config.clerkAllowedEmails),
-    codexChatPath: config.codexChatPath,
-    workspacePath: config.workspacePath,
-  });
-}
+  const storePath = resolveEnvFilePath(config.capabilityStorePath);
+  try {
+    const firstAdminEmail = firstAllowedAdminEmail(config);
+    const seed = await createCapabilityStoreIfMissing({ storePath, adminEmail: firstAdminEmail });
+    if (seed.created) {
+      clearCapabilityStatusCache();
+      if (!firstAdminEmail) {
+        console.warn("[brain-admin] capability store created without a seeded admin; configure CLERK_ALLOWED_EMAILS and restart to bootstrap the first admin", {
+          action: "capability.store.seeded_empty",
+          adminSeeded: false,
+        });
+      }
+    }
 
-function firstAllowedAdminEmail(value: string): string {
-  return parseAdminAllowedEmails(value).values().next().value ?? "brain-admin-startup";
+    const migration = await migrateCapabilityStore({ storePath, allowZeroAdminsBefore: true });
+    if (migration.changed) {
+      clearCapabilityStatusCache();
+      await appendStartupCapabilityAudit(config, migration);
+    }
+  } catch (error) {
+    console.error("[brain-admin] capability store startup initialization failed; admin service will continue and capability endpoints will fail closed", startupErrorForLog(error));
+  }
 }
 
 async function handleRequest(request: IncomingMessage, response: ServerResponse, config: BrainAdminServiceConfig, deps: BrainAdminServiceDeps): Promise<void> {
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? config.host}`);
   if (!config.enabled) return sendJson(response, 503, { error: "brain_admin_disabled" });
-
-  if (request.method === "GET" && isAdminRoutePath(url.pathname, config.routePath)) {
-    if (url.pathname !== config.routePath) return redirect(response, 308, config.routePath);
-    const auth = await authorizeBrainAdminRequest(request, config, deps);
-    if (!auth.ok) return handlePageAuthFailure(request, response, config, auth);
-    return sendHtml(response, 200, renderBrainAdminPage(config, auth.admin.email));
-  }
-
-  if (request.method === "GET" && url.pathname === adminSignInPath(config.routePath)) {
-    const redirectUrl = safeAdminReturnUrl(url.searchParams.get("redirect_url"), adminPublicUrlFromRequest(request, config));
-    return sendHtml(response, 200, renderBrainAdminSignInPage(config, redirectUrl));
-  }
-
-  // New React/Vite console (plan §8 step 4). The SPA shell is served
-  // unauthenticated so Clerk can boot in the browser; every data API under
-  // `/api/admin/brain/*` stays fail-closed behind the server allowlist, so
-  // nothing is granted client-side. The legacy `/admin` console is untouched.
-  if (request.method === "GET" && (url.pathname === "/admin-v2" || url.pathname.startsWith("/admin-v2/"))) {
-    return serveAdminV2(response, url, config);
-  }
 
   if (url.pathname.startsWith("/api/admin/brain/")) {
     const auth = await authorizeBrainAdminRequest(request, config, deps);
@@ -252,7 +240,22 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     return handleAdminApi(request, response, url, config, deps, auth.admin.email);
   }
 
-  if (request.method === "GET" && url.pathname === "/healthz") {
+  if (request.method === "HEAD") suppressHeadResponseBody(response);
+
+  if (isPathAtMount(url.pathname, ADMIN_V2_REDIRECT_ROUTE_PATH)) {
+    return redirect(response, 308, redirectPathFromAdminV2(url.pathname, url.search, config.routePath));
+  }
+
+  // React/Vite console (plan §8 step 8). The SPA shell is served
+  // unauthenticated so Clerk can boot in the browser; every data API under
+  // `/api/admin/brain/*` stays fail-closed behind the server allowlist, so
+  // nothing is granted client-side. `/admin/auth/sign-in` is intentionally just
+  // another SPA route; Clerk renders sign-in/denied states client-side.
+  if (isReadMethod(request.method) && isPathAtMount(url.pathname, config.routePath)) {
+    return serveAdminSpa(response, url, config);
+  }
+
+  if (isReadMethod(request.method) && url.pathname === "/healthz") {
     return sendJson(response, 200, { ok: true, service: "brain-admin", authConfigured: isBrainAdminAuthConfigured(config) });
   }
 
@@ -260,80 +263,70 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
 }
 
 async function handleAdminApi(request: IncomingMessage, response: ServerResponse, url: URL, config: BrainAdminServiceConfig, deps: BrainAdminServiceDeps, adminEmail: string): Promise<void> {
-  if (request.method === "GET" && url.pathname === "/api/admin/brain/me") {
+  if (isReadMethod(request.method) && url.pathname === "/api/admin/brain/me") {
     return sendJson(response, 200, { email: adminEmail });
   }
-  if (request.method === "GET" && url.pathname === "/api/admin/brain/health") {
+  if (isReadMethod(request.method) && url.pathname === "/api/admin/brain/health") {
     return sendJson(response, 200, await serviceHealth(config));
   }
-  if (request.method === "GET" && url.pathname === "/api/admin/brain/status") {
+  if (isReadMethod(request.method) && url.pathname === "/api/admin/brain/status") {
     return sendJson(response, 200, await brainStatus(config));
   }
-  if (request.method === "GET" && url.pathname === "/api/admin/brain/env/schema") {
+  if (isReadMethod(request.method) && url.pathname === "/api/admin/brain/env/schema") {
     return sendJson(response, 200, await envSchemaResponse(config));
   }
-  if (request.method === "GET" && url.pathname === "/api/admin/brain/slack/setup") {
+  if (isReadMethod(request.method) && url.pathname === "/api/admin/brain/slack/setup") {
     return sendJson(response, 200, await slackSetupSummary(config));
   }
   if (request.method === "POST" && url.pathname === "/api/admin/brain/slack/setup") {
     const payload = await readJsonBody(request);
     return handleSlackSetupWrite(response, config, adminEmail, payload);
   }
-  if (request.method === "GET" && url.pathname === "/api/admin/brain/settings") {
+  if (isReadMethod(request.method) && url.pathname === "/api/admin/brain/settings") {
     return sendJson(response, 200, await serviceSettings(config));
   }
-  if (request.method === "GET" && url.pathname === "/api/admin/brain/codex-chat/env") {
+  if (isReadMethod(request.method) && url.pathname === "/api/admin/brain/codex-chat/env") {
     return sendJson(response, 200, await codexChatEnvSummary(config));
   }
   if (request.method === "POST" && url.pathname === "/api/admin/brain/codex-chat/env") {
     const payload = await readJsonBody(request);
     return handleEnvWrite(response, config, adminEmail, payload);
   }
-  if (request.method === "GET" && url.pathname === "/api/admin/brain/codex-chat/main-model") {
+  if (isReadMethod(request.method) && url.pathname === "/api/admin/brain/codex-chat/main-model") {
     return sendJson(response, 200, await mainLoopModelSummary(config));
   }
   if (request.method === "POST" && url.pathname === "/api/admin/brain/codex-chat/main-model") {
     const payload = await readJsonBody(request);
     return handleMainLoopModelWrite(response, config, adminEmail, payload);
   }
-  if (request.method === "GET" && url.pathname === "/api/admin/brain/openrouter/settings") {
+  if (isReadMethod(request.method) && url.pathname === "/api/admin/brain/openrouter/settings") {
     return sendJson(response, 200, await openRouterSettingsSummary(config));
   }
   if (request.method === "POST" && url.pathname === "/api/admin/brain/openrouter/settings") {
     const payload = await readJsonBody(request);
     return handleOpenRouterSettingsWrite(response, config, adminEmail, payload);
   }
-  if (request.method === "GET" && url.pathname === "/api/admin/brain/slack/settings") {
+  if (isReadMethod(request.method) && url.pathname === "/api/admin/brain/slack/settings") {
     return sendJson(response, 200, await slackSettingsSummary(config));
   }
-  if (request.method === "GET" && url.pathname === "/api/admin/brain/slack/telemetry") {
+  if (isReadMethod(request.method) && url.pathname === "/api/admin/brain/slack/telemetry") {
     return sendJson(response, 200, await slackTelemetrySummary(config));
-  }
-  if (request.method === "GET" && url.pathname === "/api/admin/brain/slack/canary") {
-    return sendJson(response, 200, await slackCanarySummary(config));
-  }
-  if (request.method === "POST" && url.pathname === "/api/admin/brain/slack/canary") {
-    const payload = await readJsonBody(request);
-    return handleSlackCanaryUpdate(response, config, adminEmail, payload);
   }
   if (request.method === "POST" && url.pathname === "/api/admin/brain/slack/settings") {
     const payload = await readJsonBody(request);
     return handleSlackSettingsWrite(response, config, adminEmail, payload);
   }
-  if (request.method === "GET" && url.pathname === "/api/admin/brain/slack/manifest") {
+  if (isReadMethod(request.method) && url.pathname === "/api/admin/brain/slack/manifest") {
     return sendJson(response, 200, await renderSlackManifestForBrain(config));
   }
-  if (request.method === "GET" && url.pathname === "/api/admin/brain/slack/manifest/download") {
+  if (isReadMethod(request.method) && url.pathname === "/api/admin/brain/slack/manifest/download") {
     const manifest = await renderSlackManifestForBrain(config);
     return sendDownload(response, "brain.slack.manifest.json", manifest.text);
   }
-  if (request.method === "GET" && url.pathname === "/api/admin/brain/capabilities") {
-    return sendJson(response, 200, await capabilityAdminSummary({ storePath: config.capabilityStorePath, auditLogPath: config.capabilityAuditLogPath, adminEmail, codexChatPath: config.codexChatPath, workspacePath: config.workspacePath }));
-  }
-  if (request.method === "GET" && url.pathname === "/api/admin/brain/capabilities/catalog") {
+  if (isReadMethod(request.method) && url.pathname === "/api/admin/brain/capabilities/catalog") {
     return handleCapabilityCatalog(response, config);
   }
-  if (request.method === "GET" && url.pathname === "/api/admin/brain/users") {
+  if (isReadMethod(request.method) && url.pathname === "/api/admin/brain/users") {
     return handleCapabilityUsers(response, config);
   }
   if (url.pathname === "/api/admin/brain/users" || url.pathname.startsWith("/api/admin/brain/users/")) {
@@ -352,7 +345,7 @@ async function handleAdminApi(request: IncomingMessage, response: ServerResponse
     const payload = await readJsonBody(request);
     return handleCapabilityCheck(response, config, payload);
   }
-  if (request.method === "GET" && url.pathname === "/api/admin/brain/audit") {
+  if (isReadMethod(request.method) && url.pathname === "/api/admin/brain/audit") {
     return handleCapabilityAudit(response, config, url);
   }
   if (request.method === "POST" && url.pathname === "/api/admin/brain/codex-chat/operation") {
@@ -391,7 +384,6 @@ async function serviceSettings(config: BrainAdminServiceConfig) {
     capabilityStatus,
     repoRegistry,
     slack,
-    slackCanary,
     mainLoopModel,
     openRouter,
   ] = await Promise.all([
@@ -399,13 +391,12 @@ async function serviceSettings(config: BrainAdminServiceConfig) {
     capabilityEnforcementStatus(config),
     repoRegistrySummary(config.repoRegistryPath),
     slackSettingsSummary(config),
-    slackCanarySummary(config),
     mainLoopModelSummary(config),
     openRouterSettingsSummary(config),
   ]);
   return {
-    routePath: config.routePath,
     publicBaseUrl: config.publicBaseUrl || null,
+    routePath: config.routePath,
     instance: instanceSummary(config),
     repoRegistry: {
       ...repoRegistry,
@@ -427,7 +418,6 @@ async function serviceSettings(config: BrainAdminServiceConfig) {
       restartCommand: operationCommand(config, "restart") ? redactedCommand(operationCommand(config, "restart") ?? "") : null,
     },
     slack,
-    slackCanary,
     mainLoopModel,
     openRouter,
     capabilities: {
@@ -1470,203 +1460,6 @@ function redactTelemetryText(value: string): string {
   return redactSecretText(value).slice(0, 240);
 }
 
-type SlackCanaryStatus = "pending" | "passed" | "failed" | "blocked" | "not_applicable";
-
-type SlackCanaryItemDefinition = {
-  id: string;
-  label: string;
-  prompt: string;
-  telemetryHints: string[];
-};
-
-type SlackCanaryItemState = {
-  id: string;
-  status: SlackCanaryStatus;
-  updatedAt?: string;
-  updatedBy?: string;
-  notes?: string;
-  evidence?: string;
-};
-
-type SlackCanaryStore = {
-  schemaVersion: 1;
-  updatedAt?: string;
-  updatedBy?: string;
-  items: Record<string, SlackCanaryItemState>;
-};
-
-const SLACK_CANARY_ITEMS: SlackCanaryItemDefinition[] = [
-  {
-    id: "root_channel_attached_thread_reply",
-    label: "Root-channel attached-thread reply",
-    prompt: "Mention Brain in a public root channel message and verify the reply lands in the thread attached to that root message.",
-    telemetryHints: ["lastAcceptedEvent.eventType", "lastContextDecision.sourceKind=channel", "lastOutboundSuccess.channelId", "lastOutboundSuccess.threadTs"],
-  },
-  {
-    id: "existing_thread_continuity",
-    label: "Existing-thread continuity",
-    prompt: "Mention Brain inside an existing Slack thread and verify it uses/replies in that same source thread.",
-    telemetryHints: ["lastContextDecision.sourceKind=thread", "lastContextDecision.selectedSources", "lastOutboundSuccess.threadTs"],
-  },
-  {
-    id: "channel_history_hydration",
-    label: "Channel history hydration",
-    prompt: "Ask about a recent public channel fact from a root mention and verify bounded channel context was available.",
-    telemetryHints: ["lastContextDecision.selectedSources", "lastContextDecision.messagesIncluded", "lastContextDecision.fallbackCodes"],
-  },
-  {
-    id: "thread_history_hydration",
-    label: "Thread history hydration",
-    prompt: "Ask about earlier replies from inside a thread and verify bounded thread context was available.",
-    telemetryHints: ["lastContextDecision.sourceKind=thread", "lastContextDecision.messagesIncluded", "lastContextDecision.fallbackCodes"],
-  },
-  {
-    id: "second_channel_isolation",
-    label: "Second-channel isolation",
-    prompt: "Repeat a canary in a second channel and verify Brain does not cite or leak the first channel's facts.",
-    telemetryHints: ["lastAcceptedEvent.channelId", "lastContextDecision.channelId", "lastOutboundSuccess.channelId"],
-  },
-  {
-    id: "dm_mpim_private_channel_behavior",
-    label: "DM/MPIM/private-channel behavior",
-    prompt: "Exercise a DM, MPIM, or private channel and verify behavior stays within that Slack conversation's boundary.",
-    telemetryHints: ["lastAcceptedEvent.channelType", "lastContextDecision.sourceKind", "lastOutboundSuccess.channelId"],
-  },
-  {
-    id: "subagent_callback_routing",
-    label: "Subagent callback routing",
-    prompt: "Start Slack-originated work that dispatches a subagent and verify progress/final callback returns to the originating Slack target.",
-    telemetryHints: ["lastSubagentRouting.channelId", "lastSubagentRouting.threadTs", "lastSubagentRouting.outputThreadTsPresent"],
-  },
-  {
-    id: "immediate_receipt_reaction",
-    label: "Immediate receipt reaction",
-    prompt: "Trigger a Slack turn and verify the configured receipt reaction appears promptly without changing final routing.",
-    telemetryHints: ["recent codex-chat logs for reaction_add_failed/ok", "lastAcceptedEvent", "lastOutboundSuccess"],
-  },
-  {
-    id: "telemetry_redaction",
-    label: "Telemetry redaction",
-    prompt: "Review this panel/raw telemetry and verify it contains only IDs/counts/statuses, not Slack tokens, signatures, or message bodies.",
-    telemetryHints: ["values=read-only redacted metadata", "textLength only", "no text/body/token fields"],
-  },
-];
-
-async function slackCanarySummary(config: BrainAdminServiceConfig) {
-  const telemetry = await slackTelemetrySummary(config);
-  const store = await readSlackCanaryStore(config.slackCanaryPath);
-  const items = SLACK_CANARY_ITEMS.map((definition) => ({
-    ...definition,
-    ...(store.items[definition.id] ?? { id: definition.id, status: "pending" as const }),
-  }));
-  const counts = Object.fromEntries(["pending", "passed", "failed", "blocked", "not_applicable"].map((status) => [
-    status,
-    items.filter((item) => item.status === status).length,
-  ]));
-  return {
-    schemaVersion: 1,
-    source: "brain-private-file",
-    path: resolveEnvFilePath(config.slackCanaryPath),
-    values: "manual operator outcomes only; notes/evidence are redacted and stored in Brain private local state",
-    updatedAt: store.updatedAt,
-    updatedBy: store.updatedBy,
-    counts,
-    items,
-    telemetryRollup: {
-      health: telemetry.health,
-      counts: telemetry.counters,
-      context: telemetry.lastContextDecision,
-      outputTarget: {
-        channelId: telemetry.lastOutboundSuccess?.channelId ?? telemetry.lastOutboundAttempt?.channelId,
-        threadTs: telemetry.lastOutboundSuccess?.threadTs ?? telemetry.lastOutboundAttempt?.threadTs,
-        outboundResultCount: telemetry.lastOutboundSuccess?.outboundResultCount ?? telemetry.lastOutboundAttempt?.outboundResultCount,
-      },
-      inbound: {
-        lastAcceptedEvent: telemetry.lastAcceptedEvent,
-        lastIgnoredOrRejected: telemetry.lastIgnoredOrRejected,
-      },
-      outbound: {
-        lastOutboundSuccess: telemetry.lastOutboundSuccess,
-        lastOutboundFailure: telemetry.lastOutboundFailure,
-      },
-      subagent: telemetry.lastSubagentRouting,
-      recentErrors: [telemetry.lastIgnoredOrRejected, telemetry.lastOutboundFailure].filter(Boolean),
-    },
-  };
-}
-
-async function handleSlackCanaryUpdate(response: ServerResponse, config: BrainAdminServiceConfig, adminEmail: string, payload: Record<string, unknown>): Promise<void> {
-  const itemId = typeof payload.itemId === "string" ? payload.itemId.trim() : "";
-  const definition = SLACK_CANARY_ITEMS.find((item) => item.id === itemId);
-  if (!definition) return sendJson(response, 400, { error: "unknown_canary_item", supported: SLACK_CANARY_ITEMS.map((item) => item.id) });
-  const status = typeof payload.status === "string" ? payload.status.trim() : "";
-  if (!isSlackCanaryStatus(status)) return sendJson(response, 400, { error: "invalid_canary_status", supported: ["pending", "passed", "failed", "blocked", "not_applicable"] });
-  const now = new Date().toISOString();
-  const store = await readSlackCanaryStore(config.slackCanaryPath);
-  store.items[itemId] = {
-    id: itemId,
-    status,
-    updatedAt: now,
-    updatedBy: adminEmail,
-    notes: sanitizeCanaryFreeform(payload.notes),
-    evidence: sanitizeCanaryFreeform(payload.evidence),
-  };
-  store.updatedAt = now;
-  store.updatedBy = adminEmail;
-  await writeSlackCanaryStore(config.slackCanaryPath, store);
-  await appendAudit(config, { action: "slack.canary.update", adminEmail, itemId, status, storePath: resolveEnvFilePath(config.slackCanaryPath), values: "manual; redacted" });
-  return sendJson(response, 200, { ok: true, canary: await slackCanarySummary(config) });
-}
-
-function isSlackCanaryStatus(value: string): value is SlackCanaryStatus {
-  return value === "pending" || value === "passed" || value === "failed" || value === "blocked" || value === "not_applicable";
-}
-
-async function readSlackCanaryStore(filePath: string): Promise<SlackCanaryStore> {
-  const resolved = resolveEnvFilePath(filePath);
-  const raw = await readTextIfPresent(resolved);
-  if (!raw) return { schemaVersion: 1, items: {} };
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const items: Record<string, SlackCanaryItemState> = {};
-    if (parsed.items && typeof parsed.items === "object" && !Array.isArray(parsed.items)) {
-      for (const [id, value] of Object.entries(parsed.items as Record<string, unknown>)) {
-        if (!SLACK_CANARY_ITEMS.some((item) => item.id === id) || !value || typeof value !== "object" || Array.isArray(value)) continue;
-        const record = value as Record<string, unknown>;
-        const status = typeof record.status === "string" && isSlackCanaryStatus(record.status) ? record.status : "pending";
-        items[id] = {
-          id,
-          status,
-          updatedAt: typeof record.updatedAt === "string" ? redactTelemetryText(record.updatedAt) : undefined,
-          updatedBy: typeof record.updatedBy === "string" ? redactTelemetryText(record.updatedBy) : undefined,
-          notes: sanitizeCanaryFreeform(record.notes),
-          evidence: sanitizeCanaryFreeform(record.evidence),
-        };
-      }
-    }
-    return {
-      schemaVersion: 1,
-      updatedAt: typeof parsed.updatedAt === "string" ? redactTelemetryText(parsed.updatedAt) : undefined,
-      updatedBy: typeof parsed.updatedBy === "string" ? redactTelemetryText(parsed.updatedBy) : undefined,
-      items,
-    };
-  } catch {
-    return { schemaVersion: 1, items: {} };
-  }
-}
-
-async function writeSlackCanaryStore(filePath: string, store: SlackCanaryStore): Promise<void> {
-  const resolved = resolveEnvFilePath(filePath);
-  await atomicWriteFile(resolved, `${JSON.stringify(store, null, 2)}\n`);
-}
-
-function sanitizeCanaryFreeform(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const redacted = redactTelemetryText(value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim());
-  return redacted ? redacted.slice(0, 800) : undefined;
-}
-
-
 type MainLoopPresetId = "codex-openai-default" | "openrouter-glm-5.2";
 
 const MAIN_LOOP_PRESETS: Record<MainLoopPresetId, { label: string; description: string; updates: Record<(typeof MAIN_LOOP_MODEL_ENV_KEYS)[number], string>; requiresOpenRouter: boolean }> = {
@@ -2670,50 +2463,6 @@ function authSummary(config: BrainAdminServiceConfig) {
   return { configured: isBrainAdminAuthConfigured(config), publishableKeyPresent: Boolean(config.clerkPublishableKey), secretKeyPresent: Boolean(config.clerkSecretKey), allowedEmailCount: parseAdminAllowedEmails(config.clerkAllowedEmails).size, failClosed: true };
 }
 
-function handlePageAuthFailure(request: IncomingMessage, response: ServerResponse, config: BrainAdminServiceConfig, auth: { statusCode: number; error: string; admin?: { email: string } }): void {
-  const signInUrl = adminSignInUrlFromRequest(request, config);
-  if (auth.statusCode === 401) {
-    signInUrl.searchParams.set("redirect_url", adminPublicUrlFromRequest(request, config));
-    return redirect(response, 302, signInUrl.toString());
-  }
-  return sendHtml(response, auth.statusCode, renderBrainAdminDeniedPage(config, auth.error, signInUrl.toString(), auth.admin?.email ?? ""));
-}
-
-function adminPublicUrlFromRequest(request: IncomingMessage, config: BrainAdminServiceConfig): string {
-  const base = config.publicBaseUrl.trim() || externalOriginFromRequest(request);
-  return new URL(config.routePath, ensureTrailingSlash(base)).toString().replace(/\/$/, "");
-}
-
-function adminSignInUrlFromRequest(request: IncomingMessage, config: BrainAdminServiceConfig): URL {
-  const base = config.publicBaseUrl.trim() || externalOriginFromRequest(request);
-  return new URL(adminSignInPath(config.routePath), ensureTrailingSlash(base));
-}
-
-function externalOriginFromRequest(request: IncomingMessage): string {
-  const proto = firstHeader(request.headers["x-forwarded-proto"]) || "http";
-  const host = firstHeader(request.headers["x-forwarded-host"]) || firstHeader(request.headers.host) || "127.0.0.1";
-  return `${proto}://${host}`;
-}
-
-function safeAdminReturnUrl(candidate: string | null, fallback: string): string {
-  if (!candidate) return fallback;
-  try {
-    const parsed = new URL(candidate);
-    const expected = new URL(fallback);
-    return parsed.origin === expected.origin ? parsed.toString() : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function isAdminRoutePath(pathname: string, routePath: string): boolean {
-  return pathname === routePath || pathname === `${routePath}/`;
-}
-
-function adminSignInPath(routePath: string): string {
-  return `${routePath.replace(/\/+$/, "")}/auth/sign-in`;
-}
-
 function instanceSummary(config: BrainAdminServiceConfig) {
   return {
     project: "Brain",
@@ -2736,9 +2485,10 @@ function defaultLocalIp(): string {
   return "127.0.0.1";
 }
 
-function normalizeRoutePath(value: string): string {
-  const out = value.trim() || "/admin";
-  return (out.startsWith("/") ? out : `/${out}`).replace(/\/+$/, "") || "/admin";
+function normalizeRoutePath(value: string | undefined, fallback: string): string {
+  const raw = value?.trim() || fallback;
+  const out = (raw.startsWith("/") ? raw : `/${raw}`).replace(/\/+$/, "");
+  return out || fallback;
 }
 
 function boolEnv(value: string | undefined, fallback: boolean): boolean {
@@ -2762,6 +2512,50 @@ function firstHeader(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
 
+function isReadMethod(method: string | undefined): boolean {
+  return method === "GET" || method === "HEAD";
+}
+
+function suppressHeadResponseBody(response: ServerResponse): void {
+  const end = response.end.bind(response) as (...args: unknown[]) => ServerResponse;
+  response.end = ((...args: unknown[]) => {
+    const last = args.at(-1);
+    if (typeof last === "function") return end(last);
+    return end();
+  }) as typeof response.end;
+}
+
+function firstAllowedAdminEmail(config: BrainAdminServiceConfig): string | undefined {
+  return [...parseAdminAllowedEmails(config.clerkAllowedEmails)][0];
+}
+
+function startupErrorForLog(error: unknown): Record<string, unknown> {
+  const code = (error as NodeJS.ErrnoException)?.code;
+  return {
+    action: "capability.store.startup_init_failed",
+    name: error instanceof Error ? error.name : typeof error,
+    ...(typeof code === "string" ? { code } : {}),
+    ...(error instanceof CapabilityWriteError ? { capabilityErrorCode: error.code, status: error.status } : {}),
+    message: error instanceof Error ? error.message : String(error),
+  };
+}
+
+async function appendStartupCapabilityAudit(config: BrainAdminServiceConfig, migration: MigrationResult): Promise<void> {
+  try {
+    await appendCapabilityAudit(config, {
+      action: "capability.store.startup_normalized",
+      source: "brain-admin.startup",
+      removedSubjectIds: migration.changes.removedSubjectIds,
+      removedGrantIds: migration.changes.removedGrantIds,
+      removedIdentityIds: migration.changes.removedIdentityIds,
+      convertedGrantIds: migration.changes.convertedGrantIds,
+      enforcementTransitions: migration.changes.enforcementTransitions,
+    });
+  } catch (error) {
+    console.error("[brain-admin] capability startup normalization audit append failed after a successful store write", startupErrorForLog(error));
+  }
+}
+
 function sendEnvValidationError(response: ServerResponse, fieldErrors: EnvFieldError[]): void {
   sendJson(response, 400, { error: "validation_failed", fieldErrors });
 }
@@ -2778,14 +2572,14 @@ function sendHtml(response: ServerResponse, statusCode: number, html: string): v
   response.end(html);
 }
 
-// --- §6.6 / §8 step 4: serve the built React SPA under /admin-v2 --------------
+// --- §6.6 / §8 step 7: serve the built React SPA under the configured route ---
 
-// Serve the built React console under `/admin-v2` with SPA-history fallback.
+// Serve the built React console under `/admin` with SPA-history fallback.
 // Path-traversal safe: only files that resolve inside the build dir are served;
 // anything else falls back to the injected index.html. When the build output is
 // absent, returns a clear 503 page instead of crashing.
-async function serveAdminV2(response: ServerResponse, url: URL, config: BrainAdminServiceConfig): Promise<void> {
-  const dir = path.resolve(resolveEnvFilePath(config.adminV2Dir));
+async function serveAdminSpa(response: ServerResponse, url: URL, config: BrainAdminServiceConfig): Promise<void> {
+  const dir = path.resolve(resolveEnvFilePath(config.adminUiDir));
   let indexHtml: string;
   let realDir: string;
   try {
@@ -2796,21 +2590,21 @@ async function serveAdminV2(response: ServerResponse, url: URL, config: BrainAdm
   } catch {
     // The absolute build path is operator-only; log it server-side and keep it
     // out of this unauthenticated response body (fix).
-    console.error(`[brain-admin] /admin-v2 build output missing or unreadable at ${dir}`);
-    return sendHtml(response, 503, adminV2NotBuiltPage());
+    console.error(`[brain-admin] ${config.routePath} build output missing or unreadable at ${dir}`);
+    return sendHtml(response, 503, adminSpaNotBuiltPage(config.routePath));
   }
 
-  const rawRel = url.pathname.slice("/admin-v2".length);
+  const rawRel = url.pathname.slice(config.routePath.length);
   let decoded: string;
   try {
     decoded = decodeURIComponent(rawRel);
   } catch {
-    return sendHtml(response, 400, adminV2ShellHtml(indexHtml, config));
+    return sendHtml(response, 400, adminSpaShellHtml(indexHtml, config));
   }
   const rel = decoded.replace(/^\/+/, "");
   if (rel === "" || rel.includes("\0")) {
     if (rel.includes("\0")) return sendJson(response, 400, { error: "bad_request" });
-    return sendAdminV2Shell(response, indexHtml, config);
+    return sendAdminSpaShell(response, indexHtml, config);
   }
 
   const resolved = path.resolve(dir, rel);
@@ -2832,7 +2626,7 @@ async function serveAdminV2(response: ServerResponse, url: URL, config: BrainAdm
     if (info.isFile()) {
       // Any request resolving to index.html — directly or otherwise — goes
       // through the injected, no-store shell path, never served raw/long-cached (fix).
-      if (real === realIndexPath) return sendAdminV2Shell(response, indexHtml, config);
+      if (real === realIndexPath) return sendAdminSpaShell(response, indexHtml, config);
       const data = await readFile(real);
       response.statusCode = 200;
       response.setHeader("content-type", contentTypeForPath(resolved));
@@ -2844,25 +2638,35 @@ async function serveAdminV2(response: ServerResponse, url: URL, config: BrainAdm
   } catch {
     // Missing file → fall through to the SPA history fallback below.
   }
-  return sendAdminV2Shell(response, indexHtml, config);
+  return sendAdminSpaShell(response, indexHtml, config);
 }
 
-function sendAdminV2Shell(response: ServerResponse, indexHtml: string, config: BrainAdminServiceConfig): void {
+function sendAdminSpaShell(response: ServerResponse, indexHtml: string, config: BrainAdminServiceConfig): void {
   response.statusCode = 200;
   response.setHeader("content-type", "text/html; charset=utf-8");
   response.setHeader("cache-control", "no-store");
-  response.end(adminV2ShellHtml(indexHtml, config));
+  response.end(adminSpaShellHtml(indexHtml, config));
 }
 
 // Inject the non-secret bootstrap config (publishable key + sign-in URL) into
 // the SPA shell so the browser can boot Clerk without a rebuild. The Clerk
 // publishable key is non-secret by definition; no secret ever crosses here.
-function adminV2ShellHtml(indexHtml: string, config: BrainAdminServiceConfig): string {
-  const uiConfig = { clerkPublishableKey: config.clerkPublishableKey, signInUrl: "/admin-v2" };
+function adminSpaShellHtml(indexHtml: string, config: BrainAdminServiceConfig): string {
+  const html = rewriteAdminAssetBase(indexHtml, config.routePath);
+  const uiConfig = { clerkPublishableKey: config.clerkPublishableKey, routePath: config.routePath, signInUrl: config.routePath };
   const json = JSON.stringify(uiConfig).replace(/</g, "\\u003c");
   const snippet = `<script>window.__BRAIN_UI_CONFIG__=${json};</script>`;
-  if (indexHtml.includes("</head>")) return indexHtml.replace("</head>", `${snippet}</head>`);
-  return `${snippet}${indexHtml}`;
+  if (html.includes("</head>")) return html.replace("</head>", `${snippet}</head>`);
+  return `${snippet}${html}`;
+}
+
+function rewriteAdminAssetBase(indexHtml: string, routePath: string): string {
+  if (routePath === DEFAULT_ADMIN_ROUTE_PATH) return indexHtml;
+  const defaultBase = `${DEFAULT_ADMIN_ROUTE_PATH}/`;
+  const routeBase = `${routePath}/`;
+  return indexHtml
+    .replaceAll(`"${defaultBase}`, `"${routeBase}`)
+    .replaceAll(`'${defaultBase}`, `'${routeBase}`);
 }
 
 function contentTypeForPath(filePath: string): string {
@@ -2891,8 +2695,12 @@ function contentTypeForPath(filePath: string): string {
 
 // Note: the build path is deliberately NOT in this body — this route is
 // unauthenticated, so the absolute server path is logged server-side instead.
-function adminV2NotBuiltPage(): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Brain console not built</title><style>body{font:16px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;margin:3rem auto;max-width:640px;padding:0 1rem;background:#08111f;color:#e8eef8}.card{border:1px solid #29405e;border-radius:16px;padding:24px;background:#0f1b2d}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#06101f;border:1px solid #253a57;border-radius:6px;padding:2px 6px}.muted{color:#99a8bd}</style></head><body><section class="card"><h1>Brain console is not built yet</h1><p>The <code>/admin-v2</code> React console has no build output.</p><p class="muted">Run <code>pnpm --filter @brain/web-ui build</code> (or <code>pnpm run build</code> from the repo root) to produce it, then reload. The legacy console remains available at <code>/admin</code>.</p></section></body></html>`;
+function adminSpaNotBuiltPage(routePath: string): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Brain console not built</title><style>body{font:16px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;margin:3rem auto;max-width:640px;padding:0 1rem;background:#08111f;color:#e8eef8}.card{border:1px solid #29405e;border-radius:16px;padding:24px;background:#0f1b2d}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#06101f;border:1px solid #253a57;border-radius:6px;padding:2px 6px}.muted{color:#99a8bd}</style></head><body><section class="card"><h1>Brain console is not built yet</h1><p>The <code>${escapeHtml(routePath)}</code> React console has no build output.</p><p class="muted">Run <code>pnpm --filter @brain/web-ui build</code> (or <code>pnpm run build</code> from the repo root) to produce it, then reload.</p></section></body></html>`;
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[char] ?? char));
 }
 
 function sendDownload(response: ServerResponse, filename: string, body: string): void {
@@ -2906,10 +2714,6 @@ function redirect(response: ServerResponse, statusCode: number, location: string
   response.statusCode = statusCode;
   response.setHeader("location", location);
   response.end();
-}
-
-function ensureTrailingSlash(value: string): string {
-  return value.endsWith("/") ? value : `${value}/`;
 }
 
 function shellArg(value: string): string {

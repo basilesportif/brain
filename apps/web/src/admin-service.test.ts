@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendFile, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type http from "node:http";
 import { authorizeBrainAdminRequest, parseAdminAllowedEmails } from "./admin-auth.js";
-import { renderBrainAdminDeniedPage, renderBrainAdminPage, renderBrainAdminSignInPage } from "./admin-page.js";
+import { ADMIN_SPA_ROUTE_PATH, ADMIN_V2_REDIRECT_ROUTE_PATH } from "./admin-routes.js";
 import { createBrainAdminServer, initializeBrainAdminCapabilityStore, loadBrainAdminServiceConfig, readFileTail, type BrainAdminServiceConfig, type BrainAdminServiceDeps } from "./admin-service.js";
 import { fakeIpcToken, startFakeCodexChatIpc, type FakeCodexChatIpcServer } from "./codex-chat-ipc.test-helpers.js";
 import { mergeEnvFileText } from "./env-file.js";
@@ -31,7 +31,7 @@ function config(root: string, overrides: Partial<BrainAdminServiceConfig> = {}):
     enabled: true,
     host: "127.0.0.1",
     port: 0,
-    routePath: "/admin",
+    routePath: ADMIN_SPA_ROUTE_PATH,
     publicBaseUrl: "https://brain.example.test",
     clerkPublishableKey: ["pk", "test", "example"].join("_"),
     clerkSecretKey: ["sk", "test", "example"].join("_"),
@@ -59,12 +59,11 @@ function config(root: string, overrides: Partial<BrainAdminServiceConfig> = {}):
     slackEventsBaseUrl: "https://brain.decisive-outcomes.com",
     slackEventsPath: "/api/slack/events",
     slackAppId: undefined,
-    slackCanaryPath: path.join(root, "slack-canary.json"),
     slackSetupStatePath: path.join(root, "slack-setup.json"),
     capabilityStorePath: path.join(root, "capabilities.json"),
     capabilityAuditLogPath: path.join(root, "capability-audit.jsonl"),
     capabilityDecisionsDir: path.join(root, "codex-chat", "data", "state", "capability_decisions"),
-    adminV2Dir: path.join(root, "ui-dist"),
+    adminUiDir: path.join(root, "ui-dist"),
     ...overrides,
   } as BrainAdminServiceConfig;
 }
@@ -115,14 +114,6 @@ function openRouterProfilePath(summary: { profilePath: string; profileTargets?: 
   return target.profilePath;
 }
 
-function extractJsonScript(html: string, id: string): unknown {
-  const pattern = new RegExp(`<script type="application/json" id="${id}">([\\s\\S]*?)</script>`);
-  const match = pattern.exec(html);
-  assert.ok(match, `missing JSON script #${id}`);
-  return JSON.parse(match[1] ?? "");
-}
-
-
 async function writeFileRecursive(filePath: string, content: string): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true });
   await writeFile(filePath, content, { mode: 0o755 });
@@ -171,70 +162,165 @@ test("brain admin config derives and overrides the codex-chat IPC socket path", 
   const codexChatPath = path.join("/srv", "codex-chat");
   const derived = loadBrainAdminServiceConfig({ BRAIN_CODEX_CHAT_PATH: codexChatPath } as NodeJS.ProcessEnv);
   assert.equal(derived.codexChatIpcSocket, path.join(codexChatPath, "data", "run", "codex-chat.sock"));
+  assert.equal(derived.routePath, "/admin");
 
   const override = path.join("/tmp", "synthetic-codex-chat.sock");
   const explicit = loadBrainAdminServiceConfig({ BRAIN_CODEX_CHAT_PATH: codexChatPath, BRAIN_CODEX_CHAT_IPC_SOCKET: override } as NodeJS.ProcessEnv);
   assert.equal(explicit.codexChatIpcSocket, override);
+
+  const customRoutes = loadBrainAdminServiceConfig({ BRAIN_ADMIN_ROUTE_PATH: "ops/admin", BRAIN_SLACK_EVENTS_PATH: "   " } as NodeJS.ProcessEnv);
+  assert.equal(customRoutes.routePath, "/ops/admin");
+  assert.equal(customRoutes.slackEventsPath, "/api/slack/events");
 });
 
 test("brain admin startup normalizes stale grants to enforcing", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-cap-startup-"));
   try {
     const cfg = config(root);
-    await initializeBrainAdminCapabilityStore(cfg);
-
-    const staleStore = JSON.parse(await readFile(cfg.capabilityStorePath, "utf8")) as { grants: Array<Record<string, unknown>> };
+    const staleStore = JSON.parse(LIVE_CAPABILITY_STORE_JSON) as { grants: Array<Record<string, unknown>> };
     staleStore.grants = staleStore.grants.map((grant) => ({ ...grant, enforcement: "non_enforcing" }));
-    await writeJson(cfg.capabilityStorePath, staleStore);
+    const planned = planMigration(staleStore as never).changes;
+    await writeFile(cfg.capabilityStorePath, `${JSON.stringify(staleStore, null, 2)}\n`);
 
     await initializeBrainAdminCapabilityStore(cfg);
 
     const normalized = JSON.parse(await readFile(cfg.capabilityStorePath, "utf8")) as { grants: Array<{ enforcement?: string }> };
     assert.ok(normalized.grants.length > 0);
     assert.equal(normalized.grants.every((grant) => grant.enforcement === "enforcing"), true);
+    await stat(`${cfg.capabilityStorePath}.lkg.json`);
+    const audit = (await readFile(cfg.capabilityAuditLogPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+    assert.equal(audit.length, 1);
+    assert.equal(audit[0].action, "capability.store.startup_normalized");
+    assert.deepEqual(audit[0].convertedGrantIds, planned.convertedGrantIds);
+    assert.deepEqual(audit[0].enforcementTransitions, planned.enforcementTransitions);
+
+    const bytesAfterFirstStartup = await readFile(cfg.capabilityStorePath);
+    const backupsAfterFirstStartup = (await readdir(root)).filter((name) => name.startsWith("capabilities.json.") && name.endsWith(".bak")).sort();
+    await initializeBrainAdminCapabilityStore(cfg);
+    assert.ok(bytesAfterFirstStartup.equals(await readFile(cfg.capabilityStorePath)), "second startup must not rewrite an already-normalized store");
+    assert.deepEqual((await readdir(root)).filter((name) => name.startsWith("capabilities.json.") && name.endsWith(".bak")).sort(), backupsAfterFirstStartup);
+    assert.equal((await readFile(cfg.capabilityAuditLogPath, "utf8")).trim().split("\n").length, 1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("brain admin page and API require Clerk allowlist auth", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-auth-"));
+test("brain admin startup keeps serving when the capability store is invalid", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-cap-invalid-"));
   try {
-    await withServer(config(root), authDeps(), async (baseUrl) => {
-      const noAuth = await fetch(`${baseUrl}/admin`, { redirect: "manual" });
-      assert.equal(noAuth.status, 302);
-      assert.match(noAuth.headers.get("location") ?? "", /^https:\/\/brain\.example\.test\/admin\/auth\/sign-in\?/);
+    const cfg = config(root);
+    await writeFile(cfg.capabilityStorePath, "{not valid json\n");
+    const before = await readFile(cfg.capabilityStorePath);
+    const { output } = await captureConsole(() => initializeBrainAdminCapabilityStore(cfg));
+    assert.match(output, /capability.store.startup_init_failed/);
+    assert.ok(before.equals(await readFile(cfg.capabilityStorePath)), "invalid store must be byte-identical after startup init failure");
+    await assert.rejects(() => stat(`${cfg.capabilityStorePath}.lkg.json`), { code: "ENOENT" });
 
-      const denied = await fetch(`${baseUrl}/api/admin/brain/me`);
-      assert.equal(denied.status, 401);
-
-      const ok = await fetch(`${baseUrl}/api/admin/brain/me`, { headers: authHeaders() });
-      assert.equal(ok.status, 200);
-      assert.deepEqual(await ok.json(), { email: TEST_ADMIN_EMAIL });
-
-      const page = await fetch(`${baseUrl}/admin`, { headers: authHeaders() });
-      assert.equal(page.status, 200);
-      const pageHtml = await page.text();
-      assert.equal(pageHtml.includes(TEST_ADMIN_EMAIL), true);
-      assert.match(pageHtml, /Sign out \/ switch account/);
+    await withServer(cfg, authDeps(), async (baseUrl) => {
+      const health = await fetch(`${baseUrl}/healthz`);
+      assert.equal(health.status, 200);
+      const users = await fetch(`${baseUrl}/api/admin/brain/users`, { headers: authHeaders() });
+      assert.equal(users.status, 503);
+      assert.deepEqual(await users.json(), { error: "capability_store_unavailable", reason: "brain_store_unavailable" });
     });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("brain admin auth failures show signed-in account and switch-account action", async () => {
+test("brain admin startup seeds a missing capability store from the first allowed admin", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-cap-seed-"));
+  try {
+    const cfg = config(root, { clerkAllowedEmails: ` ${SECOND_ADMIN_EMAIL}, ${TEST_ADMIN_EMAIL} ` });
+    await initializeBrainAdminCapabilityStore(cfg);
+    const store = JSON.parse(await readFile(cfg.capabilityStorePath, "utf8")) as {
+      people: Array<{ id: string; primarySubjectId: string; identityIds: string[] }>;
+      externalIdentities: Array<{ provider: string; providerUserId: string; personId: string; status: string }>;
+      subjects: Array<{ id: string; personId: string; status: string }>;
+      grants: Array<{ subjectId: string; capabilityId: string; enforcement: string; status: string }>;
+    };
+    assert.equal(store.people.length, 1);
+    assert.equal(store.people[0].id.startsWith("person_admin_"), true);
+    assert.equal(store.people[0].id, store.externalIdentities[0].personId);
+    assert.deepEqual(store.externalIdentities.map((identity) => identity.provider), ["clerk"]);
+    assert.deepEqual(store.externalIdentities.map((identity) => identity.providerUserId), [SECOND_ADMIN_EMAIL]);
+    assert.equal(store.subjects.length, 1);
+    assert.equal(store.subjects[0].id, store.people[0].primarySubjectId);
+    assert.equal(store.grants.every((grant) => grant.status === "active" && grant.enforcement === "enforcing"), true);
+    assert.equal(JSON.stringify(store).includes("person_tim"), false);
+    assert.equal(JSON.stringify(store).includes("T00000000"), false);
+    await stat(`${cfg.capabilityStorePath}.lkg.json`);
+
+    await withServer(cfg, authDeps(SECOND_ADMIN_EMAIL), async (baseUrl) => {
+      const check = await jsonRequest(baseUrl, "POST", "/api/admin/brain/capabilities/check", {
+        subjectId: store.people[0].primarySubjectId,
+        operation: "capability.catalog.read",
+        resource: {},
+      });
+      assert.equal(check.status, 200);
+      assert.equal(check.payload.allowed, true);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain admin startup creates an empty missing capability store without an allowlist", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-cap-seed-empty-"));
+  try {
+    const cfg = config(root, { clerkAllowedEmails: "" });
+    const { output } = await captureConsole(() => initializeBrainAdminCapabilityStore(cfg));
+    assert.match(output, /capability.store.seeded_empty/);
+    const store = JSON.parse(await readFile(cfg.capabilityStorePath, "utf8")) as { people: unknown[]; externalIdentities: unknown[]; subjects: unknown[]; grants: unknown[] };
+    assert.deepEqual(store.people, []);
+    assert.deepEqual(store.externalIdentities, []);
+    assert.deepEqual(store.subjects, []);
+    assert.deepEqual(store.grants, []);
+    await stat(`${cfg.capabilityStorePath}.lkg.json`);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain admin startup normalizes a zero-admin store without treating it as self-lockout", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-cap-zero-admin-"));
+  try {
+    const cfg = config(root);
+    await writeJson(cfg.capabilityStorePath, {
+      schemaVersion: 2,
+      people: [],
+      externalIdentities: [],
+      subjects: [{ id: "person:orphan", kind: "person", status: "active" }],
+      grants: [{ id: "g_orphan", subjectId: "person:orphan", capabilityId: "projects.read", grantKind: "capability", resource: { selectors: {} }, actions: ["read"], status: "active", enforcement: "non_enforcing" }],
+    });
+    await initializeBrainAdminCapabilityStore(cfg);
+    const store = JSON.parse(await readFile(cfg.capabilityStorePath, "utf8")) as { grants: Array<{ id: string; enforcement: string }> };
+    assert.deepEqual(store.grants.map((grant) => ({ id: grant.id, enforcement: grant.enforcement })), [{ id: "g_orphan", enforcement: "enforcing" }]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain admin API requires Clerk allowlist auth", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-auth-"));
+  try {
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const denied = await fetch(`${baseUrl}/api/admin/brain/me`);
+      assert.equal(denied.status, 401);
+
+      const ok = await fetch(`${baseUrl}/api/admin/brain/me`, { headers: authHeaders() });
+      assert.equal(ok.status, 200);
+      assert.deepEqual(await ok.json(), { email: TEST_ADMIN_EMAIL });
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain admin API auth failures include the signed-in forbidden account", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-denied-"));
   try {
     await withServer(config(root), authDeps(OTHER_ADMIN_EMAIL), async (baseUrl) => {
-      const deniedPage = await fetch(`${baseUrl}/admin`, { headers: authHeaders() });
-      assert.equal(deniedPage.status, 403);
-      const deniedHtml = await deniedPage.text();
-      assert.equal(deniedHtml.includes(OTHER_ADMIN_EMAIL), true);
-      assert.match(deniedHtml, /Sign out/);
-      assert.equal(deniedHtml.includes("Brain Control Plane"), false);
-      assert.match(deniedHtml, /switch Clerk account/);
-
       const deniedApi = await fetch(`${baseUrl}/api/admin/brain/me`, { headers: authHeaders() });
       assert.equal(deniedApi.status, 403);
       assert.deepEqual(await deniedApi.json(), { error: "forbidden", email: OTHER_ADMIN_EMAIL });
@@ -242,176 +328,6 @@ test("brain admin auth failures show signed-in account and switch-account action
   } finally {
     await rm(root, { recursive: true, force: true });
   }
-});
-
-test("brain admin auth pages embed parseable JSON config and keep account controls visible", () => {
-  const cfg = config("/tmp/brain-admin-sign-in", { clerkPublishableKey: `pk_test_<unsafe>&value` });
-  const signInHtml = renderBrainAdminSignInPage(cfg, "https://brain.example.test/admin?next=<unsafe>&ok=1");
-  assert.deepEqual(extractJsonScript(signInHtml, "config"), { publishableKey: `pk_test_<unsafe>&value`, redirectUrl: "https://brain.example.test/admin?next=<unsafe>&ok=1" });
-  assert.match(signInHtml, /Current Clerk account/);
-  assert.match(signInHtml, /Sign out \/ switch account/);
-  assert.match(signInHtml, /Continue to admin/);
-  assert.match(signInHtml, /\/api\/admin\/brain\/me/);
-  assert.match(signInHtml, /brain-admin-auto-continue/);
-  assert.match(signInHtml, /Automatic continue already ran once/);
-  assert.match(signInHtml, /Checking whether this account is allowlisted/);
-  assert.equal(signInHtml.includes("Brain Control Plane"), false);
-
-  const deniedHtml = renderBrainAdminDeniedPage(cfg, "forbidden", "https://brain.example.test/admin/auth/sign-in", OTHER_ADMIN_EMAIL);
-  assert.deepEqual(extractJsonScript(deniedHtml, "config"), { publishableKey: `pk_test_<unsafe>&value`, signInUrl: "https://brain.example.test/admin/auth/sign-in" });
-  assert.equal(deniedHtml.includes(OTHER_ADMIN_EMAIL), true);
-  assert.match(deniedHtml, /Sign out/);
-  assert.equal(deniedHtml.includes("Brain Control Plane"), false);
-});
-
-test("brain admin page renders redesigned dashboard IA without secrets", () => {
-  const cfg = config("/tmp/brain-admin-render", { codexChatDeployCommand: undefined });
-  const html = renderBrainAdminPage(cfg, TEST_ADMIN_EMAIL);
-
-  assert.deepEqual(extractJsonScript(html, "brain-admin-config"), {
-    apiBase: "/api/admin/brain",
-    routePath: "/admin",
-    publishableKey: "pk_test_example",
-    signInUrl: "/admin/auth/sign-in",
-    adminEmail: TEST_ADMIN_EMAIL,
-  });
-  assert.match(html, /Brain/);
-  assert.match(html, /local-brain|test-brain/);
-  assert.match(html, /account-menu/);
-  assert.match(html, /mobile-section-menu-button/);
-  assert.match(html, /Open admin section menu/);
-  assert.match(html, /Control Plane sections/);
-  assert.match(html, /Capabilities &amp; Users sections/);
-  assert.match(html, /mobile-section-popover/);
-  assert.equal(html.includes(TEST_ADMIN_EMAIL), true);
-  assert.match(html, /Sign out \/ switch account/);
-  assert.match(html, /<title>Brain<\/title>/);
-  assert.equal(html.includes("Brain Control Plane"), false);
-  assert.match(html, /id="admin-shell" class="shell" data-app-area="control-plane"/);
-  assert.match(html, /data-app-area-switch="control-plane"[^>]*>Control Plane/);
-  assert.match(html, /data-app-area-switch="capabilities-users"[^>]*>Capabilities & Users/);
-  assert.match(html, /aria-label="Control Plane sections"/);
-  assert.match(html, /aria-label="Capabilities &amp; Users sections"/);
-  assert.equal(html.includes("href=\"#capabilities\""), false);
-  assert.match(html, /Overview/);
-  assert.match(html, /State-aware operator console/);
-  assert.match(html, /Slack setup wizard/);
-  assert.match(html, /id="slack-attention"/);
-  assert.match(html, /Slack setup needs attention/);
-  assert.match(html, /Slack setup is incomplete/);
-  assert.match(html, /Continue Slack setup/);
-  assert.match(html, /Skip Slack for now/);
-  assert.match(html, /Missing required setting/);
-  assert.match(html, /Mission Control/);
-  assert.match(html, /Slack Canary/);
-  assert.match(html, /Slack Visibility \/ Canary/);
-  assert.match(html, /Slack visibility \/ canary rollup/);
-  assert.match(html, /Manual read-only canary checklist/);
-  assert.match(html, /Telemetry correlation rollup/);
-  assert.match(html, /OpenRouter/);
-  assert.match(html, /OpenRouter subagent model settings/);
-  assert.match(html, /Review & write OpenRouter settings/);
-  assert.match(html, /Confirm OpenRouter settings write/);
-  assert.match(html, /Main-loop model/);
-  assert.match(html, /id="main-model-preset"/);
-  assert.match(html, /OpenRouter GLM 5\.2/);
-  assert.match(html, /Codex\/OpenAI subscription default/);
-  assert.match(html, /Save changes \/ Apply model preset/);
-  assert.match(html, /id="main-model-preset-status"/);
-  assert.match(html, /Confirm main-loop model switch/);
-  assert.equal(html.includes('Switch main-loop model'), false);
-  assert.match(html, /Slack Details/);
-  assert.match(html, /Manifest/);
-  assert.match(html, /Capabilities &amp; Users/);
-  assert.equal(html.includes('href="#cap-overview"'), false);
-  assert.match(html, /href="#cap-users"/);
-  assert.match(html, /href="#cap-identities"/);
-  assert.match(html, /href="#cap-grants"/);
-  assert.match(html, /href="#cap-catalog"/);
-  assert.match(html, /href="#cap-audit"/);
-  assert.equal(html.includes('id="cap-overview"'), false);
-  assert.match(html, /id="cap-users"/);
-  assert.match(html, /id="cap-identities"/);
-  assert.match(html, /id="cap-grants"/);
-  assert.match(html, /id="cap-catalog"/);
-  assert.match(html, /id="cap-audit"/);
-  assert.equal(html.includes("Counts and top facts for the enforcing capability foundation"), false);
-  assert.equal(html.includes('data-compact-capabilities-overview="true"'), false);
-  assert.equal(html.includes('cap-metric-people'), false);
-  assert.match(html, /capSetNavLabel\('cap-users','Users \('/);
-  assert.match(html, /capSetNavLabel\('cap-catalog','Catalog \('/);
-  assert.match(html, /Coverage subject/);
-  assert.match(html, /Compact people rows/);
-  assert.match(html, /External identity facts/);
-  assert.match(html, /Enforcing grants grouped by subject\/person/);
-  assert.match(html, /Capability groups are collapsed by default/);
-  assert.match(html, /data-compact-capability-catalog/);
-  assert.match(html, /data-capability-group/);
-  assert.match(html, /Source grant\/bundle/);
-  assert.match(html, /owner\/all expanded into rows/);
-  assert.match(html, /placeholders not granted/);
-  assert.match(html, /Effective active coverage/);
-  assert.match(html, /Filter actor \(placeholder\)/);
-  assert.match(html, /Dense audit schema\/feed preview/);
-  assert.match(html, /data-compact-audit/);
-  assert.match(html, /Read-only \/ enforcing/);
-  assert.match(html, /codex-chat auth enforced/);
-  assert.equal(html.includes("Users / People and communication identities"), false);
-  assert.equal(html.includes("Future admin write API shape"), false);
-  assert.match(html, /Runtime Config/);
-  assert.match(html, /Env &amp; Config/);
-  assert.match(html, /Deploy \/ Restart/);
-  assert.match(html, /Audit Log/);
-  assert.match(html, /Audit \/ Feedback/);
-  assert.match(html, /Advanced/);
-  assert.match(html, /Slack setup wizard/);
-  assert.match(html, /Slack setup wizard state/);
-  assert.match(html, /Configure Event Subscriptions inside Slack/);
-  assert.match(html, /https:\/\/brain\.decisive-outcomes\.com\/api\/slack\/events/);
-  assert.match(html, /no trailing slash/);
-  assert.match(html, /I configured this inside Slack, not only in Brain/);
-  assert.match(html, /Open Slack App Settings/);
-  assert.match(html, /id="slack-app-settings-wizard-link"/);
-  assert.match(html, /id="slack-app-settings-top-link"/);
-  assert.match(html, /Slack API settings/);
-  assert.match(html, /https:\/\/api\.slack\.com\/apps/);
-  assert.match(html, /Finish \/ record install metadata/);
-  assert.match(html, /Required settings/);
-  assert.match(html, /Public routing/);
-  assert.match(html, /Slack credentials/);
-  assert.match(html, /Feature flags/);
-  assert.match(html, /required_missing/);
-  assert.match(html, /leave blank to keep existing value/);
-  assert.match(html, /View manifest JSON/);
-  assert.match(html, /Draft only — codex-chat remains source of truth/);
-  assert.match(html, /Confirm live operation/);
-  assert.match(html, /<select[^>]*id="op"[^>]*>[\s\S]*<option value="restart" selected>restart<\/option>/);
-  assert.match(html, /Review & confirm restart/);
-  assert.match(html, /succeeded=result\.ok===true/);
-  assert.match(html, /op\+' failed'/);
-  assert.match(html, /restart failed/);
-  assert.match(html, /Confirm Slack settings write/);
-  assert.match(html, /Review & write Slack settings/);
-  assert.match(html, /profileTargets/);
-  assert.doesNotMatch(html, /openRouterProfilePathFor/);
-  assert.match(html, /Read-only Slack telemetry/);
-  assert.match(html, /Raw \/slack\/telemetry/);
-  assert.match(html, /writes codex-chat runtime env to disk/i);
-  assert.equal(html.includes('id="op-approval"'), false);
-  assert.equal(html.includes('id="slack-approval"'), false);
-  assert.equal(html.includes('Type exactly: write Slack settings'), false);
-  assert.equal(html.includes(FAKE_SLACK_BOT_TOKEN), false);
-  assert.equal(html.includes(FAKE_SLACK_SIGNING_SECRET), false);
-});
-
-test("brain admin page renders direct Slack app settings URL when app id is configured", () => {
-  const cfg = config("/tmp/brain-admin-render-app-id", { slackAppId: "A0123456789" });
-  const html = renderBrainAdminPage(cfg, TEST_ADMIN_EMAIL);
-
-  assert.match(html, /Open Slack App Settings/);
-  assert.match(html, /https:\/\/api\.slack\.com\/apps\/A0123456789/);
-  assert.match(html, /id="slack-app-settings-wizard-url"/);
-  assert.match(html, /id="slack-app-settings-top-url"/);
 });
 
 test("brain admin settings identify the concrete local instance separately from repo registry", async () => {
@@ -464,132 +380,6 @@ test("brain admin settings report live capability enforcement posture", async ()
       assert.equal(payload.capabilities.storePresent, true);
       assert.equal(payload.capabilities.storeValid, true);
       assert.match(payload.capabilities.role, /live enforced/);
-    });
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("brain admin capabilities API exposes v2 identities, grouped catalog, grants, and audit shape", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-capabilities-"));
-  try {
-    await writeJson(path.join(root, "workspace/data/projects.json"), {
-      version: 1,
-      projects: [{ id: "pj_travel", name: "Work/Business Travel", status: "active" }],
-    });
-    await withServer(config(root), authDeps(), async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/api/admin/brain/capabilities`, { headers: authHeaders() });
-      assert.equal(response.status, 200);
-      const payload = await response.json() as {
-        schemaVersion: number;
-        path: string;
-        mode: string;
-        writesEnabled: boolean;
-        enforcement: { enabled: boolean; codexChatChanged: boolean };
-        catalog: { groups: Array<{ id: string; label: string; resourceScope: { wildcardGrantResourceId?: string }; semantics: { impliedCapabilityIds: string[] }; children: Array<{ id: string; label: string; status: string; resourceScope: { wildcardGrantResourceId?: string } }> }>; counts: { groups: number; capabilities: number; activeCapabilities: number; placeholderCapabilities: number } };
-        projectResources: { loaded: boolean; count: number; projects: Array<{ id: string; name: string; resourceScope: string }> };
-        store: { path: string; mode?: string; seededThisRequest: boolean; migratedThisRequest: boolean };
-        defaultSubjectId: string;
-        defaultPersonId: string;
-        people: Array<{ id: string; displayName: string; status: string; primarySubjectId: string }>;
-        externalIdentities: Array<{ id: string; provider: string; personId?: string; providerUserId: string; providerChatId?: string; status: string }>;
-        identityProofs: Array<{ identityId: string; source: string }>;
-        communicationChannels: Array<{ provider: string; kind: string; externalIds: Record<string, string> }>;
-        subjects: Array<{ id: string; kind: string; label: string }>;
-        grantBundles: Array<{ id: string; includes: { capabilityIds: string[] } }>;
-        grants: Array<{ id: string; subjectId: string; capabilityId: string; grantKind: string; bundleId?: string; enforcement: string; resource: { kind: string; id: string; selectors: Record<string, string> } }>;
-        effectiveBySubject: Record<string, { directGroupCapabilityIds: string[]; impliedCapabilityIds: string[]; byCapabilityId: Record<string, { effective: boolean; impliedByCapabilityIds: string[] }> }>;
-        effectiveByPerson: Record<string, { effective: { directBundleIds: string[]; directCapabilityIds: string[]; summary: { activeGrantCount: number; allCapabilities: boolean; allActiveCapabilities: boolean; effectiveCapabilityCount: number; effectiveActiveCapabilityCount: number; totalCapabilityCount: number; activeCapabilityCount: number; placeholderCapabilityCount: number }; byCapabilityId: Record<string, { effective: boolean; directGrantIds: string[]; impliedByBundleIds: string[] }> } }>;
-        adminWriteModel: { writesEnabled: boolean; plannedEndpoints: Array<{ path: string }> };
-        audit: { writesEnabled: boolean; requiredFields: string[]; eventTypes: Array<{ type: string }>; sampleEvent: Record<string, unknown> };
-      };
-
-      assert.equal(payload.schemaVersion, 2);
-      assert.equal(payload.mode, "identity_capability_foundation");
-      assert.equal(payload.path, path.join(root, "capabilities.json"));
-      assert.equal(payload.store.path, path.join(root, "capabilities.json"));
-      assert.equal(payload.writesEnabled, false);
-      assert.equal(payload.enforcement.enabled, false);
-      assert.equal(payload.enforcement.codexChatChanged, false);
-      assert.ok(payload.catalog.counts.groups >= 7);
-      assert.ok(payload.catalog.counts.capabilities >= 20);
-
-      const projects = payload.catalog.groups.find((group) => group.id === "projects");
-      assert.ok(projects);
-      assert.equal(projects.label, "Projects");
-      assert.ok(projects.semantics.impliedCapabilityIds.includes("projects.files.write"));
-      assert.ok(projects.semantics.impliedCapabilityIds.includes("projects.read"));
-      assert.equal(projects.resourceScope.wildcardGrantResourceId, "project:*");
-      assert.equal(projects.children.some((child) => child.id === "projects.project.read"), false);
-      assert.ok(projects.children.some((child) => child.id === "projects.read" && child.resourceScope.wildcardGrantResourceId === "project:*"));
-      assert.ok(projects.children.some((child) => child.id === "projects.tasks.write"));
-      assert.equal(payload.projectResources.loaded, true);
-      assert.equal(payload.projectResources.count, 1);
-      assert.ok(payload.projectResources.projects.some((project) => project.name === "Work/Business Travel" && project.resourceScope === "project:pj_travel"));
-
-      assert.equal(payload.defaultPersonId, "person_tim");
-      assert.equal(payload.defaultSubjectId, "person:person_tim");
-      assert.ok(payload.people.some((person) => person.id === "person_tim" && person.displayName === "Tim" && person.status === "active"));
-      assert.ok(payload.externalIdentities.some((identity) => identity.id === "identity_telegram_253768951" && identity.provider === "telegram" && identity.personId === "person_tim" && identity.providerUserId === "253768951" && identity.providerChatId === "253768951"));
-      assert.ok(payload.externalIdentities.some((identity) => identity.provider === "slack" && identity.personId === "person_tim" && identity.status === "addable_placeholder"));
-      assert.ok(payload.identityProofs.some((proof) => proof.identityId === "identity_telegram_253768951" && proof.source === "telegram_allowlist_migration"));
-      assert.ok(payload.communicationChannels.some((channel) => channel.provider === "telegram" && channel.kind === "telegram_private_chat" && channel.externalIds.chatId === "253768951"));
-      assert.ok(payload.subjects.some((subject) => subject.id === "brain-admin:current" && subject.kind === "admin_user" && subject.label.includes(TEST_ADMIN_EMAIL)));
-      assert.ok(payload.subjects.some((subject) => subject.id === "person:person_tim" && subject.kind === "person"));
-      assert.ok(payload.subjects.some((subject) => subject.id === "slack:channel:T00000000:C00000000" && subject.kind === "slack_channel"));
-      assert.ok(payload.grantBundles.some((bundle) => bundle.id === "bundle.owner.all" && bundle.includes.capabilityIds.includes("projects.files.write") && !bundle.includes.capabilityIds.includes("finance.summary.read")));
-      const timGrants = payload.grants.filter((grant) => grant.subjectId === "person:person_tim");
-      assert.equal(timGrants.length, payload.catalog.counts.activeCapabilities);
-      assert.equal(timGrants.some((grant) => grant.id === "grant_seed_tim_owner_all" || grant.grantKind === "bundle" || grant.capabilityId === "bundle.owner.all"), false);
-      assert.ok(timGrants.some((grant) => grant.id === "grant_seed_tim_owner_projects_read" && grant.capabilityId === "projects.read" && grant.resource.id === "project:*"));
-      assert.ok(timGrants.some((grant) => grant.id === "grant_seed_tim_owner_projects_files_write" && grant.capabilityId === "projects.files.write" && grant.grantKind === "capability" && grant.enforcement === "enforcing"));
-      assert.equal(timGrants.some((grant) => grant.capabilityId === "projects.project.read" || grant.capabilityId === "projects.project.write"), false);
-      assert.equal(timGrants.some((grant) => grant.capabilityId === "finance.summary.read" || grant.capabilityId === "health.record.read"), false);
-      assert.ok(payload.grants.some((grant) => grant.id === "grant_seed_current_admin_projects_group" && grant.capabilityId === "projects" && grant.grantKind === "group" && grant.enforcement === "enforcing"));
-      assert.ok(payload.grants.some((grant) => grant.capabilityId === "slack.channel.read" && grant.grantKind === "capability"));
-
-      const adminEffective = payload.effectiveBySubject["brain-admin:current"];
-      assert.ok(adminEffective);
-      assert.ok(adminEffective.directGroupCapabilityIds.includes("projects"));
-      assert.ok(adminEffective.impliedCapabilityIds.includes("projects.files.write"));
-      assert.equal(adminEffective.byCapabilityId["projects.files.write"].effective, true);
-      assert.deepEqual(adminEffective.byCapabilityId["projects.files.write"].impliedByCapabilityIds, ["projects"]);
-
-      const timEffective = payload.effectiveByPerson.person_tim.effective;
-      assert.deepEqual(timEffective.directBundleIds, []);
-      assert.equal(timEffective.summary.allCapabilities, false);
-      assert.equal(timEffective.summary.allActiveCapabilities, true);
-      assert.equal(timEffective.summary.activeGrantCount, payload.catalog.counts.activeCapabilities);
-      assert.equal(timEffective.summary.effectiveCapabilityCount, payload.catalog.counts.activeCapabilities);
-      assert.equal(timEffective.summary.effectiveActiveCapabilityCount, payload.catalog.counts.activeCapabilities);
-      assert.equal(timEffective.summary.totalCapabilityCount, payload.catalog.counts.capabilities);
-      assert.equal(timEffective.summary.placeholderCapabilityCount, payload.catalog.counts.placeholderCapabilities);
-      assert.equal(timEffective.byCapabilityId["projects.files.write"].effective, true);
-      assert.ok(timEffective.byCapabilityId["projects.files.write"].directGrantIds.includes("grant_seed_tim_owner_projects_files_write"));
-      assert.equal(timEffective.byCapabilityId["finance.summary.read"].effective, false);
-      assert.equal(payload.adminWriteModel.writesEnabled, false);
-      assert.ok(payload.adminWriteModel.plannedEndpoints.some((endpoint) => /identity-links/.test(endpoint.path)));
-
-      assert.equal(payload.audit.writesEnabled, false);
-      assert.ok(payload.audit.requiredFields.includes("correlationId"));
-      assert.ok(payload.audit.eventTypes.some((event) => event.type === "capability.grant.proposed"));
-      assert.ok(payload.audit.eventTypes.some((event) => event.type === "capability.check.observed"));
-      assert.ok(payload.audit.eventTypes.some((event) => event.type === "identity.link.seeded"));
-      assert.equal(JSON.stringify(payload).includes(FAKE_SLACK_BOT_TOKEN), false);
-
-      const fileInfo = await stat(path.join(root, "capabilities.json"));
-      assert.equal(`0${(fileInfo.mode & 0o777).toString(8)}`, "0600");
-      const store = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8")) as { schemaVersion: number; mode: string; audit: { eventTypes: Array<{ type: string }> } };
-      assert.equal(store.schemaVersion, 2);
-      assert.equal(store.mode, "identity_capability_foundation");
-      assert.ok(store.audit.eventTypes.some((event) => event.type === "capability.catalog.viewed"));
-
-      const writeAttempt = await fetch(`${baseUrl}/api/admin/brain/capabilities`, {
-        method: "POST",
-        headers: { ...authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ capabilityId: "projects" }),
-      });
-      assert.equal(writeAttempt.status, 404);
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -1343,100 +1133,6 @@ test("brain admin exposes read-only Slack telemetry without leaking message bodi
   }
 });
 
-test("brain admin persists manual Slack canary outcomes and correlates redacted telemetry", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-slack-canary-"));
-  try {
-    const observedAt = new Date().toISOString();
-    const summaryPath = path.join(root, "codex-chat", "data", "state", "slack_telemetry", "summary.json");
-    await writeFileRecursive(summaryPath, JSON.stringify({
-      schemaVersion: 1,
-      updatedAt: observedAt,
-      counters: { "inbound.accepted": 2, "outbound.success": 1, "context.hydrated": 1 },
-      lastAcceptedEvent: {
-        observedAt,
-        direction: "inbound",
-        outcome: "accepted",
-        eventType: "app_mention",
-        channelId: "CROOT",
-        userId: "U123",
-        text: "must not leak",
-      },
-      lastContextDecision: {
-        observedAt,
-        direction: "context",
-        outcome: "hydrated",
-        sourceKind: "channel",
-        selectedSources: ["channel_history"],
-        messagesIncluded: 5,
-        fallbackCodes: ["no_thread_history:missing_scope"],
-        promptExposed: true,
-        channelId: "CROOT",
-        threadTs: "1782000000.000100",
-      },
-      lastOutboundSuccess: {
-        observedAt,
-        direction: "outbound",
-        outcome: "success",
-        channelId: "CROOT",
-        threadTs: "1782000000.000100",
-        outboundResultCount: 1,
-      },
-      lastSubagentRouting: {
-        observedAt,
-        direction: "subagent",
-        outcome: "callback_routed",
-        channelId: "CROOT",
-        threadTs: "1782000000.000100",
-        outputThreadTsPresent: true,
-      },
-    }));
-
-    await withServer(config(root), authDeps(), async (baseUrl) => {
-      const initial = await fetch(`${baseUrl}/api/admin/brain/slack/canary`, { headers: authHeaders() });
-      assert.equal(initial.status, 200);
-      const initialPayload = await initial.json() as {
-        items: Array<{ id: string; label: string; telemetryHints: string[]; status: string }>;
-        telemetryRollup: { context?: { sourceKind?: string; selectedSources?: string[]; fallbackCodes?: string[] }; outputTarget: { channelId?: string; threadTs?: string }; counts: Record<string, number>; subagent?: { outputThreadTsPresent?: boolean } };
-      };
-      assert.ok(initialPayload.items.some((item) => item.id === "root_channel_attached_thread_reply" && item.label === "Root-channel attached-thread reply"));
-      assert.ok(initialPayload.items.some((item) => item.label === "Telemetry redaction"));
-      assert.equal(initialPayload.telemetryRollup.context?.sourceKind, "channel");
-      assert.deepEqual(initialPayload.telemetryRollup.context?.selectedSources, ["channel_history"]);
-      assert.deepEqual(initialPayload.telemetryRollup.context?.fallbackCodes, ["no_thread_history:missing_scope"]);
-      assert.equal(initialPayload.telemetryRollup.outputTarget.channelId, "CROOT");
-      assert.equal(initialPayload.telemetryRollup.outputTarget.threadTs, "1782000000.000100");
-      assert.equal(initialPayload.telemetryRollup.counts["inbound.accepted"], 2);
-      assert.equal(initialPayload.telemetryRollup.subagent?.outputThreadTsPresent, true);
-      assert.equal(JSON.stringify(initialPayload).includes("must not leak"), false);
-
-      const update = await fetch(`${baseUrl}/api/admin/brain/slack/canary`, {
-        method: "POST",
-        headers: { ...authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({
-          itemId: "root_channel_attached_thread_reply",
-          status: "passed",
-          evidence: `CROOT/1782000000.000100 Bearer ${FAKE_SLACK_BOT_TOKEN}`,
-          notes: "reply landed in attached thread",
-        }),
-      });
-      assert.equal(update.status, 200);
-      const updatePayload = await update.json() as { canary: { counts: Record<string, number>; items: Array<{ id: string; status: string; evidence?: string; notes?: string; updatedBy?: string }> } };
-      assert.equal(updatePayload.canary.counts.passed, 1);
-      const item = updatePayload.canary.items.find((entry) => entry.id === "root_channel_attached_thread_reply");
-      assert.equal(item?.status, "passed");
-      assert.equal(item?.updatedBy, TEST_ADMIN_EMAIL);
-      assert.equal(item?.evidence?.includes(FAKE_SLACK_BOT_TOKEN), false);
-      assert.match(item?.evidence ?? "", /Bearer \[redacted-slack-token\]/);
-
-      const storeText = await readFile(path.join(root, "slack-canary.json"), "utf8");
-      assert.equal(storeText.includes(FAKE_SLACK_BOT_TOKEN), false);
-      assert.match(storeText, /root_channel_attached_thread_reply/);
-    });
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
 
 test("brain admin links directly to Slack app settings when a non-secret app id is configured", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-slack-app-id-"));
@@ -1829,7 +1525,7 @@ test("brain admin env write gates on pinned confirmation or legacy phrase and va
       assert.equal(confirmedWrite.status, 200);
       assert.deepEqual((await confirmedWrite.json() as { writtenKeys: string[] }).writtenKeys.sort(), ["CODEX_CHAT_BASE_URL", "SLACK_BOT_TOKEN"]);
 
-      // The still-live legacy console keeps posting the approval phrase → succeeds.
+      // The legacy approval phrase remains accepted for low-friction env writes.
       const phraseWrite = await fetch(`${baseUrl}/api/admin/brain/codex-chat/env`, {
         method: "POST",
         headers: { ...authHeaders(), "content-type": "application/json" },
@@ -1862,67 +1558,117 @@ test("brain admin env write gates on pinned confirmation or legacy phrase and va
   }
 });
 
-test("admin-v2 static handler serves the SPA shell, guards traversal, and reports an unbuilt UI", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-v2-"));
+test("admin routing cutover serves the SPA at /admin, redirects /admin-v2, and keeps legacy/API routes separate", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-spa-"));
   try {
-    // 503 when the build output is absent (adminV2Dir points at a missing dir).
+    // 503 when the build output is absent (adminUiDir points at a missing dir).
     // The absolute build path must NOT leak into this unauthenticated response.
     const missingDir = path.join(root, "missing-ui");
-    await withServer(config(root, { adminV2Dir: missingDir }), authDeps(), async (baseUrl) => {
-      const unbuilt = await fetch(`${baseUrl}/admin-v2/`);
+    await withServer(config(root, { adminUiDir: missingDir }), authDeps(), async (baseUrl) => {
+      const unbuilt = await fetch(`${baseUrl}${ADMIN_SPA_ROUTE_PATH}/`);
       assert.equal(unbuilt.status, 503);
       const unbuiltBody = await unbuilt.text();
       assert.match(unbuiltBody, /not built/i);
+      assert.match(unbuiltBody, /\/admin/);
+      assert.equal(unbuiltBody.includes("/admin-legacy"), false);
       assert.equal(unbuiltBody.includes(missingDir), false);
     });
 
     // With a build present: index injection, asset serving, SPA fallback, traversal block.
     const uiDir = path.join(root, "ui-dist");
     await mkdir(path.join(uiDir, "assets"), { recursive: true });
-    await writeFile(path.join(uiDir, "index.html"), "<!doctype html><html><head><title>Brain</title></head><body><div id=\"root\"></div></body></html>");
+    await writeFile(path.join(uiDir, "index.html"), "<!doctype html><html><head><title>Brain</title><script type=\"module\" src=\"/admin/assets/app.js\"></script></head><body><div id=\"root\"></div></body></html>");
     await writeFile(path.join(uiDir, "assets", "app.js"), "export const brand = 'brain';\n");
     // A secret-looking file outside the build dir must never be reachable via traversal or symlink.
     await writeFile(path.join(root, "secret.txt"), "TOP-SECRET-VALUE");
     // A symlink INSIDE the build dir pointing outside it must not be served.
     await symlink(path.join(root, "secret.txt"), path.join(uiDir, "leak.txt"));
 
-    await withServer(config(root, { adminV2Dir: uiDir, clerkPublishableKey: "pk_test_admin_v2" }), authDeps(), async (baseUrl) => {
+    await withServer(config(root, { adminUiDir: uiDir, clerkPublishableKey: "pk_test_admin_spa" }), authDeps(), async (baseUrl) => {
+      // The old parallel mount is redirect-only, preserving the path suffix and query string.
+      const oldRoute = await fetch(`${baseUrl}${ADMIN_V2_REDIRECT_ROUTE_PATH}/users?tab=grants`, { redirect: "manual" });
+      assert.equal(oldRoute.status, 308);
+      assert.equal(oldRoute.headers.get("location"), `${ADMIN_SPA_ROUTE_PATH}/users?tab=grants`);
+      const oldPostRoute = await fetch(`${baseUrl}${ADMIN_V2_REDIRECT_ROUTE_PATH}/users`, { method: "POST", redirect: "manual" });
+      assert.equal(oldPostRoute.status, 308);
+      assert.equal(oldPostRoute.headers.get("location"), `${ADMIN_SPA_ROUTE_PATH}/users`);
+
       // Root shell: 200 HTML with the injected non-secret bootstrap config, no-store.
-      const shell = await fetch(`${baseUrl}/admin-v2/`);
+      const shell = await fetch(`${baseUrl}${ADMIN_SPA_ROUTE_PATH}/`);
       assert.equal(shell.status, 200);
       assert.match(shell.headers.get("cache-control") ?? "", /no-store/);
       const shellHtml = await shell.text();
       assert.match(shellHtml, /window\.__BRAIN_UI_CONFIG__/);
-      assert.match(shellHtml, /pk_test_admin_v2/);
+      assert.match(shellHtml, /pk_test_admin_spa/);
+      assert.match(shellHtml, /"signInUrl":"\/admin"/);
+      assert.match(shellHtml, /"routePath":"\/admin"/);
       assert.match(shellHtml, /id="root"/);
+
+      const headShell = await fetch(`${baseUrl}${ADMIN_SPA_ROUTE_PATH}`, { method: "HEAD" });
+      assert.equal(headShell.status, 200);
+      assert.match(headShell.headers.get("content-type") ?? "", /text\/html/);
+      assert.equal(await headShell.text(), "");
 
       // A direct request to index.html goes through the injected, no-store shell
       // path — never the raw file with a long public cache (plan §6.6 / fix).
-      const directIndex = await fetch(`${baseUrl}/admin-v2/index.html`);
+      const directIndex = await fetch(`${baseUrl}${ADMIN_SPA_ROUTE_PATH}/index.html`);
       assert.equal(directIndex.status, 200);
       assert.match(directIndex.headers.get("cache-control") ?? "", /no-store/);
       assert.match(await directIndex.text(), /window\.__BRAIN_UI_CONFIG__/);
 
       // Deep link to an SPA route with no matching file → index.html fallback.
-      const deep = await fetch(`${baseUrl}/admin-v2/settings`);
+      const deep = await fetch(`${baseUrl}${ADMIN_SPA_ROUTE_PATH}/users`);
       assert.equal(deep.status, 200);
       assert.match(await deep.text(), /window\.__BRAIN_UI_CONFIG__/);
 
+      // `/admin/auth/sign-in` is client-side Clerk now, so it is also an SPA shell.
+      const spaSignIn = await fetch(`${baseUrl}${ADMIN_SPA_ROUTE_PATH}/auth/sign-in`);
+      assert.equal(spaSignIn.status, 200);
+      assert.match(await spaSignIn.text(), /window\.__BRAIN_UI_CONFIG__/);
+
+      // The old server-rendered console is gone; no legacy path falls into the SPA.
+      const legacyGone = await fetch(`${baseUrl}/admin-legacy`, { headers: authHeaders() });
+      assert.equal(legacyGone.status, 404);
+      assert.equal((legacyGone.headers.get("content-type") ?? "").includes("application/json"), true);
+      assert.equal((await legacyGone.text()).includes("window.__BRAIN_UI_CONFIG__"), false);
+
+      // Admin API routes stay JSON/auth-gated and never fall through to the SPA shell.
+      const api = await fetch(`${baseUrl}/api/admin/brain/me`, { headers: authHeaders() });
+      assert.equal(api.status, 200);
+      assert.deepEqual(await api.json(), { email: TEST_ADMIN_EMAIL });
+
       // Hashed asset served with a JS content type, real bytes, and a long cache.
-      const asset = await fetch(`${baseUrl}/admin-v2/assets/app.js`);
+      const asset = await fetch(`${baseUrl}${ADMIN_SPA_ROUTE_PATH}/assets/app.js`);
       assert.equal(asset.status, 200);
       assert.match(asset.headers.get("content-type") ?? "", /javascript/);
       assert.match(asset.headers.get("cache-control") ?? "", /max-age=86400/);
       assert.match(await asset.text(), /brand = 'brain'/);
 
       // Path traversal must not escape the build dir.
-      const traversal = await fetch(`${baseUrl}/admin-v2/..%2f..%2fsecret.txt`);
+      const traversal = await fetch(`${baseUrl}${ADMIN_SPA_ROUTE_PATH}/..%2f..%2fsecret.txt`);
       assert.notEqual(traversal.status, 200);
       assert.equal((await traversal.text()).includes("TOP-SECRET-VALUE"), false);
 
       // A symlink inside the build dir pointing outside it must not be served.
-      const symlinked = await fetch(`${baseUrl}/admin-v2/leak.txt`);
+      const symlinked = await fetch(`${baseUrl}${ADMIN_SPA_ROUTE_PATH}/leak.txt`);
       assert.equal((await symlinked.text()).includes("TOP-SECRET-VALUE"), false);
+    });
+
+    await withServer(config(root, { adminUiDir: uiDir, routePath: "/ops/admin", clerkPublishableKey: "pk_test_admin_spa" }), authDeps(), async (baseUrl) => {
+      const oldRoute = await fetch(`${baseUrl}${ADMIN_V2_REDIRECT_ROUTE_PATH}/users?tab=grants`, { redirect: "manual" });
+      assert.equal(oldRoute.status, 308);
+      assert.equal(oldRoute.headers.get("location"), "/ops/admin/users?tab=grants");
+
+      const customShell = await fetch(`${baseUrl}/ops/admin/users`);
+      assert.equal(customShell.status, 200);
+      const customHtml = await customShell.text();
+      assert.match(customHtml, /window\.__BRAIN_UI_CONFIG__/);
+      assert.match(customHtml, /"routePath":"\/ops\/admin"/);
+      assert.match(customHtml, /"signInUrl":"\/ops\/admin"/);
+      assert.match(customHtml, /src="\/ops\/admin\/assets\/app\.js"/);
+
+      const oldDefaultMount = await fetch(`${baseUrl}${ADMIN_SPA_ROUTE_PATH}`);
+      assert.equal(oldDefaultMount.status, 404);
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -2778,6 +2524,7 @@ test("brain capability store migration cleans placeholders, converts to enforcin
     assert.equal(applied.changes.removedGrantIds.includes("g_runtime"), false);
     assert.equal(applied.changes.removedGrantIds.includes("g_runtime_deliver"), false);
     assert.deepEqual(applied.changes.convertedGrantIds, ["g_real"]);
+    assert.deepEqual(applied.changes.enforcementTransitions, [{ grantId: "g_real", from: "non_enforcing", to: "enforcing" }]);
     assert.ok(applied.backup, "pre-migration backup written");
 
     const migrated = JSON.parse(await readFile(storePath, "utf8"));
@@ -2801,7 +2548,7 @@ test("brain capability store migration cleans placeholders, converts to enforcin
     assert.match(again.message, /nothing to do/);
     // planMigration on the migrated store reports no changes.
     const { changes } = planMigration(migrated);
-    assert.deepEqual(changes, { removedSubjectIds: [], removedGrantIds: [], removedIdentityIds: [], convertedGrantIds: [] });
+    assert.deepEqual(changes, { removedSubjectIds: [], removedGrantIds: [], removedIdentityIds: [], convertedGrantIds: [], enforcementTransitions: [] });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

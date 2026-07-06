@@ -1,7 +1,7 @@
 /*
- * Brain admin console base stylesheet. Ported from the dark theme emitted by
- * `css()` in apps/web/src/admin-page.ts (plan §6.6: no CSS framework, reuse the
- * existing tokens and component look — no re-theming).
+ * Brain admin console base stylesheet. Ported from the former server-rendered
+ * console theme (plan §6.6: no CSS framework, reuse the existing tokens and
+ * component look -- no re-theming).
  */
 
 :root {
