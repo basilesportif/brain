@@ -5,16 +5,22 @@ Status: plan; not implemented.
 
 ## Execution model (how this plan is implemented)
 
-Every implementation part of this plan is executed by a dispatched **Opus agent
-running at high reasoning effort**, one part at a time, scoped to a single
-sequencing step (§8) or a coherent slice of one. **Fable supervises and is the
-code reviewer**: it writes each dispatch brief, and after Opus finishes it runs
-a formal code review of the resulting diff (correctness, security/secret-echo,
-adherence to this plan's invariants in §9, tests, and the fail-closed safety
-rails in §6.5) before the work is committed. Fable fixes or re-dispatches
-anything the review rejects; nothing lands unreviewed. The same model applies to
-the codex-chat-side steps (§6.3, §6.7). Progress is tracked with checkboxes
-added per step as work starts, so a crashed or limit-capped session can resume
+Every implementation part of this plan is executed by a dispatched **Codex CLI
+sub-agent running GPT-5.5 at xhigh reasoning effort with fast mode** (via the
+`codex-dispatch` skill: `codex exec -C <worktree> --model gpt-5.5
+-c model_reasoning_effort='"xhigh"' --enable fast_mode`), one part at a time,
+scoped to a single sequencing step (§8) or a coherent slice of one. **Do NOT
+use Opus sub-agents** — steps 1–4 and slice 5a were Opus-implemented before
+this switch; everything from here on goes to Codex. **Fable supervises and is
+the code reviewer**: it writes each dispatch brief, and after Codex finishes it
+runs a formal code review of the resulting diff (correctness,
+security/secret-echo, adherence to this plan's invariants in §9, tests, and the
+fail-closed safety rails in §6.5) before the work is committed. Fable fixes or
+re-dispatches anything the review rejects (fix rounds resume the same Codex
+session via `codex exec resume <session-id>`); nothing lands unreviewed. Codex
+never commits; Fable commits after review. The same model applies to the
+codex-chat-side steps (§6.3, §6.7). Progress is tracked with checkboxes added
+per step as work starts, so a crashed or limit-capped session can resume
 without repeating work.
 
 ### Progress (checkboxes are the source of truth for resume)
@@ -23,7 +29,7 @@ without repeating work.
 - [x] Step 2 — Brain backend: §6.5 reads (summary, catalog, users, paginated audit, dry-run authorize) (Opus-implemented, Fable-reviewed: 10 findings fixed incl. anonymized synthetic fixture, dry-run parity, fail-closed store load, anchored audit cursor; dry-run verified against 4 real logged decisions)
 - [x] Step 3 — Brain backend: §6.5 writes (store migration + backup, grant/identity mutations, impact preview, audit events) (Opus-implemented, Fable-reviewed: 10 confirmed findings fixed — migration retains any subject holding active grants incl. system:codex-chat-runtime, exact-token placeholder matching, migration self-lockout rail, per-group default broad selectors + preview caveat, suspended-subject admins excluded, in-process mutation queue, non-fatal audit-append failure, unknown-capability 400, invalid-body 400, double-revoke no-op; 61/61 tests; migration dry-run + real-run verified against a copy of the live store: runtime subject and both active enforcing grants retained, only zeroed seed subjects + example grant removed)
 - [x] Step 4 — Frontend: React/Vite app at `/admin-v2` (Opus-implemented, Fable-reviewed in two slices). 4a: scaffold + Clerk (@clerk/clerk-react) + path-safe static serving with SPA fallback + Home + Settings; 10 review findings + legacy env-guard finding fixed (server env gate accepts legacy phrase OR confirmed:true, confirmation pins read state, server-exposed confirmationKeys, injected no-store shell, realpath containment, per-key writable, 403 taxonomy, auth-aware polling). 4b: Setup wizard, Users, Operations + Playwright smoke; 10 review findings fixed by replacing the client-side revoke resolution with backend support — GET /users exposes exact grant entries across all active subjects, atomic revoke_batch mutation with single combined impact preview, storeHash pinning with 409 re-preview, per-capability revoke only on individual grants (group/bundle render read-only 'granted via'), preview-gated confirm, busy-inert dialogs, confirmed Reconfigure with provenance retention, read-only service info + on-click restart handshake, synthetic e2e email. 66/66 web tests, UI + root builds, e2e smoke green.
-- [~] Step 5 — codex-chat: §6.3 structured logging + agent tail, §6.7 IPC config command; Brain reroutes env writes — IN FLIGHT 2026-07-05, slice 5a (codex-chat side) dispatched to Opus in isolated worktree /home/tim/pkg/tim/codex-chat/.claude/worktrees/admin-ui-step5 (branch admin-ui-step5; live main checkout untouched): runtime_events JSONL log, SSE agent tail on api.ts, IPC set-config validated by config.ts zod + token-file IPC auth for mutating commands (Phase 6 item 6 minimal), stale dist/admin-* cleanup. Slice 5b (Brain reroutes env writes to IPC with bootstrap fallback, §6.7 appendix sites) follows in this worktree. Recovery: dirty codex-chat worktree = 5a output; review cycle per Execution model (build+test in that repo), Fable commits to admin-ui-step5 branch after review.
+- [~] Step 5 — codex-chat: §6.3 structured logging + agent tail, §6.7 IPC config command; Brain reroutes env writes — IN FLIGHT 2026-07-05, slice 5a (codex-chat side) dispatched to Opus in isolated worktree /home/tim/pkg/tim/codex-chat/.claude/worktrees/admin-ui-step5 (branch admin-ui-step5; live main checkout untouched): runtime_events JSONL log, SSE agent tail on api.ts, IPC set-config validated by config.ts zod + token-file IPC auth for mutating commands (Phase 6 item 6 minimal), stale dist/admin-* cleanup. Slice 5b (Brain reroutes env writes to IPC with bootstrap fallback, §6.7 appendix sites) follows in this worktree — dispatched to Codex GPT-5.5 xhigh per the updated Execution model (not Opus). Recovery: dirty codex-chat worktree = 5a output; review cycle per Execution model (build+test in that repo), Fable commits to admin-ui-step5 branch after review.
 - [ ] Step 6 — Verify: all retained workflows end-to-end against live enforcement
 - [ ] Step 7 — Cut over `/admin` to the new app
 - [ ] Step 8 — Remove old console, canary store/endpoints, stale placeholder types
