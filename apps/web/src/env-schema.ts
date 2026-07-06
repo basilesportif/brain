@@ -31,7 +31,7 @@ export interface EnvKeySchemaEntry {
 
 export interface EnvFieldError {
   key: string;
-  code: "required" | "invalid_format" | "invalid_enum";
+  code: "required" | "invalid_format" | "invalid_enum" | "unknown_key" | "invalid_type";
   message: string;
 }
 

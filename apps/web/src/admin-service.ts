@@ -11,6 +11,7 @@ import { actorContextFromExternalId, evaluateAuthorization, parseCapabilityStore
 import { buildCapabilityCatalog } from "./capability-catalog.js";
 import { buildAuditFeed, buildUsersResponse, type AuditOutcome, type AuditType } from "./capability-admin-reads.js";
 import { commitMutation, previewMutation, CapabilityWriteError, type MutationResult, type MutationSpec } from "./capability-store-write.js";
+import { DEFAULT_CODEX_CHAT_IPC_TIMEOUT_MS, isCodexChatIpcError, sendSetConfig, type CodexChatIpcError, type CodexChatSetConfigResult } from "./codex-chat-ipc.js";
 import { envFileMetadata, expandHomePath, parseEnvKeys, readEnvKeyPresence, resolveEnvFilePath, writeMergedEnvFile } from "./env-file.js";
 import { buildEnvSchema, SECRETISH_RE, validateEnvUpdates, type EnvFieldError } from "./env-schema.js";
 import { renderBrainAdminDeniedPage, renderBrainAdminPage, renderBrainAdminSignInPage } from "./admin-page.js";
@@ -92,7 +93,12 @@ export interface BrainAdminServiceConfig {
   codexChatHost: string;
   codexChatIp: string;
   codexChatPath: string;
+  // Bootstrap/fallback env-file pointer. In normal operation Brain writes via
+  // codexChatIpcSocket; both paths must target the same codex-chat deployment.
   codexChatEnvFile: string;
+  // Local codex-chat IPC socket for config writes. Keep this aligned with
+  // codexChatEnvFile so fallback/bootstrap reads observe the same deployment.
+  codexChatIpcSocket: string;
   codexChatConfigFile?: string;
   codexHomePath: string;
   codexChatServiceName: string;
@@ -157,6 +163,7 @@ export function loadBrainAdminServiceConfig(env: NodeJS.ProcessEnv = process.env
     codexChatIp: env.BRAIN_CODEX_CHAT_IP || env.BRAIN_INSTANCE_IP || localIp,
     codexChatPath,
     codexChatEnvFile: env.BRAIN_CODEX_CHAT_ENV_FILE || "/home/tim/.config/codex-chat/env",
+    codexChatIpcSocket: env.BRAIN_CODEX_CHAT_IPC_SOCKET || path.join(codexChatPath, "data/run/codex-chat.sock"),
     codexChatConfigFile: env.BRAIN_CODEX_CHAT_CONFIG_FILE || path.join(codexChatPath, "config/codex-chat.toml"),
     codexHomePath: env.BRAIN_CODEX_HOME || env.CODEX_HOME || path.join(os.homedir(), ".codex"),
     codexChatServiceName: env.BRAIN_CODEX_CHAT_SERVICE_NAME || "codex-chat.service",
@@ -350,6 +357,7 @@ async function serviceHealth(config: BrainAdminServiceConfig) {
       path: config.codexChatPath,
       serviceName: config.codexChatServiceName,
       envFile,
+      ipcSocket: { path: config.codexChatIpcSocket },
       configFile: config.codexChatConfigFile ? { path: config.codexChatConfigFile, configured: true } : { configured: false },
       codexHome: { path: config.codexHomePath },
     },
@@ -374,6 +382,7 @@ async function serviceSettings(config: BrainAdminServiceConfig) {
       path: config.codexChatPath,
       serviceName: config.codexChatServiceName,
       env,
+      ipcSocket: { path: config.codexChatIpcSocket },
       configFile: config.codexChatConfigFile ? { path: config.codexChatConfigFile, configured: true } : { configured: false },
       codexHome: { path: config.codexHomePath },
       deployCommandConfigured: Boolean(config.codexChatDeployCommand),
@@ -1630,6 +1639,102 @@ async function mainLoopModelSummary(config: BrainAdminServiceConfig) {
   };
 }
 
+type ConfigWritePath = "ipc" | "bootstrap_fallback";
+
+interface CodexChatConfigWriteSuccess {
+  configWritePath: ConfigWritePath;
+}
+
+async function writeCodexChatEnvConfig(
+  response: ServerResponse,
+  config: BrainAdminServiceConfig,
+  updates: Record<string, string>,
+  managedBy: string,
+): Promise<CodexChatConfigWriteSuccess | null> {
+  let ipcResult: CodexChatSetConfigResult;
+  try {
+    ipcResult = await sendSetConfig(config.codexChatIpcSocket, updates, { timeoutMs: DEFAULT_CODEX_CHAT_IPC_TIMEOUT_MS });
+  } catch (error) {
+    if (isCodexChatIpcError(error) && error.kind === "UNAVAILABLE") {
+      const keys = Object.keys(updates);
+      console.warn("[brain-admin] codex-chat IPC unavailable; using bootstrap env-file fallback", {
+        socketPath: config.codexChatIpcSocket,
+        envFile: resolveEnvFilePath(config.codexChatEnvFile),
+        keys,
+        reason: codexChatIpcPublicReason(error),
+      });
+      await writeMergedEnvFile(config.codexChatEnvFile, updates, managedBy);
+      return { configWritePath: "bootstrap_fallback" };
+    }
+    const reason = isCodexChatIpcError(error) ? codexChatIpcPublicReason(error) : "codex-chat IPC config write failed";
+    console.warn("[brain-admin] codex-chat IPC config write failed", {
+      socketPath: config.codexChatIpcSocket,
+      keys: Object.keys(updates),
+      ...(isCodexChatIpcError(error) ? { kind: error.kind, code: error.code, message: error.message, mayHaveApplied: error.mayHaveApplied } : { message: "unknown IPC failure" }),
+    });
+    const mayHaveApplied = isCodexChatIpcError(error) ? error.mayHaveApplied : false;
+    sendJson(response, 502, {
+      error: "codex_chat_config_write_failed",
+      message: mayHaveApplied
+        ? "codex-chat may have applied the env update before the IPC response failed; retry the write to reconverge env and companion config."
+        : reason,
+      configWritePath: "ipc",
+      mayHaveApplied,
+      ...(mayHaveApplied ? { retry: "Retry the same write; set_config is idempotent." } : {}),
+    });
+    return null;
+  }
+
+  if (!ipcResult.ok) {
+    sendCodexChatIpcValidationError(response, ipcResult.fieldErrors);
+    return null;
+  }
+  return { configWritePath: "ipc" };
+}
+
+function sendCodexChatIpcValidationError(response: ServerResponse, fieldErrors: Record<string, string>): void {
+  sendJson(response, 400, {
+    error: "validation_failed",
+    fieldErrors: Object.entries(fieldErrors).map(([key, message]) => ({ key, code: codexChatFieldErrorCode(message), message })),
+  });
+}
+
+function codexChatFieldErrorCode(message: string): EnvFieldError["code"] {
+  if (message === "unknown configuration key") return "unknown_key";
+  if (message === "value must be a string") return "invalid_type";
+  return "invalid_format";
+}
+
+async function readPresenceAfterConfigWrite(config: BrainAdminServiceConfig, updates: Record<string, string>, keys: readonly string[]): Promise<Record<string, boolean>> {
+  const filePresence = await readEnvKeyPresence(config.codexChatEnvFile, keys);
+  return mergePresenceWithRequestedUpdates(filePresence, updates, keys);
+}
+
+function mergePresenceWithRequestedUpdates(filePresence: Record<string, boolean>, updates: Record<string, string>, keys: readonly string[]): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  for (const key of keys) {
+    out[key] = Object.prototype.hasOwnProperty.call(updates, key) ? (updates[key]?.length ?? 0) > 0 : Boolean(filePresence[key]);
+  }
+  return out;
+}
+
+function codexChatIpcPublicReason(error: CodexChatIpcError): string {
+  switch (error.code) {
+    case "TOKEN_UNAVAILABLE":
+      return "codex-chat IPC token file is unavailable";
+    case "SOCKET_UNAVAILABLE":
+      return "codex-chat IPC socket is unavailable";
+    case "AUTH_REJECTED":
+      return "codex-chat IPC authorization failed";
+    case "TIMEOUT":
+      return "codex-chat IPC request timed out";
+    case "MALFORMED_RESPONSE":
+      return "codex-chat IPC response was malformed";
+    default:
+      return "codex-chat IPC config write failed";
+  }
+}
+
 async function handleMainLoopModelWrite(response: ServerResponse, config: BrainAdminServiceConfig, adminEmail: string, payload: Record<string, unknown>): Promise<void> {
   const presetId = typeof payload.preset === "string" ? payload.preset.trim() as MainLoopPresetId : "" as MainLoopPresetId;
   const preset = MAIN_LOOP_PRESETS[presetId];
@@ -1652,13 +1757,15 @@ async function handleMainLoopModelWrite(response: ServerResponse, config: BrainA
   const fieldErrors = validateEnvUpdates(preset.updates);
   if (fieldErrors.length > 0) return sendEnvValidationError(response, fieldErrors);
 
-  await writeMergedEnvFile(config.codexChatEnvFile, preset.updates, "Brain codex-chat main-loop model switcher");
+  const configWrite = await writeCodexChatEnvConfig(response, config, preset.updates, "Brain codex-chat main-loop model switcher");
+  if (!configWrite) return;
   await appendAudit(config, {
     action: "codex-chat.main_loop_model.write",
     adminEmail,
     preset: presetId,
     envFile,
     keys,
+    configWritePath: configWrite.configWritePath,
     values: "redacted non-secret selectors; no provider API keys handled by this action",
     scope: "main-loop-only",
   });
@@ -1667,8 +1774,9 @@ async function handleMainLoopModelWrite(response: ServerResponse, config: BrainA
     preset: presetId,
     envFile,
     writtenKeys: keys,
+    configWritePath: configWrite.configWritePath,
     values: "non-secret selectors redacted in audit; no API keys written",
-    presence: await readEnvKeyPresence(config.codexChatEnvFile, keys),
+    presence: await readPresenceAfterConfigWrite(config, preset.updates, keys),
     restartRequired: true,
     rollbackPreset: "codex-openai-default",
     scope: "main-loop-only; subagent settings unchanged",
@@ -1895,7 +2003,8 @@ async function handleOpenRouterSettingsWrite(response: ServerResponse, config: B
   const fieldErrors = validateEnvUpdates(updates);
   if (fieldErrors.length > 0) return sendEnvValidationError(response, fieldErrors);
 
-  await writeMergedEnvFile(config.codexChatEnvFile, updates, "Brain OpenRouter settings");
+  const configWrite = await writeCodexChatEnvConfig(response, config, updates, "Brain OpenRouter settings");
+  if (!configWrite) return;
   await writeOpenRouterCodexProfile(config.codexHomePath, input);
   if (config.codexChatConfigFile) await writeCodexChatProviderConfig(config.codexChatConfigFile, input);
   await appendAudit(config, {
@@ -1905,6 +2014,7 @@ async function handleOpenRouterSettingsWrite(response: ServerResponse, config: B
     configFile: config.codexChatConfigFile ?? null,
     profilePath: writtenProfilePath,
     keys: writtenEnvKeys,
+    configWritePath: configWrite.configWritePath,
     values: "write-only"
   });
   return sendJson(response, 200, {
@@ -1913,9 +2023,10 @@ async function handleOpenRouterSettingsWrite(response: ServerResponse, config: B
     configFile: config.codexChatConfigFile ?? null,
     profilePath: writtenProfilePath,
     writtenKeys: writtenEnvKeys,
+    configWritePath: configWrite.configWritePath,
     values: "write-only",
-    presence: await readEnvKeyPresence(config.codexChatEnvFile, writtenEnvKeys),
-    apiKeyPresent: Boolean(input.apiKey) || Boolean((await readEnvKeyPresence(config.codexChatEnvFile, ["OPENROUTER_API_KEY"])).OPENROUTER_API_KEY),
+    presence: await readPresenceAfterConfigWrite(config, updates, writtenEnvKeys),
+    apiKeyPresent: (await readPresenceAfterConfigWrite(config, updates, ["OPENROUTER_API_KEY"])).OPENROUTER_API_KEY,
     restartRequired: true
   });
 }
@@ -1955,9 +2066,10 @@ async function handleEnvWrite(response: ServerResponse, config: BrainAdminServic
   if (Object.keys(updates).length === 0) return sendJson(response, 400, { error: "no_entries" });
   const fieldErrors = validateEnvUpdates(updates, { requireNonEmpty: true });
   if (fieldErrors.length > 0) return sendEnvValidationError(response, fieldErrors);
-  await writeMergedEnvFile(config.codexChatEnvFile, updates, "Brain control plane");
-  await appendAudit(config, { action: "codex-chat.env.write", adminEmail, keys: Object.keys(updates), envFile: resolveEnvFilePath(config.codexChatEnvFile) });
-  return sendJson(response, 200, { ok: true, envFile: resolveEnvFilePath(config.codexChatEnvFile), writtenKeys: Object.keys(updates), values: "write-only", presence: await readEnvKeyPresence(config.codexChatEnvFile, Object.keys(updates)), restartRequired: true });
+  const configWrite = await writeCodexChatEnvConfig(response, config, updates, "Brain control plane");
+  if (!configWrite) return;
+  await appendAudit(config, { action: "codex-chat.env.write", adminEmail, keys: Object.keys(updates), envFile: resolveEnvFilePath(config.codexChatEnvFile), configWritePath: configWrite.configWritePath });
+  return sendJson(response, 200, { ok: true, envFile: resolveEnvFilePath(config.codexChatEnvFile), writtenKeys: Object.keys(updates), configWritePath: configWrite.configWritePath, values: "write-only", presence: await readPresenceAfterConfigWrite(config, updates, Object.keys(updates)), restartRequired: true });
 }
 
 async function handleSlackSettingsWrite(response: ServerResponse, config: BrainAdminServiceConfig, adminEmail: string, payload: Record<string, unknown>): Promise<void> {
@@ -1989,9 +2101,10 @@ async function handleSlackSettingsWrite(response: ServerResponse, config: BrainA
   const fieldErrors = validateEnvUpdates(updates, { requireNonEmpty: true });
   if (fieldErrors.length > 0) return sendEnvValidationError(response, fieldErrors);
 
-  await writeMergedEnvFile(config.codexChatEnvFile, updates, "Brain Slack settings");
-  await appendAudit(config, { action: "slack.settings.write", adminEmail, keys: writtenKeys, envFile, values: "write-only" });
-  return sendJson(response, 200, { ok: true, envFile, writtenKeys, values: "write-only", presence: await readEnvKeyPresence(config.codexChatEnvFile, writtenKeys), restartRequired: true });
+  const configWrite = await writeCodexChatEnvConfig(response, config, updates, "Brain Slack settings");
+  if (!configWrite) return;
+  await appendAudit(config, { action: "slack.settings.write", adminEmail, keys: writtenKeys, envFile, configWritePath: configWrite.configWritePath, values: "write-only" });
+  return sendJson(response, 200, { ok: true, envFile, writtenKeys, configWritePath: configWrite.configWritePath, values: "write-only", presence: await readPresenceAfterConfigWrite(config, updates, writtenKeys), restartRequired: true });
 }
 
 async function renderSlackManifestForBrain(config: BrainAdminServiceConfig): Promise<{ requestUrl: string; eventsPath: string; renderer: string; validation?: unknown; manifest: unknown; text: string }> {
@@ -2131,6 +2244,7 @@ function codexProfilePath(codexHomePath: string, profile: string): string {
 }
 
 async function writeOpenRouterCodexProfile(codexHomePath: string, input: OpenRouterSettingsInput): Promise<void> {
+  // TODO(§6.7): needs a codex-chat IPC command for TOML config.
   const filePath = codexProfilePath(codexHomePath, input.codexProfile);
   const body = [
     "# Managed by Brain control plane. No API key value is stored here.",
@@ -2154,6 +2268,7 @@ async function writeOpenRouterCodexProfile(codexHomePath: string, input: OpenRou
 }
 
 async function writeCodexChatProviderConfig(filePath: string, input: OpenRouterSettingsInput): Promise<void> {
+  // TODO(§6.7): needs a codex-chat IPC command for TOML config.
   const resolved = resolveEnvFilePath(filePath);
   await mkdir(path.dirname(resolved), { recursive: true, mode: 0o700 });
   const current = await readTextIfPresent(resolved);
