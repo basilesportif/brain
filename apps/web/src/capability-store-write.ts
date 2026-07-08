@@ -783,9 +783,9 @@ function applyGrant(store: CapabilityStore, spec: Extract<MutationSpec, { kind: 
   const { capabilityIds, expandedFromGroup, vocabularyEntries } = expandGrantTarget(target, store, spec.registry);
   const { subjectId, materialized } = ensureWritablePrimarySubject(store, person);
   const now = new Date().toISOString();
-  // An explicit selectors object in the request wins verbatim; otherwise each
-  // granted capability defaults to the broad selector template for its group so
-  // the grant actually covers the concrete resource keys the runtime sends.
+  // Explicit selectors narrow the named keys but still merge over each
+  // capability's broad selector template so runtime resource keys omitted by
+  // the request remain explicitly covered with wildcards.
   const explicitSelectors = normalizeSelectors(
     spec.selectors && typeof spec.selectors === "object" && !Array.isArray(spec.selectors) ? spec.selectors : undefined,
   );
@@ -802,7 +802,8 @@ function applyGrant(store: CapabilityStore, spec: Extract<MutationSpec, { kind: 
     const grantId = `grant_admin_${shortId()}`;
     const vocabularyEntry = vocabularyEntries.get(capabilityId);
     if (!vocabularyEntry) throw new CapabilityWriteError("unknown_capability", 400, `Unknown capability ${capabilityId}`);
-    const selectors = explicitSelectors ?? defaultSelectorsForGrantEntry(store, capabilityId, vocabularyEntry);
+    const defaults = defaultSelectorsForGrantEntry(store, capabilityId, vocabularyEntry);
+    const selectors = explicitSelectors ? { ...defaults, ...explicitSelectors } : defaults;
     validateSelectorsForCapability(capabilityId, selectors, vocabularyEntries);
     const grant: StoreGrant = {
       id: grantId,
