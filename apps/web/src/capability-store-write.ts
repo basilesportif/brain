@@ -33,6 +33,7 @@ import {
 import {
   actorContextFromExternalId,
   evaluateAuthorization,
+  findExternalIdentity,
   grantedCapabilityIds,
   grantInForce,
   parseCapabilityStore,
@@ -278,7 +279,15 @@ export type MutationSpec =
   | { kind: "unlink_identity"; personId: string; identityId: string; adminEmail: string }
   | { kind: "grant"; personId: string; target: string; selectors?: Record<string, unknown>; registry?: CapabilityCatalogRegistrySource; adminEmail: string }
   | { kind: "revoke"; personId: string; grantId: string; adminEmail: string }
-  | { kind: "revoke_batch"; personId: string; grantIds: string[]; reason?: string; adminEmail: string };
+  | { kind: "revoke_batch"; personId: string; grantIds: string[]; reason?: string; adminEmail: string }
+  | {
+      kind: "onboard_person";
+      displayName: string;
+      identity: { provider: "slack"; externalId: string; teamId: string };
+      grants: Array<{ capabilityId?: string; groupId?: string; selectors?: Record<string, unknown> }>;
+      registry?: CapabilityCatalogRegistrySource;
+      adminEmail: string;
+    };
 
 export interface MutationOutcome {
   changed: boolean;
@@ -536,10 +545,22 @@ function applyLinkIdentity(store: CapabilityStore, spec: Extract<MutationSpec, {
   const now = new Date().toISOString();
 
   const identities = (store.externalIdentities ??= []);
+  if (provider === "slack") {
+    const matchingIdentity = findExternalIdentity(store, { surfaceKind: "slack", surfaceUserId: externalId, teamId });
+    if (matchingIdentity && matchingIdentity.id !== identityId) {
+      throw new CapabilityWriteError("identity_conflict", 409, "Slack identity matches an existing identity record", {
+        existingIdentityId: matchingIdentity.id,
+        existingPersonId: matchingIdentity.personId ?? null,
+      });
+    }
+  }
   let identity = identities.find((candidate) => candidate.id === identityId);
   if (identity) {
     if (identity.personId && identity.personId !== person.id) {
-      throw new CapabilityWriteError("identity_conflict", 409, "Identity is already linked to another person");
+      throw new CapabilityWriteError("identity_conflict", 409, "Identity is already linked to another person", {
+        existingIdentityId: identity.id,
+        existingPersonId: identity.personId,
+      });
     }
     identity.personId = person.id;
     identity.status = "linked";
@@ -911,6 +932,105 @@ function applyRevokeBatch(store: CapabilityStore, spec: Extract<MutationSpec, { 
   };
 }
 
+function applyOnboardPerson(store: CapabilityStore, spec: Extract<MutationSpec, { kind: "onboard_person" }>): MutationOutcome {
+  if (!spec.identity || spec.identity.provider !== "slack") {
+    throw new CapabilityWriteError("invalid_request", 400, "identity.provider must be slack");
+  }
+  if (!Array.isArray(spec.grants)) {
+    throw new CapabilityWriteError("invalid_request", 400, "grants is required");
+  }
+  if (spec.grants.length === 0) {
+    throw new CapabilityWriteError("invalid_request", 400, "At least one grant is required");
+  }
+
+  const created = applyCreatePerson(store, { kind: "create_person", displayName: spec.displayName, adminEmail: spec.adminEmail });
+  const personId = requireNonEmpty(created.personId, "personId");
+  const linked = applyLinkIdentity(store, {
+    kind: "link_identity",
+    personId,
+    provider: spec.identity.provider,
+    externalId: spec.identity.externalId,
+    teamId: spec.identity.teamId,
+    adminEmail: spec.adminEmail,
+  });
+
+  const grantIds: string[] = [];
+  const grantedCapabilityIds: string[] = [];
+  const requestedGrants: Array<{ target: string; expandedFromGroup: boolean; selectors: Record<string, unknown> | null; grantIds: string[]; grantedCapabilityIds: string[] }> = [];
+  const explicitCapabilityIds: string[] = [];
+  const impactResources: Record<string, Record<string, unknown>> = {};
+
+  for (const grant of spec.grants) {
+    if (!grant || typeof grant !== "object" || Array.isArray(grant)) {
+      throw new CapabilityWriteError("invalid_request", 400, "Each grant must be an object");
+    }
+    const capabilityId = typeof grant.capabilityId === "string" && grant.capabilityId.trim() ? grant.capabilityId.trim() : undefined;
+    const groupId = typeof grant.groupId === "string" && grant.groupId.trim() ? grant.groupId.trim() : undefined;
+    if ((capabilityId ? 1 : 0) + (groupId ? 1 : 0) !== 1) {
+      throw new CapabilityWriteError("invalid_request", 400, "Each grant must specify exactly one capabilityId or groupId");
+    }
+    const target = groupId ?? capabilityId ?? "";
+    const grantOutcome = applyGrant(store, {
+      kind: "grant",
+      personId,
+      target,
+      selectors: grant.selectors,
+      registry: spec.registry,
+      adminEmail: spec.adminEmail,
+    });
+    const detail = grantOutcome.detail as {
+      expandedFromGroup?: unknown;
+      selectors?: unknown;
+      grantIds?: unknown;
+      grantedCapabilityIds?: unknown;
+    };
+    const writtenGrantIds = Array.isArray(detail.grantIds) ? detail.grantIds.filter((id): id is string => typeof id === "string") : [];
+    const writtenCapabilityIds = Array.isArray(detail.grantedCapabilityIds) ? detail.grantedCapabilityIds.filter((id): id is string => typeof id === "string") : [];
+    grantIds.push(...writtenGrantIds);
+    grantedCapabilityIds.push(...writtenCapabilityIds);
+    explicitCapabilityIds.push(...(grantOutcome.explicitCapabilityIds ?? []));
+    Object.assign(impactResources, grantOutcome.impactResources);
+    requestedGrants.push({
+      target,
+      expandedFromGroup: detail.expandedFromGroup === true,
+      selectors: detail.selectors && typeof detail.selectors === "object" && !Array.isArray(detail.selectors) ? detail.selectors as Record<string, unknown> : null,
+      grantIds: writtenGrantIds,
+      grantedCapabilityIds: writtenCapabilityIds,
+    });
+  }
+
+  return {
+    changed: true,
+    personId,
+    explicitCapabilityIds: [...new Set(explicitCapabilityIds)],
+    impactResources,
+    audit: {
+      action: "onboard_person",
+      adminEmail: spec.adminEmail,
+      personId,
+      identityId: linked.detail.identityId,
+      provider: spec.identity.provider,
+      displayName: created.detail.displayName,
+      externalId: spec.identity.externalId,
+      teamId: spec.identity.teamId,
+      grantIds,
+      capabilityIds: [...new Set(grantedCapabilityIds)],
+    },
+    detail: {
+      personId,
+      subjectId: created.detail.subjectId,
+      displayName: created.detail.displayName,
+      identityId: linked.detail.identityId,
+      provider: spec.identity.provider,
+      teamId: spec.identity.teamId,
+      externalId: spec.identity.externalId,
+      grants: requestedGrants,
+      grantIds,
+      grantedCapabilityIds: [...new Set(grantedCapabilityIds)],
+    },
+  };
+}
+
 export function applySpec(store: CapabilityStore, spec: MutationSpec): MutationOutcome {
   switch (spec.kind) {
     case "create_person":
@@ -925,6 +1045,8 @@ export function applySpec(store: CapabilityStore, spec: MutationSpec): MutationO
       return applyRevoke(store, spec);
     case "revoke_batch":
       return applyRevokeBatch(store, spec);
+    case "onboard_person":
+      return applyOnboardPerson(store, spec);
     default: {
       const exhaustive: never = spec;
       throw new CapabilityWriteError("invalid_request", 400, `Unknown mutation ${String((exhaustive as { kind?: string }).kind)}`);

@@ -8,10 +8,10 @@ import process from "node:process";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { authorizeBrainAdminRequest, isBrainAdminAuthConfigured, parseAdminAllowedEmails, type ClerkUserLookup, type VerifyClerkToken } from "./admin-auth.js";
-import { actorContextFromExternalId, evaluateAuthorization, parseCapabilityStore, type CapabilityStore } from "./capability-store.js";
+import { actorContextFromExternalId, evaluateAuthorization, parseCapabilityStore, resolveActorSubjects, type CapabilityStore } from "./capability-store.js";
 import { buildCapabilityCatalog, catalogDefinitionsForSource, type CapabilityCatalogRegistrySource } from "./capability-catalog.js";
 import { buildAuditFeed, buildUsersResponse, type AuditOutcome, type AuditType } from "./capability-admin-reads.js";
-import { commitMutation, createCapabilityStoreIfMissing, previewMutation, migrateCapabilityStore, CapabilityWriteError, type MigrationResult, type MutationResult, type MutationSpec } from "./capability-store-write.js";
+import { commitMutation, createCapabilityStoreIfMissing, previewMutation, migrateCapabilityStore, hashStoreText, CapabilityWriteError, type MigrationResult, type MutationResult, type MutationSpec } from "./capability-store-write.js";
 import { DEFAULT_CODEX_CHAT_IPC_TIMEOUT_MS, getCapabilityRegistry, isCodexChatIpcError, sendSetConfig, type CodexChatIpcError, type CodexChatSetConfigResult } from "./codex-chat-ipc.js";
 import { atomicWriteFile, envFileMetadata, expandHomePath, parseEnvKeys, readEnvKeyPresence, resolveEnvFilePath, writeMergedEnvFile } from "./env-file.js";
 import { buildEnvSchema, SECRETISH_RE, validateEnvUpdates, type EnvFieldError } from "./env-schema.js";
@@ -328,6 +328,9 @@ async function handleAdminApi(request: IncomingMessage, response: ServerResponse
   }
   if (isReadMethod(request.method) && url.pathname === "/api/admin/brain/users") {
     return handleCapabilityUsers(response, config);
+  }
+  if (isReadMethod(request.method) && url.pathname === "/api/admin/brain/users/pending") {
+    return handlePendingCapabilityUsers(response, config);
   }
   if (url.pathname === "/api/admin/brain/users" || url.pathname.startsWith("/api/admin/brain/users/")) {
     try {
@@ -867,7 +870,7 @@ async function countCapabilityDenialsInFile(filePath: string, cutoffMs: number):
 // (`brain_store_unavailable:<path>`, `brain_store_invalid`,
 // `brain_store_invalid_schema`); `httpStoreReason` strips the path before it is
 // surfaced over HTTP.
-async function loadCapabilityStore(config: BrainAdminServiceConfig): Promise<{ store?: CapabilityStore; error?: string }> {
+async function loadCapabilityStore(config: BrainAdminServiceConfig): Promise<{ store?: CapabilityStore; storeHash?: string; error?: string }> {
   const storePath = resolveEnvFilePath(config.capabilityStorePath);
   let text: string;
   try {
@@ -878,7 +881,7 @@ async function loadCapabilityStore(config: BrainAdminServiceConfig): Promise<{ s
     return { error: `brain_store_unavailable:${storePath}` };
   }
   try {
-    return { store: parseCapabilityStore(text) };
+    return { store: parseCapabilityStore(text), storeHash: hashStoreText(text) };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     // Anchor the unavailable reason to the store path exactly as codex-chat does.
@@ -902,6 +905,105 @@ async function handleCapabilityUsers(response: ServerResponse, config: BrainAdmi
   const [{ store, error }, registry] = await Promise.all([loadCapabilityStore(config), capabilityRegistrySnapshot(config)]);
   if (error) return sendJson(response, 503, { error: "capability_store_unavailable", reason: httpStoreReason(error) });
   return sendJson(response, 200, buildUsersResponse(store, catalogDefinitionsForSource(store, registry), undefined, registry));
+}
+
+interface PendingSlackPerson {
+  actorId: string;
+  provider: "slack";
+  teamId: string;
+  userId: string;
+  displayName?: string;
+  channelIds: string[];
+  firstSeen: string;
+  lastSeen: string;
+  lastReason: string;
+  count: number;
+}
+
+function decisionTime(record: Record<string, unknown>): string | undefined {
+  return typeof record.checkedAt === "string" ? record.checkedAt : typeof record.recordedAt === "string" ? record.recordedAt : undefined;
+}
+
+function channelIdFromDecision(record: Record<string, unknown>): string | undefined {
+  const summary = record.resourceSummary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) return undefined;
+  const channelId = (summary as Record<string, unknown>).channelId;
+  return typeof channelId === "string" && channelId.trim() ? channelId.trim() : undefined;
+}
+
+function pendingSlackReason(record: Record<string, unknown>): string | undefined {
+  if (record.allowed !== false) return undefined;
+  if (record.reason === "actor_not_linked_to_brain_subject") return record.reason;
+  if (typeof record.reason === "string" && record.reason.startsWith("identity_inactive:")) return record.reason;
+  return undefined;
+}
+
+function buildPendingSlackPeople(store: CapabilityStore, records: Record<string, unknown>[]): PendingSlackPerson[] {
+  const byActor = new Map<string, PendingSlackPerson & { firstSeenMs: number; lastSeenMs: number; displayNameSeenMs: number; channels: Set<string> }>();
+  for (const record of records) {
+    const reason = pendingSlackReason(record);
+    if (!reason) continue;
+    const actorId = typeof record.actorId === "string" ? record.actorId : "";
+    const match = /^slack:team:([^:]+):user:(.+)$/.exec(actorId);
+    if (!match) continue;
+    const [, teamId, userId] = match;
+    const seen = decisionTime(record);
+    const seenMs = seen ? Date.parse(seen) : NaN;
+    if (!seen || !Number.isFinite(seenMs)) continue;
+    const current = byActor.get(actorId);
+    const channelId = channelIdFromDecision(record);
+    const displayName = typeof record.actorDisplayName === "string" && record.actorDisplayName.trim() ? record.actorDisplayName.trim() : undefined;
+    if (!current) {
+      byActor.set(actorId, {
+        actorId,
+        provider: "slack",
+        teamId,
+        userId,
+        displayName,
+        channelIds: [],
+        channels: channelId ? new Set([channelId]) : new Set<string>(),
+        firstSeen: seen,
+        lastSeen: seen,
+        lastReason: reason,
+        firstSeenMs: seenMs,
+        lastSeenMs: seenMs,
+        displayNameSeenMs: displayName ? seenMs : -1,
+        count: 1,
+      });
+      continue;
+    }
+    current.count += 1;
+    if (channelId) current.channels.add(channelId);
+    if (displayName && seenMs >= current.displayNameSeenMs) {
+      current.displayName = displayName;
+      current.displayNameSeenMs = seenMs;
+    }
+    if (seenMs < current.firstSeenMs) {
+      current.firstSeen = seen;
+      current.firstSeenMs = seenMs;
+    }
+    if (seenMs > current.lastSeenMs) {
+      current.lastSeen = seen;
+      current.lastSeenMs = seenMs;
+      current.lastReason = reason;
+    }
+  }
+  return [...byActor.values()]
+    .filter((row) => !resolveActorSubjects(store, actorContextFromExternalId(row.actorId)).allowed)
+    .sort((a, b) => b.lastSeenMs - a.lastSeenMs)
+    .map(({ channels, firstSeenMs, lastSeenMs, displayNameSeenMs, ...row }) => ({ ...row, channelIds: [...channels].sort() }));
+}
+
+async function handlePendingCapabilityUsers(response: ServerResponse, config: BrainAdminServiceConfig): Promise<void> {
+  const [{ store, storeHash, error }, records] = await Promise.all([loadCapabilityStore(config), readCapabilityDecisionRecords(config, 7)]);
+  if (error || !store || !storeHash) return sendJson(response, 503, { error: "capability_store_unavailable", reason: httpStoreReason(error ?? "brain_store_unavailable") });
+  const pending = buildPendingSlackPeople(store, records);
+  return sendJson(response, 200, {
+    schemaVersion: 1,
+    storeHash,
+    people: pending,
+    counts: { people: pending.length },
+  });
 }
 
 async function handleCapabilityCheck(response: ServerResponse, config: BrainAdminServiceConfig, payload: Record<string, unknown>): Promise<void> {
@@ -947,7 +1049,7 @@ function parseJsonlRecords(text: string): Record<string, unknown>[] {
   return records;
 }
 
-async function readCapabilityDecisionRecords(config: BrainAdminServiceConfig): Promise<Record<string, unknown>[]> {
+async function readCapabilityDecisionRecords(config: BrainAdminServiceConfig, maxFiles = AUDIT_MAX_DECISION_FILES): Promise<Record<string, unknown>[]> {
   const dir = await capabilityDecisionsDirPath(config);
   let entries: string[];
   try {
@@ -957,7 +1059,7 @@ async function readCapabilityDecisionRecords(config: BrainAdminServiceConfig): P
   }
   // Read the per-day files in parallel (bounded by AUDIT_MAX_DECISION_FILES and
   // each file's tail window) instead of awaiting them one at a time.
-  const texts = await Promise.all(entries.slice(0, AUDIT_MAX_DECISION_FILES).map((name) => readFileTail(path.join(dir, name), AUDIT_TAIL_BYTES)));
+  const texts = await Promise.all(entries.slice(0, maxFiles).map((name) => readFileTail(path.join(dir, name), AUDIT_TAIL_BYTES)));
   const records: Record<string, unknown>[] = [];
   for (const text of texts) records.push(...parseJsonlRecords(text));
   return records;
@@ -1082,6 +1184,28 @@ async function handleCapabilityUserMutation(
     if (method !== "POST") return false;
     const body = await readJsonBodyOptional(request);
     const spec: MutationSpec = { kind: "create_person", displayName: String((body.displayName as string) ?? ""), adminEmail };
+    await runMutation(response, config, url, body, spec);
+    return true;
+  }
+
+  // POST /users/onboard — atomic create person + link Slack identity + initial grants.
+  if (segments.length === 1 && segments[0] === "onboard") {
+    if (method !== "POST") return false;
+    const body = await readJsonBodyOptional(request);
+    const identity = body.identity && typeof body.identity === "object" && !Array.isArray(body.identity) ? body.identity as Record<string, unknown> : {};
+    const registry = await capabilityRegistrySnapshot(config);
+    const spec: MutationSpec = {
+      kind: "onboard_person",
+      displayName: String((body.displayName as string) ?? ""),
+      identity: {
+        provider: "slack",
+        externalId: String((identity.externalId as string) ?? ""),
+        teamId: String((identity.teamId as string) ?? ""),
+      },
+      grants: body.grants as Array<{ capabilityId?: string; groupId?: string; selectors?: Record<string, unknown> }>,
+      registry,
+      adminEmail,
+    };
     await runMutation(response, config, url, body, spec);
     return true;
   }
