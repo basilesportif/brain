@@ -10,6 +10,7 @@ import { createBrainAdminServer, initializeBrainAdminCapabilityStore, loadBrainA
 import { fakeIpcToken, startFakeCodexChatIpc, type FakeCodexChatIpcServer } from "./codex-chat-ipc.test-helpers.js";
 import { mergeEnvFileText } from "./env-file.js";
 import { LIVE_CAPABILITY_STORE_JSON } from "./capability-store.fixture.js";
+import { evaluateAuthorization, parseCapabilityStore } from "./capability-store.js";
 import { assertValidStore, CapabilityWriteError, commitMutation, migrateCapabilityStore, planMigration } from "./capability-store-write.js";
 
 const TEST_ADMIN_EMAIL = "tim@example.com";
@@ -1775,14 +1776,46 @@ const SYNTHETIC_REGISTRY = {
   ],
 };
 
+const RUNTIME_SELECTOR_KEYS = ["source", "surfaceKind", "teamId", "channelId", "threadTs", "messageTs", "chatId", "messageId", "conversationSessionId", "actorId", "targetId", "targetPolicy", "outputType"];
+
+function runtimeSelectors(overrides: Record<string, string> = {}): Record<string, string> {
+  return { ...Object.fromEntries(RUNTIME_SELECTOR_KEYS.map((key) => [key, "*"])), ...overrides };
+}
+
 const ONBOARD_REGISTRY = {
   registryVersion: 8,
   capabilities: [
-    { id: "slack.event.receive", family: "events", description: "Receive Slack events.", selectorKeys: ["teamId"], riskTier: "low" },
-    { id: "assistant.run", family: "assistant", description: "Run assistant.", selectorKeys: ["teamId"], riskTier: "medium" },
-    { id: "output.text.send", family: "output", description: "Send text output.", selectorKeys: ["surfaceKind", "teamId"], riskTier: "medium" },
+    { id: "slack.event.receive", family: "events", description: "Receive Slack events.", selectorKeys: RUNTIME_SELECTOR_KEYS, riskTier: "low" },
+    { id: "assistant.run", family: "assistant", description: "Run assistant.", selectorKeys: RUNTIME_SELECTOR_KEYS, riskTier: "medium" },
+    { id: "output.text.send", family: "output", description: "Send text output.", selectorKeys: RUNTIME_SELECTOR_KEYS, riskTier: "medium" },
   ],
 };
+
+function fullSlackEventResource(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    source: "slack",
+    surfaceKind: "slack",
+    teamId: "T00SYNTH01",
+    channelId: "C00SYNTH01",
+    threadTs: "1700000001.000100",
+    messageTs: "1700000001.000100",
+    messageId: "1700000001.000100",
+    conversationSessionId: "session_synth01",
+    actorId: "slack:team:T00SYNTH01:user:U00SYNTH01",
+    ...overrides,
+  };
+}
+
+function fullRuntimeResource(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    ...fullSlackEventResource(),
+    chatId: "chat_synth01",
+    targetId: "target_synth01",
+    targetPolicy: "default",
+    outputType: "text",
+    ...overrides,
+  };
+}
 
 function registryCatalogStore(): unknown {
   return {
@@ -2498,6 +2531,43 @@ function onboardPayload(overrides: Record<string, unknown> = {}): Record<string,
   };
 }
 
+test("brain team-scoped Slack receive grant authorizes full runtime Slack event resources", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-slack-scoped-grant-"));
+  let ipc: FakeCodexChatIpcServer | undefined;
+  try {
+    await writeLiveStore(root);
+    ipc = await startFakeCodexChatIpc(root, { capabilityRegistry: ONBOARD_REGISTRY });
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const created = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users", { displayName: "Slack Scoped Person" });
+      const personId = created.payload.detail.personId as string;
+      await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/identities`, { provider: "slack", externalId: "U00SYNTH01", teamId: "T00SYNTH01" });
+
+      const grant = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/grants`, { capabilityId: "slack.event.receive", selectors: { teamId: "T00SYNTH01" } });
+      assert.equal(grant.status, 200);
+
+      const store = parseCapabilityStore(await readFile(path.join(root, "capabilities.json"), "utf8"));
+      const written = store.grants?.find((row) => row.id === grant.payload.detail.grantIds[0]);
+      assert.deepEqual(written?.resource?.selectors, runtimeSelectors({ teamId: "T00SYNTH01" }));
+
+      const actor = { id: "slack:team:T00SYNTH01:user:U00SYNTH01", surfaceKind: "slack", surfaceUserId: "U00SYNTH01", teamId: "T00SYNTH01" };
+      const allowed = evaluateAuthorization(store, {
+        actor,
+        requirement: { operation: "slack.event.receive", action: "receive", resource: fullSlackEventResource() },
+      });
+      assert.equal(allowed.allowed, true);
+
+      const wrongTeam = evaluateAuthorization(store, {
+        actor,
+        requirement: { operation: "slack.event.receive", action: "receive", resource: fullSlackEventResource({ teamId: "T00SYNTH02" }) },
+      });
+      assert.equal(wrongTeam.allowed, false);
+    });
+  } finally {
+    if (ipc) await ipc.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("brain onboard_person creates a person, Slack identity, and initial grants atomically", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-onboard-"));
   let ipc: FakeCodexChatIpcServer | undefined;
@@ -2515,19 +2585,25 @@ test("brain onboard_person creates a person, Slack identity, and initial grants 
 
       const personId = onboard.payload.detail.personId as string;
       const subjectId = onboard.payload.detail.subjectId as string;
-      const stored = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8"));
-      const person = stored.people.find((row: any) => row.id === personId);
-      assert.equal(person.displayName, "Slack Pending Person");
-      assert.ok(person.identityIds.includes("identity_slack_T00SYNTH01_U00SYNTHON"));
-      const identity = stored.externalIdentities.find((row: any) => row.id === "identity_slack_T00SYNTH01_U00SYNTHON");
-      assert.equal(identity.personId, personId);
-      assert.equal(identity.providerTeamId, "T00SYNTH01");
-      const writtenGrants = stored.grants.filter((grant: any) => onboard.payload.detail.grantIds.includes(grant.id));
+      const stored = parseCapabilityStore(await readFile(path.join(root, "capabilities.json"), "utf8"));
+      const person = stored.people?.find((row) => row.id === personId);
+      assert.equal(person?.displayName, "Slack Pending Person");
+      assert.ok(person?.identityIds?.includes("identity_slack_T00SYNTH01_U00SYNTHON"));
+      const identity = stored.externalIdentities?.find((row) => row.id === "identity_slack_T00SYNTH01_U00SYNTHON");
+      assert.equal(identity?.personId, personId);
+      assert.equal(identity?.providerTeamId, "T00SYNTH01");
+      const writtenGrants = (stored.grants ?? []).filter((grant) => onboard.payload.detail.grantIds.includes(grant.id));
       assert.equal(writtenGrants.length, 3);
-      assert.ok(writtenGrants.every((grant: any) => grant.subjectId === subjectId && grant.status === "active" && grant.enforcement === "enforcing"));
-      assert.deepEqual(writtenGrants.find((grant: any) => grant.capabilityId === "slack.event.receive").resource.selectors, { teamId: "T00SYNTH01" });
-      assert.deepEqual(writtenGrants.find((grant: any) => grant.capabilityId === "assistant.run").resource.selectors, { teamId: "T00SYNTH01" });
-      assert.deepEqual(writtenGrants.find((grant: any) => grant.capabilityId === "output.text.send").resource.selectors, { surfaceKind: "slack", teamId: "T00SYNTH01" });
+      assert.ok(writtenGrants.every((grant) => grant.subjectId === subjectId && grant.status === "active" && grant.enforcement === "enforcing"));
+      assert.deepEqual(writtenGrants.find((grant) => grant.capabilityId === "slack.event.receive")?.resource?.selectors, runtimeSelectors({ teamId: "T00SYNTH01" }));
+      assert.deepEqual(writtenGrants.find((grant) => grant.capabilityId === "assistant.run")?.resource?.selectors, runtimeSelectors({ teamId: "T00SYNTH01" }));
+      assert.deepEqual(writtenGrants.find((grant) => grant.capabilityId === "output.text.send")?.resource?.selectors, runtimeSelectors({ surfaceKind: "slack", teamId: "T00SYNTH01" }));
+
+      const actor = { id: "slack:team:T00SYNTH01:user:U00SYNTHON", surfaceKind: "slack", surfaceUserId: "U00SYNTHON", teamId: "T00SYNTH01" };
+      assert.equal(evaluateAuthorization(stored, { actor, requirement: { operation: "slack.event.receive", action: "receive", resource: fullSlackEventResource({ actorId: "slack:team:T00SYNTH01:user:U00SYNTHON" }) } }).allowed, true);
+      assert.equal(evaluateAuthorization(stored, { actor, requirement: { operation: "assistant.run", action: "run", resource: fullRuntimeResource({ actorId: "slack:team:T00SYNTH01:user:U00SYNTHON" }) } }).allowed, true);
+      assert.equal(evaluateAuthorization(stored, { actor, requirement: { operation: "output.text.send", action: "send", resource: fullRuntimeResource({ actorId: "slack:team:T00SYNTH01:user:U00SYNTHON" }) } }).allowed, true);
+      assert.equal(evaluateAuthorization(stored, { actor, requirement: { operation: "output.text.send", action: "send", resource: fullRuntimeResource({ actorId: "slack:team:T00SYNTH01:user:U00SYNTHON", surfaceKind: "telegram" }) } }).allowed, false);
 
       const outputCheck = await jsonRequest(baseUrl, "POST", "/api/admin/brain/capabilities/check", {
         actorId: "slack:team:T00SYNTH01:user:U00SYNTHON",
@@ -3076,10 +3152,10 @@ test("brain migration refuses to strip the last capability-admin (lockout rail)"
   }
 });
 
-// Finding 4: a default-created grant carries the broad selector template for the
-// capability's group, so a live request with concrete resource keys is
-// authorized; an explicit selectors object is preserved verbatim.
-test("brain grant defaults broad selectors that cover concrete resource keys; explicit selectors preserved", async () => {
+// Finding 4: default-created grants carry the broad selector template for the
+// capability's group, and explicit selectors merge over that template so live
+// resources remain explicitly covered for every runtime selector key.
+test("brain grant defaults broad selectors and merges explicit selectors over default coverage", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-selectors-"));
   let ipc: FakeCodexChatIpcServer | undefined;
   try {
@@ -3104,16 +3180,30 @@ test("brain grant defaults broad selectors that cover concrete resource keys; ex
       const preview = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/grants?preview=true`, { capabilityId: "todos.item.read" });
       assert.match(preview.payload.impact.previewCaveat as string, /selector/);
 
-      // Explicit narrower selectors are stored verbatim.
+      // Explicit narrower selectors override the named key while omitted keys
+      // keep the default wildcard coverage.
       const grantNarrow = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${personId}/grants`, { capabilityId: "calendar.event.read", selectors: { calendarId: "cal_1" } });
       const narrowId = grantNarrow.payload.detail.grantIds[0] as string;
       const stored = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8"));
       const narrow = stored.grants.find((g: any) => g.id === narrowId);
-      assert.deepEqual(narrow.resource.selectors, { calendarId: "cal_1" });
+      assert.deepEqual(narrow.resource.selectors, { scope: "*", calendarId: "cal_1" });
       assert.ok(grantNarrow.payload.impact.summary.newlyAllowedCount > 0);
       // The default crm grant on this new subject stores the curated broad template.
       const crmGrant = stored.grants.find((g: any) => g.subjectId === subjectId && g.capabilityId === "crm.contact.read");
       assert.deepEqual(crmGrant.resource.selectors, { scope: "*", contactId: "*" });
+
+      const crmPerson = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users", { displayName: "CRM Scoped Person" });
+      const crmPersonId = crmPerson.payload.detail.personId as string;
+      await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${crmPersonId}/identities`, { provider: "telegram", externalId: "900000403" });
+      const grantCrmWrite = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${crmPersonId}/grants`, { capabilityId: "crm.contact.write", selectors: { contactId: "c1" } });
+      assert.equal(grantCrmWrite.status, 200);
+
+      const crmScopedStore = parseCapabilityStore(await readFile(path.join(root, "capabilities.json"), "utf8"));
+      const crmWriteGrant = crmScopedStore.grants?.find((row) => row.id === grantCrmWrite.payload.detail.grantIds[0]);
+      assert.deepEqual(crmWriteGrant?.resource?.selectors, { scope: "*", contactId: "c1" });
+      const crmActor = { id: "telegram:user:900000403", surfaceKind: "telegram", surfaceUserId: "900000403" };
+      assert.equal(evaluateAuthorization(crmScopedStore, { actor: crmActor, requirement: { operation: "crm.contact.write", action: "write", resource: { scope: "owner_all", contactId: "c1" } } }).allowed, true);
+      assert.equal(evaluateAuthorization(crmScopedStore, { actor: crmActor, requirement: { operation: "crm.contact.write", action: "write", resource: { scope: "owner_all", contactId: "c2" } } }).allowed, false);
     });
   } finally {
     if (ipc) await ipc.close();
