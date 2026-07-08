@@ -691,6 +691,71 @@ select:focus {
   min-width: 240px;
   flex: 1;
 }
+.pending-people {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #0d182acc;
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+.pending-people-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: start;
+}
+.pending-people-head h2 {
+  margin: 0 0 2px;
+  font-size: 16px;
+}
+.pending-people-head p {
+  margin: 0;
+}
+.pending-list {
+  display: grid;
+  gap: 8px;
+}
+.pending-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) repeat(4, max-content) max-content;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid #263b57;
+  border-radius: 10px;
+  background: #0b1627;
+  padding: 9px 10px;
+}
+.pending-person-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.onboard-grants {
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+.onboard-grants label,
+.onboard-group-checks label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.onboard-grants input[type="checkbox"],
+.onboard-group-checks input[type="checkbox"] {
+  width: auto;
+}
+.onboard-grants p {
+  margin: 0;
+}
+.onboard-group-checks {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
 .user-list {
   display: grid;
   gap: 10px;
@@ -967,5 +1032,12 @@ select:focus {
   }
   .user-card-head {
     flex-wrap: wrap;
+  }
+  .pending-people-head,
+  .pending-row {
+    grid-template-columns: 1fr;
+  }
+  .pending-people-head {
+    display: grid;
   }
 }

@@ -359,6 +359,26 @@ export interface UsersResponse {
   counts: { people: number; systemSubjects: number };
 }
 
+export interface PendingPersonSummary {
+  actorId: string;
+  provider: "slack";
+  teamId: string;
+  userId: string;
+  displayName?: string;
+  channelIds: string[];
+  firstSeen: string;
+  lastSeen: string;
+  lastReason: string;
+  count: number;
+}
+
+export interface PendingPeopleResponse {
+  schemaVersion: 1;
+  storeHash: string;
+  people: PendingPersonSummary[];
+  counts: { people: number };
+}
+
 export interface CatalogCapability {
   id: string;
   label: string;
@@ -434,6 +454,13 @@ export interface MutationResponse {
   detail: Record<string, unknown>;
   storeHash: string;
   auditWriteFailed?: boolean;
+}
+
+export interface OnboardPersonPayload {
+  displayName: string;
+  identity: { provider: "slack"; externalId: string; teamId: string };
+  grants: Array<{ capabilityId?: string; groupId?: string; selectors?: Record<string, string> }>;
+  expectedStoreHash?: string;
 }
 
 // --- §5.5 audit feed (GET /audit) --------------------------------------------

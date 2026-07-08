@@ -1,8 +1,9 @@
-import { useState } from "react";
-import { useCatalog, useCreatePerson, useUsers } from "../lib/queries";
+import { useEffect, useMemo, useState } from "react";
+import { useCatalog, useCreatePerson, useOnboardPerson, usePendingPeople, useUsers } from "../lib/queries";
 import { ErrorNotice, Loading, RawJson, describeError } from "../components/common";
 import { UserDetail } from "./users/UserDetail";
-import type { CapabilityCatalogResponse, UserSummary } from "../api-types";
+import { ImpactDialog } from "./users/ImpactDialog";
+import type { CapabilityCatalogResponse, CatalogCapability, CatalogGroup, OnboardPersonPayload, PendingPersonSummary, UserSummary } from "../api-types";
 
 // Users (plan §5.4): live authorization management. Store problems render as
 // blocking errors from server state — never a silent degrade. The catalog and
@@ -61,6 +62,173 @@ function AddUser() {
   );
 }
 
+const BASELINE_GRANTS = ["slack.event.receive", "assistant.run", "output.text.send"] as const;
+
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(value), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [delayMs, value]);
+  return debounced;
+}
+
+function pendingLabel(person: PendingPersonSummary): string {
+  return person.displayName?.trim() || person.userId;
+}
+
+function catalogCapability(catalog: CapabilityCatalogResponse, capabilityId: string): CatalogCapability | undefined {
+  for (const group of catalog.groups) {
+    const capability = group.children.find((child) => child.id === capabilityId);
+    if (capability) return capability;
+  }
+  return undefined;
+}
+
+function registrySelectorsFor(catalog: CapabilityCatalogResponse, capabilityId: string, desired: Record<string, string>): Record<string, string> | undefined {
+  const capability = catalogCapability(catalog, capabilityId);
+  if (!capability || capability.provenance !== "registry") return undefined;
+  const selectors = Object.fromEntries(Object.entries(desired).filter(([key]) => capability.selectorKeys.includes(key)));
+  return Object.keys(selectors).length > 0 ? selectors : undefined;
+}
+
+function grantPayload(catalog: CapabilityCatalogResponse, person: PendingPersonSummary, includeBaseline: boolean, groups: string[]): OnboardPersonPayload["grants"] {
+  const baseline = includeBaseline
+    ? [
+        { capabilityId: "slack.event.receive", selectors: registrySelectorsFor(catalog, "slack.event.receive", { teamId: person.teamId }) },
+        { capabilityId: "assistant.run", selectors: registrySelectorsFor(catalog, "assistant.run", { teamId: person.teamId }) },
+        { capabilityId: "output.text.send", selectors: registrySelectorsFor(catalog, "output.text.send", { surfaceKind: "slack", teamId: person.teamId }) },
+      ].map((grant) => grant.selectors ? grant : { capabilityId: grant.capabilityId })
+    : [];
+  return [...baseline, ...groups.map((groupId) => ({ groupId }))];
+}
+
+function grantableOptionalGroups(catalog: CapabilityCatalogResponse): Array<Pick<CatalogGroup, "id" | "label">> {
+  return catalog.groups
+    .filter((group) => group.synthetic !== true && group.id !== "other")
+    .filter((group) => group.children.some((child) => child.grantable !== false && child.deprecated !== true && child.provenance !== "store"))
+    .map((group) => ({ id: group.id, label: group.label }));
+}
+
+function OnboardPendingDialog({ person, catalog, onClose }: { person: PendingPersonSummary; catalog: CapabilityCatalogResponse; onClose: () => void }) {
+  const onboard = useOnboardPerson();
+  const [displayName, setDisplayName] = useState(pendingLabel(person));
+  const [includeBaseline, setIncludeBaseline] = useState(true);
+  const [groups, setGroups] = useState<string[]>([]);
+
+  const optionalGroups = useMemo(() => grantableOptionalGroups(catalog), [catalog]);
+  const selectedGroups = useMemo(() => optionalGroups.map((group) => group.id).filter((groupId) => groups.includes(groupId)), [groups, optionalGroups]);
+  const grants = useMemo(() => grantPayload(catalog, person, includeBaseline, selectedGroups), [catalog, includeBaseline, person, selectedGroups]);
+  const identity = { provider: "slack" as const, externalId: person.userId, teamId: person.teamId };
+  const request: OnboardPersonPayload = useMemo(() => ({ displayName: displayName.trim(), identity, grants }), [displayName, identity, grants]);
+  const requestKey = useMemo(() => JSON.stringify(request), [request]);
+  const debouncedRequestKey = useDebouncedValue(requestKey, 400);
+  const debouncedRequest = useMemo(() => JSON.parse(debouncedRequestKey) as OnboardPersonPayload, [debouncedRequestKey]);
+  const previewRequestPending = requestKey !== debouncedRequestKey;
+  const toggleGroup = (groupId: string) => {
+    setGroups((current) => current.includes(groupId) ? current.filter((id) => id !== groupId) : [...current, groupId]);
+  };
+  const loadPreview = async () => {
+    if (!debouncedRequest.displayName) throw new Error("Display name is required.");
+    if (debouncedRequest.grants.length === 0) throw new Error("Select at least one grant.");
+    const result = await onboard.mutateAsync({ ...debouncedRequest, preview: true });
+    return { impact: result.impact, storeHash: result.storeHash };
+  };
+  const commit = async (expectedStoreHash: string) => {
+    await onboard.mutateAsync({ ...debouncedRequest, expectedStoreHash });
+  };
+
+  return (
+    <ImpactDialog
+      open
+      title="Onboard Slack person?"
+      confirmLabel="Onboard"
+      previewKey={debouncedRequestKey}
+      requestPending={onboard.isPending || previewRequestPending}
+      loadPreview={loadPreview}
+      onCommit={commit}
+      onClose={onClose}
+      description={
+        <>
+          <div className="field">
+            <label htmlFor={`onboard-name-${person.teamId}-${person.userId}`}>Display name</label>
+            <input id={`onboard-name-${person.teamId}-${person.userId}`} type="text" autoComplete="off" value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
+          </div>
+          <p className="muted small">
+            Identity <span className="mono">{person.userId}@{person.teamId}</span>
+          </p>
+          <div className="onboard-grants">
+            <label>
+              <input type="checkbox" checked={includeBaseline} onChange={(event) => setIncludeBaseline(event.target.checked)} />
+              <span>Slack conversation baseline</span>
+            </label>
+            <p className="muted small mono">{BASELINE_GRANTS.join(" + ")}</p>
+            <div className="onboard-group-checks">
+              {optionalGroups.map((group) => (
+                <label key={group.id}>
+                  <input type="checkbox" checked={selectedGroups.includes(group.id)} onChange={() => toggleGroup(group.id)} />
+                  <span>{group.label}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        </>
+      }
+    />
+  );
+}
+
+function PendingPeoplePanel({ catalog }: { catalog: CapabilityCatalogResponse }) {
+  const pending = usePendingPeople();
+  const [selected, setSelected] = useState<PendingPersonSummary | null>(null);
+
+  if (pending.isLoading) return <p className="muted small">Loading pending Slack people...</p>;
+  if (pending.isError) {
+    return (
+      <div className="alert bad">
+        <strong>Pending Slack people unavailable</strong>
+        <p className="small">{describeError(pending.error).message}</p>
+        <button className="btn ghost sm" type="button" onClick={() => pending.refetch()}>
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  const people = pending.data!.people;
+  return (
+    <section className="pending-people">
+      <div className="pending-people-head">
+        <div>
+          <h2>Pending Slack people</h2>
+          <p className="muted small">{people.length === 0 ? "No denied unlinked Slack actors in the recent decision tail." : `${people.length} Slack actor${people.length === 1 ? "" : "s"} awaiting onboarding.`}</p>
+        </div>
+        <span className="mono small muted">store {pending.data!.storeHash.slice(0, 8)}</span>
+      </div>
+      {people.length > 0 ? (
+        <div className="pending-list">
+          {people.map((person) => (
+            <div className="pending-row" key={person.actorId}>
+              <div className="pending-person-main">
+                <strong>{pendingLabel(person)}</strong>
+                <span className="mono small">{person.userId}@{person.teamId}</span>
+              </div>
+              <span className="muted small">{person.channelIds.length} channel{person.channelIds.length === 1 ? "" : "s"}</span>
+              <span className="muted small">{person.lastReason}</span>
+              <span className="muted small">last {new Date(person.lastSeen).toLocaleString()}</span>
+              <span className="muted small">{person.count} denial{person.count === 1 ? "" : "s"}</span>
+              <button className="btn sm" type="button" onClick={() => setSelected(person)}>
+                Onboard
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {selected ? <OnboardPendingDialog key={selected.actorId} person={selected} catalog={catalog} onClose={() => setSelected(null)} /> : null}
+    </section>
+  );
+}
+
 export function Users() {
   const users = useUsers();
   const catalog = useCatalog();
@@ -92,6 +260,7 @@ export function Users() {
       </div>
 
       <AddUser />
+      <PendingPeoplePanel catalog={catalog.data!} />
 
       {people.length === 0 ? (
         <p className="muted">No people yet. Add a user to link identities and grant capability groups.</p>

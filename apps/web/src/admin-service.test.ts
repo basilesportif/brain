@@ -1736,11 +1736,51 @@ async function writeLiveStore(root: string): Promise<void> {
   await writeFile(path.join(root, "capabilities.json"), LIVE_CAPABILITY_STORE_JSON);
 }
 
+function pendingSlackStore(): unknown {
+  return {
+    schemaVersion: 2,
+    people: [
+      { id: "person_linked", displayName: "Linked Synthetic", status: "active", personType: "human", primarySubjectId: "person:linked", identityIds: ["identity_slack_T00SYNTH01_U00SYNTHLINK"], subjectIds: ["person:linked"] },
+      { id: "person_global", displayName: "Global Synthetic", status: "active", personType: "human", primarySubjectId: "person:global", identityIds: ["identity_slack_global_U00SYNTHGLOB"], subjectIds: ["person:global"] },
+      { id: "person_suspended_subject", displayName: "Suspended Subject Synthetic", status: "active", personType: "human", primarySubjectId: "person:suspended_subject", identityIds: ["identity_slack_T00SYNTH01_U00SYNTHSUSP"], subjectIds: ["person:suspended_subject"] },
+    ],
+    externalIdentities: [
+      { id: "identity_slack_T00SYNTH01_U00SYNTHLINK", provider: "slack", providerUserId: "U00SYNTHLINK", providerTeamId: "T00SYNTH01", personId: "person_linked", status: "linked" },
+      { id: "identity_slack_global_U00SYNTHGLOB", provider: "slack", providerUserId: "U00SYNTHGLOB", personId: "person_global", status: "linked" },
+      { id: "identity_slack_T00SYNTH01_U00SYNTHOBS", provider: "slack", providerUserId: "U00SYNTHOBS", providerTeamId: "T00SYNTH01", status: "observed_unlinked" },
+      { id: "identity_slack_T00SYNTH01_U00SYNTHSUSP", provider: "slack", providerUserId: "U00SYNTHSUSP", providerTeamId: "T00SYNTH01", personId: "person_suspended_subject", status: "linked" },
+    ],
+    identityProofs: [],
+    subjects: [
+      { id: "person:linked", personId: "person_linked", kind: "person", status: "active" },
+      { id: "person:global", personId: "person_global", kind: "person", status: "active" },
+      { id: "person:suspended_subject", personId: "person_suspended_subject", kind: "person", status: "suspended" },
+    ],
+    grants: [],
+  };
+}
+
+async function writeDecisionDay(root: string, day: string, records: unknown[]): Promise<void> {
+  await writeFileRecursive(
+    path.join(root, "codex-chat", "data", "state", "capability_decisions", `${day}.jsonl`),
+    `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+  );
+}
+
 const SYNTHETIC_REGISTRY = {
   registryVersion: 7,
   capabilities: [
     { id: "output.text.send", family: "output", description: "Send text output.", selectorKeys: ["surfaceKind", "channelId"], riskTier: "medium" },
     { id: "runtime.admin", family: "runtime", description: "Administer runtime.", selectorKeys: ["surfaceKind"], riskTier: "high", deprecated: true },
+  ],
+};
+
+const ONBOARD_REGISTRY = {
+  registryVersion: 8,
+  capabilities: [
+    { id: "slack.event.receive", family: "events", description: "Receive Slack events.", selectorKeys: ["teamId"], riskTier: "low" },
+    { id: "assistant.run", family: "assistant", description: "Run assistant.", selectorKeys: ["teamId"], riskTier: "medium" },
+    { id: "output.text.send", family: "output", description: "Send text output.", selectorKeys: ["surfaceKind", "teamId"], riskTier: "medium" },
   ],
 };
 
@@ -2035,6 +2075,84 @@ test("brain dry-run check reproduces real codex-chat decisions against the enfor
   }
 });
 
+test("brain pending users endpoint groups recent unlinked Slack denials and excludes linked identities", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-pending-users-"));
+  try {
+    await writeJson(path.join(root, "capabilities.json"), pendingSlackStore());
+    const denied = (day: string, minute: string, userId: string, channelId: string, actorDisplayName?: string) => ({
+      checkedAt: `${day}T10:${minute}:00.000Z`,
+      actorId: `slack:team:T00SYNTH01:user:${userId}`,
+      actorDisplayName,
+      operation: "slack.event.receive",
+      action: "receive",
+      allowed: false,
+      reason: "actor_not_linked_to_brain_subject",
+      resourceSummary: { teamId: "T00SYNTH01", channelId },
+    });
+    await writeDecisionDay(root, "2026-06-30", [denied("2026-06-30", "01", "U00SYNTHOLD", "C00SYNTHOLD", "Older Synthetic")]);
+    for (const day of ["2026-07-01", "2026-07-02", "2026-07-03", "2026-07-04", "2026-07-05"]) {
+      await writeDecisionDay(root, day, [{ checkedAt: `${day}T10:00:00.000Z`, actorId: "telegram:system", allowed: false, reason: "actor_not_linked_to_brain_subject", resourceSummary: {} }]);
+    }
+    await writeDecisionDay(root, "2026-07-06", [
+      denied("2026-07-06", "02", "U00SYNTH01", "C00SYNTH01", "First Synthetic"),
+      denied("2026-07-06", "03", "U00SYNTHLINK", "C00SYNTH01", "Already Linked"),
+      { ...denied("2026-07-06", "04", "U00SYNTHGLOB", "C00SYNTH02", "Teamless Match"), actorId: "slack:team:T00SYNTH02:user:U00SYNTHGLOB", resourceSummary: { teamId: "T00SYNTH02", channelId: "C00SYNTH02" } },
+    ]);
+    await writeDecisionDay(root, "2026-07-07", [
+      denied("2026-07-07", "05", "U00SYNTH01", "C00SYNTH02", "Newest Synthetic"),
+      { ...denied("2026-07-07", "06", "U00SYNTHOBS", "C00SYNTH03", "Observed Synthetic"), reason: "identity_inactive:observed_unlinked" },
+      { ...denied("2026-07-07", "07", "U00SYNTHALLOW", "C00SYNTH04"), allowed: true },
+      denied("2026-07-07", "08", "U00SYNTHSUSP", "C00SYNTH05", "Suspended Synthetic"),
+      { ...denied("2026-07-07", "09", "U00SYNTH01", "C00SYNTH06"), actorDisplayName: undefined },
+      { ...denied("2026-07-07", "10", "U00SYNTHSUSPENDED", "C00SYNTH07"), reason: "person_inactive:suspended" },
+    ]);
+
+    await withServer(config(root, { capabilityDecisionsDir: "capability_decisions" }), authDeps(), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/brain/users/pending`, { headers: authHeaders() });
+      assert.equal(res.status, 200);
+      const payload = await res.json() as { storeHash: string; people: any[]; counts: { people: number } };
+      assert.match(payload.storeHash, /^[a-f0-9]{64}$/);
+      assert.equal(payload.counts.people, 3);
+      assert.deepEqual(payload.people.map((person) => person.userId), ["U00SYNTH01", "U00SYNTHSUSP", "U00SYNTHOBS"]);
+      const pending = payload.people.find((person) => person.userId === "U00SYNTH01");
+      assert.equal(pending.displayName, "Newest Synthetic");
+      assert.deepEqual(pending.channelIds, ["C00SYNTH01", "C00SYNTH02", "C00SYNTH06"]);
+      assert.equal(pending.count, 3);
+      assert.equal(pending.firstSeen, "2026-07-06T10:02:00.000Z");
+      assert.equal(pending.lastSeen, "2026-07-07T10:09:00.000Z");
+      assert.equal(pending.lastReason, "actor_not_linked_to_brain_subject");
+      assert.equal(payload.people.find((person) => person.userId === "U00SYNTHOBS").lastReason, "identity_inactive:observed_unlinked");
+      assert.equal(payload.people.find((person) => person.userId === "U00SYNTHSUSP").lastReason, "actor_not_linked_to_brain_subject");
+      assert.equal(payload.people.some((person) => person.userId === "U00SYNTHOLD"), false, "eighth-oldest daily file ignored");
+      assert.equal(payload.people.some((person) => person.userId === "U00SYNTHLINK"), false, "exact linked identity excluded");
+      assert.equal(payload.people.some((person) => person.userId === "U00SYNTHGLOB"), false, "teamless linked identity excludes any team");
+      assert.equal(payload.people.some((person) => person.userId === "U00SYNTHSUSPENDED"), false, "person_inactive denials are not pending onboarding");
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain pending users endpoint fails closed when the capability store is unreadable", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-pending-no-store-"));
+  try {
+    await writeDecisionDay(root, "2026-07-07", [{
+      checkedAt: "2026-07-07T10:00:00.000Z",
+      actorId: "slack:team:T00SYNTH01:user:U00SYNTH01",
+      allowed: false,
+      reason: "actor_not_linked_to_brain_subject",
+      resourceSummary: { teamId: "T00SYNTH01", channelId: "C00SYNTH01" },
+    }]);
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/brain/users/pending`, { headers: authHeaders() });
+      assert.equal(res.status, 503);
+      assert.deepEqual(await res.json(), { error: "capability_store_unavailable", reason: "brain_store_unavailable" });
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 function craftedStore(): unknown {
   return {
     schemaVersion: 2,
@@ -2318,6 +2436,206 @@ test("brain capability writes round-trip create/link/grant/revoke visible in rea
       assert.equal(unlink.status, 200);
       const afterUnlink = await jsonRequest(baseUrl, "POST", "/api/admin/brain/capabilities/check", { actorId: "telegram:user:900000123", operation: "todos.item.read", resource: {} });
       assert.equal(afterUnlink.payload.allowed, false);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function teamlessSlackIdentityStore(): unknown {
+  return {
+    schemaVersion: 2,
+    people: [
+      { id: "person_existing", displayName: "Existing Slack", status: "active", personType: "human", primarySubjectId: "person:existing", identityIds: ["identity_slack_teamless_U00SYNTHWILD"], subjectIds: ["person:existing"] },
+      { id: "person_target", displayName: "Target Slack", status: "active", personType: "human", primarySubjectId: "person:target", identityIds: [], subjectIds: ["person:target"] },
+    ],
+    externalIdentities: [
+      { id: "identity_slack_teamless_U00SYNTHWILD", provider: "slack", providerUserId: "U00SYNTHWILD", personId: "person_existing", status: "linked" },
+    ],
+    identityProofs: [],
+    subjects: [
+      { id: "person:existing", personId: "person_existing", kind: "person", status: "active" },
+      { id: "person:target", personId: "person_target", kind: "person", status: "active" },
+    ],
+    grants: [],
+  };
+}
+
+test("brain link_identity rejects team-scoped Slack links shadowed by a teamless identity", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-link-teamless-"));
+  try {
+    const storePath = path.join(root, "capabilities.json");
+    await writeJson(storePath, teamlessSlackIdentityStore());
+    const before = await readFile(storePath);
+    await assert.rejects(
+      () => commitMutation(storePath, { kind: "link_identity", personId: "person_target", provider: "slack", externalId: "U00SYNTHWILD", teamId: "T00SYNTH01", adminEmail: TEST_ADMIN_EMAIL }),
+      (error: unknown) =>
+        error instanceof CapabilityWriteError &&
+        error.code === "identity_conflict" &&
+        error.details?.existingPersonId === "person_existing",
+    );
+    assert.ok(before.equals(await readFile(storePath)), "conflicting link wrote nothing");
+
+    const ok = await commitMutation(storePath, { kind: "link_identity", personId: "person_target", provider: "slack", externalId: "U00SYNTHOK", teamId: "T00SYNTH01", adminEmail: TEST_ADMIN_EMAIL });
+    assert.equal(ok.outcome.changed, true);
+    const stored = JSON.parse(await readFile(storePath, "utf8"));
+    assert.ok(stored.externalIdentities.some((identity: any) => identity.id === "identity_slack_T00SYNTH01_U00SYNTHOK" && identity.personId === "person_target"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function onboardPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    displayName: "Slack Pending Person",
+    identity: { provider: "slack", externalId: "U00SYNTHON", teamId: "T00SYNTH01" },
+    grants: [
+      { capabilityId: "slack.event.receive", selectors: { teamId: "T00SYNTH01" } },
+      { capabilityId: "assistant.run", selectors: { teamId: "T00SYNTH01" } },
+      { capabilityId: "output.text.send", selectors: { surfaceKind: "slack", teamId: "T00SYNTH01" } },
+    ],
+    ...overrides,
+  };
+}
+
+test("brain onboard_person creates a person, Slack identity, and initial grants atomically", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-onboard-"));
+  let ipc: FakeCodexChatIpcServer | undefined;
+  try {
+    await writeLiveStore(root);
+    ipc = await startFakeCodexChatIpc(root, { capabilityRegistry: ONBOARD_REGISTRY });
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const onboard = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/onboard", onboardPayload());
+      assert.equal(onboard.status, 200);
+      assert.equal(onboard.payload.changed, true);
+      assert.equal(onboard.payload.detail.provider, "slack");
+      assert.equal(onboard.payload.detail.identityId, "identity_slack_T00SYNTH01_U00SYNTHON");
+      assert.equal(onboard.payload.detail.grantIds.length, 3);
+      assert.deepEqual([...onboard.payload.detail.grantedCapabilityIds].sort(), ["assistant.run", "output.text.send", "slack.event.receive"]);
+
+      const personId = onboard.payload.detail.personId as string;
+      const subjectId = onboard.payload.detail.subjectId as string;
+      const stored = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8"));
+      const person = stored.people.find((row: any) => row.id === personId);
+      assert.equal(person.displayName, "Slack Pending Person");
+      assert.ok(person.identityIds.includes("identity_slack_T00SYNTH01_U00SYNTHON"));
+      const identity = stored.externalIdentities.find((row: any) => row.id === "identity_slack_T00SYNTH01_U00SYNTHON");
+      assert.equal(identity.personId, personId);
+      assert.equal(identity.providerTeamId, "T00SYNTH01");
+      const writtenGrants = stored.grants.filter((grant: any) => onboard.payload.detail.grantIds.includes(grant.id));
+      assert.equal(writtenGrants.length, 3);
+      assert.ok(writtenGrants.every((grant: any) => grant.subjectId === subjectId && grant.status === "active" && grant.enforcement === "enforcing"));
+      assert.deepEqual(writtenGrants.find((grant: any) => grant.capabilityId === "slack.event.receive").resource.selectors, { teamId: "T00SYNTH01" });
+      assert.deepEqual(writtenGrants.find((grant: any) => grant.capabilityId === "assistant.run").resource.selectors, { teamId: "T00SYNTH01" });
+      assert.deepEqual(writtenGrants.find((grant: any) => grant.capabilityId === "output.text.send").resource.selectors, { surfaceKind: "slack", teamId: "T00SYNTH01" });
+
+      const outputCheck = await jsonRequest(baseUrl, "POST", "/api/admin/brain/capabilities/check", {
+        actorId: "slack:team:T00SYNTH01:user:U00SYNTHON",
+        operation: "output.text.send",
+        resource: { surfaceKind: "slack", teamId: "T00SYNTH01" },
+      });
+      assert.equal(outputCheck.payload.allowed, true);
+      const telegramShapedOutput = await jsonRequest(baseUrl, "POST", "/api/admin/brain/capabilities/check", {
+        actorId: "slack:team:T00SYNTH01:user:U00SYNTHON",
+        operation: "output.text.send",
+        resource: { surfaceKind: "telegram", teamId: "T00SYNTH01" },
+      });
+      assert.equal(telegramShapedOutput.payload.allowed, false);
+
+      const auditLines = (await readFile(path.join(root, "capability-audit.jsonl"), "utf8")).split(/\n/).filter((line) => line.trim());
+      const auditEvents = auditLines.map((line) => JSON.parse(line));
+      assert.equal(auditEvents.filter((event: any) => event.action === "onboard_person").length, 1);
+      assert.equal(auditEvents.some((event: any) => event.action === "person.created"), false);
+      const onboardAudit = auditEvents.find((event: any) => event.action === "onboard_person");
+      assert.equal(onboardAudit.displayName, "Slack Pending Person");
+      assert.equal(onboardAudit.externalId, "U00SYNTHON");
+      assert.equal(onboardAudit.teamId, "T00SYNTH01");
+      assert.deepEqual([...onboardAudit.capabilityIds].sort(), ["assistant.run", "output.text.send", "slack.event.receive"]);
+      assert.equal(onboardAudit.grantIds.length, 3);
+    });
+  } finally {
+    if (ipc) await ipc.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain onboard_person duplicate identity rejects the whole mutation without writing", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-onboard-dup-"));
+  try {
+    const store = JSON.parse(LIVE_CAPABILITY_STORE_JSON);
+    store.externalIdentities.push({ id: "identity_slack_T00SYNTH01_U00SYNTHDUP", provider: "slack", providerUserId: "U00SYNTHDUP", providerTeamId: "T00SYNTH01", personId: "person_alpha", status: "linked" });
+    store.people[0].identityIds.push("identity_slack_T00SYNTH01_U00SYNTHDUP");
+    await writeJson(path.join(root, "capabilities.json"), store);
+    const before = await readFile(path.join(root, "capabilities.json"));
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const duplicate = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/onboard", onboardPayload({ identity: { provider: "slack", externalId: "U00SYNTHDUP", teamId: "T00SYNTH01" } }));
+      assert.equal(duplicate.status, 409);
+      assert.equal(duplicate.payload.error, "identity_conflict");
+      assert.ok(before.equals(await readFile(path.join(root, "capabilities.json"))), "store bytes unchanged");
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain onboard_person bad capability rejects the whole mutation without writing", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-onboard-bad-cap-"));
+  try {
+    await writeLiveStore(root);
+    const before = await readFile(path.join(root, "capabilities.json"));
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const bad = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/onboard", onboardPayload({ grants: [{ capabilityId: "not.in.registry" }] }));
+      assert.equal(bad.status, 400);
+      assert.equal(bad.payload.error, "unknown_capability");
+      assert.ok(before.equals(await readFile(path.join(root, "capabilities.json"))), "store bytes unchanged");
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain onboard_person preview returns impact without writing", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-onboard-preview-"));
+  let ipc: FakeCodexChatIpcServer | undefined;
+  try {
+    await writeLiveStore(root);
+    ipc = await startFakeCodexChatIpc(root, { capabilityRegistry: ONBOARD_REGISTRY });
+    const before = await readFile(path.join(root, "capabilities.json"));
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const preview = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/onboard?preview=true", onboardPayload({ identity: { provider: "slack", externalId: "U00SYNTHPRE", teamId: "T00SYNTH01" } }));
+      assert.equal(preview.status, 200);
+      assert.equal(preview.payload.preview, true);
+      assert.equal(preview.payload.detail.grantIds.length, 3);
+      assert.ok(preview.payload.impact.summary.newlyAllowedCount > 0);
+      assert.ok(before.equals(await readFile(path.join(root, "capabilities.json"))), "preview did not write");
+    });
+  } finally {
+    if (ipc) await ipc.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain onboard_person commit is hash-pinned and 409s a stale preview hash", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-onboard-hash-"));
+  try {
+    await writeLiveStore(root);
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const payload = onboardPayload({
+        identity: { provider: "slack", externalId: "U00SYNTHHASH", teamId: "T00SYNTH01" },
+        grants: [{ capabilityId: "slack.event.receive" }],
+      });
+      const preview = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/onboard?preview=true", payload);
+      assert.equal(preview.status, 200);
+      const staleHash = preview.payload.storeHash as string;
+      const drift = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users", { displayName: "Hash Drift Person" });
+      assert.equal(drift.status, 200);
+      assert.notEqual(drift.payload.storeHash, staleHash);
+
+      const conflict = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users/onboard", { ...payload, expectedStoreHash: staleHash });
+      assert.equal(conflict.status, 409);
+      assert.equal(conflict.payload.error, "store_conflict");
+      const stored = JSON.parse(await readFile(path.join(root, "capabilities.json"), "utf8"));
+      assert.equal(stored.externalIdentities.some((identity: any) => identity.id === "identity_slack_T00SYNTH01_U00SYNTHHASH"), false);
     });
   } finally {
     await rm(root, { recursive: true, force: true });

@@ -21,9 +21,11 @@ import type {
   MainModelSummary,
   MainModelWritePayload,
   MutationResponse,
+  OnboardPersonPayload,
   OpenRouterSummary,
   OpenRouterWritePayload,
   OperationResult,
+  PendingPeopleResponse,
   ServiceInfoResponse,
   SlackManifestResponse,
   SlackSettingsSummary,
@@ -161,6 +163,11 @@ export function useUsers() {
   return useQuery({ queryKey: ["users"], queryFn: () => api.get<UsersResponse>("/users") });
 }
 
+export function usePendingPeople() {
+  const api = useApiClient();
+  return useQuery({ queryKey: ["pending-people"], queryFn: () => api.get<PendingPeopleResponse>("/users/pending") });
+}
+
 export function useCatalog() {
   const api = useApiClient();
   return useQuery({ queryKey: ["catalog"], queryFn: () => api.get<CapabilityCatalogResponse>("/capabilities/catalog") });
@@ -171,7 +178,7 @@ export function useCatalog() {
 function useInvalidateCapabilities() {
   const client = useQueryClient();
   return () => {
-    for (const key of ["users", "catalog", "status", "audit"]) {
+    for (const key of ["users", "catalog", "status", "audit", "pending-people"]) {
       void client.invalidateQueries({ queryKey: [key] });
     }
   };
@@ -183,6 +190,24 @@ export function useCreatePerson() {
   return useMutation({
     mutationFn: (displayName: string) => api.post<MutationResponse>("/users", { displayName }),
     onSuccess: invalidate,
+  });
+}
+
+export interface OnboardPersonInput extends OnboardPersonPayload {
+  preview?: boolean;
+}
+
+export function useOnboardPerson() {
+  const api = useApiClient();
+  const invalidate = useInvalidateCapabilities();
+  return useMutation({
+    mutationFn: ({ preview, ...payload }: OnboardPersonInput) => {
+      const query = preview ? "?preview=true" : "";
+      return api.post<MutationResponse>(`/users/onboard${query}`, payload);
+    },
+    onSuccess: (_data, variables) => {
+      if (!variables.preview) invalidate();
+    },
   });
 }
 

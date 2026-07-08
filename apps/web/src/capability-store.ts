@@ -242,7 +242,7 @@ export function subjectExistsAndActive(store: CapabilityStore, subjectId: string
   return Boolean(subject && (!subject.status || subject.status === "active"));
 }
 
-function resolveActorSubjects(store: CapabilityStore, actor: ActorContext): { allowed: true; subjectIds: string[] } | { allowed: false; reason: string } {
+export function resolveActorSubjects(store: CapabilityStore, actor: ActorContext): { allowed: true; subjectIds: string[] } | { allowed: false; reason: string } {
   const candidateSubjectIds = new Set<string>();
   const metadataSubject = stringValue(actor.metadata?.brainSubjectId) ?? stringValue(actor.metadata?.brain_subject_id);
   if (metadataSubject) candidateSubjectIds.add(metadataSubject);
@@ -266,7 +266,7 @@ function resolveActorSubjects(store: CapabilityStore, actor: ActorContext): { al
   return { allowed: true, subjectIds: activeSubjectIds };
 }
 
-function findExternalIdentity(store: CapabilityStore, actor: ActorContext): StoreExternalIdentity | undefined {
+export function findExternalIdentity(store: CapabilityStore, actor: ActorContext): StoreExternalIdentity | undefined {
   const identities = store.externalIdentities ?? [];
   if (actor.surfaceKind === "slack") {
     const userId = actor.surfaceUserId ?? stringValue(actor.metadata?.slackUserId);
