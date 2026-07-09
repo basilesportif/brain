@@ -1865,7 +1865,7 @@ test("brain capability catalog endpoint serves vocabulary from the codex-chat re
       assert.equal(byId.output.children.find((child) => child.id === "output.text.send")?.riskTier, "medium");
       assert.equal(byId.output.children.find((child) => child.id === "output.text.send")?.provenance, "registry");
       assert.equal(byId.crm.children.find((child) => child.id === "crm.contact.read")?.provenance, "curated");
-      assert.deepEqual(byId.crm.children.find((child) => child.id === "crm.contact.read")?.selectorKeys, ["scope", "contactId"]);
+      assert.deepEqual(byId.crm.children.find((child) => child.id === "crm.contact.read")?.selectorKeys, ["scope", "contactId", "businessId", "correspondenceId"]);
       assert.equal(byId.runtime.children.find((child) => child.id === "runtime.admin")?.deprecated, true);
       assert.equal(byId.runtime.children.find((child) => child.id === "runtime.admin")?.grantable, false);
       // Store ids absent from the registry surface as synthetic drift, not hidden.
@@ -3172,7 +3172,8 @@ test("brain grant defaults broad selectors and merges explicit selectors over de
       assert.deepEqual([...grantCrm.payload.detail.grantedCapabilityIds].sort(), ["crm.contact.read", "crm.contact.write", "crm.note.write"]);
 
       // A live-shaped request carrying curated selector keys is authorized by
-      // the default template ({ scope: "*", contactId: "*" }).
+      // the default template ({ scope: "*", contactId: "*", businessId: "*",
+      // correspondenceId: "*" }).
       const check = await jsonRequest(baseUrl, "POST", "/api/admin/brain/capabilities/check", { actorId: "telegram:user:900000400", operation: "crm.contact.read", resource: { scope: "workspace", contactId: "c_123" } });
       assert.equal(check.payload.allowed, true);
 
@@ -3190,7 +3191,7 @@ test("brain grant defaults broad selectors and merges explicit selectors over de
       assert.ok(grantNarrow.payload.impact.summary.newlyAllowedCount > 0);
       // The default crm grant on this new subject stores the curated broad template.
       const crmGrant = stored.grants.find((g: any) => g.subjectId === subjectId && g.capabilityId === "crm.contact.read");
-      assert.deepEqual(crmGrant.resource.selectors, { scope: "*", contactId: "*" });
+      assert.deepEqual(crmGrant.resource.selectors, { scope: "*", contactId: "*", businessId: "*", correspondenceId: "*" });
 
       const crmPerson = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users", { displayName: "CRM Scoped Person" });
       const crmPersonId = crmPerson.payload.detail.personId as string;
@@ -3200,10 +3201,59 @@ test("brain grant defaults broad selectors and merges explicit selectors over de
 
       const crmScopedStore = parseCapabilityStore(await readFile(path.join(root, "capabilities.json"), "utf8"));
       const crmWriteGrant = crmScopedStore.grants?.find((row) => row.id === grantCrmWrite.payload.detail.grantIds[0]);
-      assert.deepEqual(crmWriteGrant?.resource?.selectors, { scope: "*", contactId: "c1" });
+      assert.deepEqual(crmWriteGrant?.resource?.selectors, { scope: "*", contactId: "c1", businessId: "*", correspondenceId: "*" });
       const crmActor = { id: "telegram:user:900000403", surfaceKind: "telegram", surfaceUserId: "900000403" };
       assert.equal(evaluateAuthorization(crmScopedStore, { actor: crmActor, requirement: { operation: "crm.contact.write", action: "write", resource: { scope: "owner_all", contactId: "c1" } } }).allowed, true);
       assert.equal(evaluateAuthorization(crmScopedStore, { actor: crmActor, requirement: { operation: "crm.contact.write", action: "write", resource: { scope: "owner_all", contactId: "c2" } } }).allowed, false);
+    });
+  } finally {
+    if (ipc) await ipc.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brain crm grants accept business and correspondence selector keys", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-admin-crm-selectors-"));
+  let ipc: FakeCodexChatIpcServer | undefined;
+  try {
+    await writeLiveStore(root);
+    ipc = await startFakeCodexChatIpc(root, { capabilityRegistry: SYNTHETIC_REGISTRY });
+    await withServer(config(root), authDeps(), async (baseUrl) => {
+      const businessPerson = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users", { displayName: "CRM Business Scoped Person" });
+      const businessPersonId = businessPerson.payload.detail.personId as string;
+      await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${businessPersonId}/identities`, { provider: "telegram", externalId: "900000404" });
+      const businessGrant = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${businessPersonId}/grants`, { capabilityId: "crm.contact.read", selectors: { businessId: "b1" } });
+      assert.equal(businessGrant.status, 200);
+
+      const correspondencePerson = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users", { displayName: "CRM Correspondence Scoped Person" });
+      const correspondencePersonId = correspondencePerson.payload.detail.personId as string;
+      await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${correspondencePersonId}/identities`, { provider: "telegram", externalId: "900000405" });
+      const correspondenceGrant = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${correspondencePersonId}/grants`, { capabilityId: "crm.note.write", selectors: { correspondenceId: "co1" } });
+      assert.equal(correspondenceGrant.status, 200);
+
+      const defaultPerson = await jsonRequest(baseUrl, "POST", "/api/admin/brain/users", { displayName: "CRM Default Selector Person" });
+      const defaultPersonId = defaultPerson.payload.detail.personId as string;
+      await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${defaultPersonId}/identities`, { provider: "telegram", externalId: "900000406" });
+      const defaultGrant = await jsonRequest(baseUrl, "POST", `/api/admin/brain/users/${defaultPersonId}/grants`, { capabilityId: "crm.contact.read" });
+      assert.equal(defaultGrant.status, 200);
+
+      const store = parseCapabilityStore(await readFile(path.join(root, "capabilities.json"), "utf8"));
+      const businessStored = store.grants?.find((row) => row.id === businessGrant.payload.detail.grantIds[0]);
+      assert.deepEqual(businessStored?.resource?.selectors, { scope: "*", contactId: "*", businessId: "b1", correspondenceId: "*" });
+      const correspondenceStored = store.grants?.find((row) => row.id === correspondenceGrant.payload.detail.grantIds[0]);
+      assert.deepEqual(correspondenceStored?.resource?.selectors, { scope: "*", contactId: "*", businessId: "*", correspondenceId: "co1" });
+      const defaultStored = store.grants?.find((row) => row.id === defaultGrant.payload.detail.grantIds[0]);
+      assert.deepEqual(defaultStored?.resource?.selectors, { scope: "*", contactId: "*", businessId: "*", correspondenceId: "*" });
+
+      const businessActor = { id: "telegram:user:900000404", surfaceKind: "telegram", surfaceUserId: "900000404" };
+      assert.equal(evaluateAuthorization(store, { actor: businessActor, requirement: { operation: "crm.contact.read", action: "read", resource: { businessId: "b1" } } }).allowed, true);
+      assert.equal(evaluateAuthorization(store, { actor: businessActor, requirement: { operation: "crm.contact.read", action: "read", resource: { businessId: "b2" } } }).allowed, false);
+
+      const correspondenceActor = { id: "telegram:user:900000405", surfaceKind: "telegram", surfaceUserId: "900000405" };
+      assert.equal(evaluateAuthorization(store, { actor: correspondenceActor, requirement: { operation: "crm.note.write", action: "write", resource: { correspondenceId: "co1" } } }).allowed, true);
+
+      const defaultActor = { id: "telegram:user:900000406", surfaceKind: "telegram", surfaceUserId: "900000406" };
+      assert.equal(evaluateAuthorization(store, { actor: defaultActor, requirement: { operation: "crm.contact.read", action: "read", resource: { businessId: "b_default" } } }).allowed, true);
     });
   } finally {
     if (ipc) await ipc.close();

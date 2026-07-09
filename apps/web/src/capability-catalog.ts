@@ -269,7 +269,7 @@ export const CAPABILITY_GROUP_DEFINITIONS: CatalogGroupDefinition[] = [
 // Groups whose runtime resource keys are not yet known fall back to `{scope:"*"}`.
 export const CAPABILITY_GROUP_DEFAULT_SELECTORS: Record<string, Record<string, string>> = {
   projects: { projectId: "*", repoAlias: "*", resourceScope: "*" },
-  crm: { scope: "*", contactId: "*" },
+  crm: { scope: "*", contactId: "*", businessId: "*", correspondenceId: "*" },
   calendar: { scope: "*", calendarId: "*" },
   slack: { scope: "*", teamId: "*", channelId: "*", threadTs: "*" },
   todos: { scope: "*", listId: "*" },
