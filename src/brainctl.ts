@@ -1070,6 +1070,8 @@ interface DeploymentMetadataRecord {
     configPath?: string;
     envFile?: string;
     envVars: Array<{ name: string; value: "redacted"; metadataOnly: true }>;
+    capabilityStorePath: string;
+    ipcSocketPath: string;
     renderedConfigPreview: string;
     renderedEnvPreview: string;
   };
@@ -1739,20 +1741,30 @@ function renderCodexChatEnvPreview(status: StackStatusDetails): string {
   ].join("\n");
 }
 
-function renderCodexChatConfigPreview(status: StackStatusDetails): string {
+interface CodexChatConfigRenderResult {
+  renderedConfigPreview: string;
+  capabilityStorePath: string;
+  ipcSocketPath: string;
+}
+
+function renderCodexChatConfigPreview(status: StackStatusDetails): CodexChatConfigRenderResult {
   const codexChatRoot = status.servantRuntime.deploy.path ?? status.servantRuntime.path;
   const workspaceRoot = codexChatWorkspaceRoot(status);
   const controlPlaneRoot = status.setupContext.context?.repoPath ?? status.controlPlane.path;
+  const logicRepo = status.assistantLogic.path;
   const stateDir = path.posix.join(workspaceRoot, "state", "codex-chat");
   const artifactDir = path.posix.join(workspaceRoot, "artifacts", "subagents");
   const runDir = path.posix.join(workspaceRoot, "state", "run");
+  const ipcSocketPath = path.posix.join(runDir, "codex-chat.sock");
+  const serviceUser = status.servantRuntime.deploy.runtimeUser ?? DEFAULT_SERVICE_USER;
+  const capabilityStorePath = path.posix.join(serviceUserHome(serviceUser), ".brain", "control-plane", "capabilities.json");
   const addDirs = [
     controlPlaneRoot,
     codexChatRoot,
-    status.assistantLogic.path,
+    logicRepo,
     workspaceRoot,
   ].filter((value, index, values) => value && values.indexOf(value) === index);
-  return [
+  const renderedConfigPreview = [
     "# codex-chat TOML rendered by Brain control plane.",
     "# Secret values stay in the service environment or host secret store, never in deployment metadata.",
     "version = 1",
@@ -1763,7 +1775,15 @@ function renderCodexChatConfigPreview(status: StackStatusDetails): string {
     `stateDir = ${tomlString(stateDir)}`,
     "logLevel = \"info\"",
     "timezone = \"Etc/UTC\"",
-    `ipcSocket = ${tomlString(path.posix.join(runDir, "codex-chat.sock"))}`,
+    `ipcSocket = ${tomlString(ipcSocketPath)}`,
+    "",
+    "[paths]",
+    `logicRepo = ${tomlString(logicRepo)}`,
+    `assistantWorkspace = ${tomlString(workspaceRoot)}`,
+    "",
+    "[brain]",
+    `storePath = ${tomlString(capabilityStorePath)}`,
+    "enforcementEnabled = true",
     "",
     "[codex]",
     "binary = \"codex\"",
@@ -1836,6 +1856,7 @@ function renderCodexChatConfigPreview(status: StackStatusDetails): string {
     "requireLocalFileForSend = true",
     "allowShellActionsFromDirectives = false",
   ].join("\n");
+  return { renderedConfigPreview, capabilityStorePath, ipcSocketPath };
 }
 
 function codexChatWorkspaceRoot(status: StackStatusDetails): string {
@@ -1887,7 +1908,7 @@ function renderStackExecutorActions(status: StackStatusDetails, approvals: Recor
   const envFile = deploy.envFile;
   const configPath = deploy.configPath ?? status.servicePaths.setupContextConfigPath;
   const workspaceRoot = codexChatWorkspaceRoot(status);
-  const configPreview = renderCodexChatConfigPreview(status);
+  const configRender = renderCodexChatConfigPreview(status);
   const envPreview = renderCodexChatEnvPreview(status);
   const systemdPreview = renderSystemdServicePreview(status);
   const action = (input: Omit<StackExecutorAction, "approved" | "displayCommand" | "secretValuesPrinted">): StackExecutorAction => ({
@@ -1999,7 +2020,7 @@ function renderStackExecutorActions(status: StackStatusDetails, approvals: Recor
       executor: deployIdentity ? "ssh" : "local",
       requiredGate: "config",
       hostIdentity: deployIdentity,
-      command: renderConfigEnvWriteShell({ configPath, configPreview, envFile, envPreview }),
+      command: renderConfigEnvWriteShell({ configPath, configPreview: configRender.renderedConfigPreview, envFile, envPreview }),
       sideEffectsIfExecuted: "would write codex-chat config and env template placeholders only; no secret values",
     })] : []),
     action({
@@ -2294,6 +2315,7 @@ function renderStackNoNetworkPlan(status: StackStatusDetails) {
   const sourceIdentity = sshIdentityFromHost(servant.host, undefined);
   const deployIdentity = deploy.sshIdentity;
   const serviceName = deploy.serviceName ?? "codex-chat.service";
+  const configRender = renderCodexChatConfigPreview(status);
   return {
     goal: "Deploy/manage the codex-chat servant runtime stack from Brain as a control-plane orchestrator while keeping repositories separate.",
     mode: "dry-run/no-network",
@@ -2371,7 +2393,9 @@ function renderStackNoNetworkPlan(status: StackStatusDetails) {
         envVars: deploy.envVars.map((name) => ({ name, value: "redacted", metadataOnly: true })),
         expectedTelegramBot: deploy.expectedTelegramBot,
         secretMetadataChecks: status.secretMetadataChecks,
-        renderedConfigPreview: renderCodexChatConfigPreview(status),
+        capabilityStorePath: configRender.capabilityStorePath,
+        ipcSocketPath: configRender.ipcSocketPath,
+        renderedConfigPreview: configRender.renderedConfigPreview,
         renderedEnvPreview: renderCodexChatEnvPreview(status),
         templates: [
           "codex-chat service env template with secret placeholders only",
@@ -2572,6 +2596,7 @@ function stackDeploymentRecord(status: StackStatusDetails, input: {
   repositories: DeploymentRepoRef[];
 }): DeploymentMetadataRecord {
   const updatedAt = input.now ?? new Date().toISOString();
+  const configRender = renderCodexChatConfigPreview(status);
   const stackStatus: DeploymentMetadataRecord["status"] = input.failedActionCount > 0
     ? "failed"
     : input.dryRun
@@ -2632,7 +2657,9 @@ function stackDeploymentRecord(status: StackStatusDetails, input: {
       configPath: status.servantRuntime.deploy.configPath ?? status.servicePaths.setupContextConfigPath,
       envFile: status.servantRuntime.deploy.envFile,
       envVars: status.servantRuntime.deploy.envVars.map((name) => ({ name, value: "redacted", metadataOnly: true })),
-      renderedConfigPreview: renderCodexChatConfigPreview(status),
+      capabilityStorePath: configRender.capabilityStorePath,
+      ipcSocketPath: configRender.ipcSocketPath,
+      renderedConfigPreview: configRender.renderedConfigPreview,
       renderedEnvPreview: renderCodexChatEnvPreview(status),
     },
     health: {

@@ -1664,6 +1664,106 @@ test("brainctl stack status can bind assistant-agent-logic to the service-host c
   }
 });
 
+test("brainctl stack plan renders and exposes the new-owner path, store, and socket contract", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-stack-render-brain-"));
+  try {
+    const brainRepo = path.join(root, "brain");
+    const assistantData = path.join(root, "assistant-agent-data");
+    const registry = path.join(root, "registry.yaml");
+    const setupContext = path.join(root, "setup-context.json");
+    const workspaceRoot = "/home/brain/.brain/workspace";
+    const logicRepo = "/home/brain/assistant-agent-logic";
+    const ipcSocketPath = `${workspaceRoot}/state/run/codex-chat.sock`;
+    const capabilityStorePath = "/home/brain/.brain/control-plane/capabilities.json";
+    await mkdir(brainRepo, { recursive: true });
+    await mkdir(assistantData, { recursive: true });
+    await writeFile(registry, stackRegistryFixture({
+      assistantData,
+      assistantLogicPath: logicRepo,
+      runtimeUser: "brain",
+      codexPath: "/home/brain/codex-chat",
+      deployPath: "/home/brain/codex-chat",
+      sshIdentity: "brain@brain.example.test",
+    }));
+    await writeFile(setupContext, `${JSON.stringify({
+      version: 1,
+      target: "remote",
+      workspace: "personal",
+      workspaceRoot,
+      sshHost: "brain.example.test",
+      sshUser: "brain",
+      serviceUser: "brain",
+      repoPath: "/home/brain/brain",
+      configPath: `${workspaceRoot}/config/runtime.yaml`,
+      secretValuesStored: false,
+    }, null, 2)}\n`);
+
+    const plan = spawnBrainctl(["stack", "plan", "--registry", registry, "--repo", brainRepo, "--setup-context", setupContext, "--workspace", "personal"]);
+    assert.equal(plan.status, 0, plan.stderr);
+    const parsed = JSON.parse(plan.stdout) as {
+      details: { plan: { steps: Array<{ id: string; renderedConfigPreview?: string; capabilityStorePath?: string; ipcSocketPath?: string }> } };
+    };
+    const render = parsed.details.plan.steps.find((step) => step.id === "render-codex-chat-config-env");
+    assert.equal(render?.capabilityStorePath, capabilityStorePath);
+    assert.equal(render?.ipcSocketPath, ipcSocketPath);
+    assert.ok(render?.renderedConfigPreview?.includes(`[service]\nname = "codex-chat"\nworkspace = "${workspaceRoot}"\nstateDir = "${workspaceRoot}/state/codex-chat"\nlogLevel = "info"\ntimezone = "Etc/UTC"\nipcSocket = "${ipcSocketPath}"`));
+    assert.ok(render?.renderedConfigPreview?.includes(`[paths]\nlogicRepo = "${logicRepo}"\nassistantWorkspace = "${workspaceRoot}"`));
+    assert.ok(render?.renderedConfigPreview?.includes(`[brain]\nstorePath = "${capabilityStorePath}"\nenforcementEnabled = true`));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brainctl stack plan derives Tim-style config paths from deployment metadata", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-stack-render-tim-"));
+  try {
+    const brainRepo = path.join(root, "brain");
+    const assistantData = path.join(root, "assistant-agent-data");
+    const registry = path.join(root, "registry.yaml");
+    const setupContext = path.join(root, "setup-context.json");
+    const workspaceRoot = "/home/tim/.assistant-claude/workspace";
+    const logicRepo = "/home/tim/pkg/tim/assistant-agent-logic";
+    const ipcSocketPath = `${workspaceRoot}/state/run/codex-chat.sock`;
+    const capabilityStorePath = "/home/tim/.brain/control-plane/capabilities.json";
+    await mkdir(brainRepo, { recursive: true });
+    await mkdir(assistantData, { recursive: true });
+    await writeFile(registry, stackRegistryFixture({
+      assistantData,
+      assistantLogicPath: logicRepo,
+      runtimeUser: "tim",
+      codexPath: "/home/tim/pkg/tim/codex-chat",
+      deployPath: "/home/tim/pkg/tim/codex-chat",
+      sshIdentity: "tim@tim.example.test",
+    }));
+    await writeFile(setupContext, `${JSON.stringify({
+      version: 1,
+      target: "remote",
+      workspace: "personal",
+      workspaceRoot,
+      sshHost: "tim.example.test",
+      sshUser: "tim",
+      serviceUser: "tim",
+      repoPath: "/home/tim/pkg/tim/brain",
+      configPath: `${workspaceRoot}/config/runtime.yaml`,
+      secretValuesStored: false,
+    }, null, 2)}\n`);
+
+    const plan = spawnBrainctl(["stack", "plan", "--registry", registry, "--repo", brainRepo, "--setup-context", setupContext, "--workspace", "personal"]);
+    assert.equal(plan.status, 0, plan.stderr);
+    const parsed = JSON.parse(plan.stdout) as {
+      details: { plan: { steps: Array<{ id: string; renderedConfigPreview?: string; capabilityStorePath?: string; ipcSocketPath?: string }> } };
+    };
+    const render = parsed.details.plan.steps.find((step) => step.id === "render-codex-chat-config-env");
+    assert.equal(render?.capabilityStorePath, capabilityStorePath);
+    assert.equal(render?.ipcSocketPath, ipcSocketPath);
+    assert.ok(render?.renderedConfigPreview?.includes(`[paths]\nlogicRepo = "${logicRepo}"\nassistantWorkspace = "${workspaceRoot}"`));
+    assert.ok(render?.renderedConfigPreview?.includes(`[brain]\nstorePath = "${capabilityStorePath}"\nenforcementEnabled = true`));
+    assert.ok(render?.renderedConfigPreview?.includes(`ipcSocket = ${JSON.stringify(ipcSocketPath)}`));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("brainctl stack apply defaults to dry-run, enforces approval gates, and writes redacted deployment metadata through mock executor", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brainctl-stack-apply-"));
   try {
@@ -1741,7 +1841,7 @@ test("brainctl stack apply defaults to dry-run, enforces approval gates, and wri
       kind: string;
       canonical: { sourceOfTruth: string; path: string; relativePath: string };
       secretValuesStored: boolean;
-      deployments: Array<{ id: string; status: string; secretValuesStored: boolean; config: { envVars: Array<{ name: string; value: string; metadataOnly: boolean }>; renderedEnvPreview: string }; health: { status: string } }>;
+      deployments: Array<{ id: string; status: string; secretValuesStored: boolean; config: { capabilityStorePath: string; ipcSocketPath: string; envVars: Array<{ name: string; value: string; metadataOnly: boolean }>; renderedEnvPreview: string }; health: { status: string } }>;
     };
     assert.equal(store.version, 1);
     assert.equal(store.kind, "brain.control-plane.deployments");
@@ -1753,6 +1853,8 @@ test("brainctl stack apply defaults to dry-run, enforces approval gates, and wri
     assert.equal(store.deployments[0]?.status, "healthy");
     assert.equal(store.deployments[0]?.secretValuesStored, false);
     assert.equal(store.deployments[0]?.health.status, "passed");
+    assert.equal(store.deployments[0]?.config.capabilityStorePath, "/home/codex/.brain/control-plane/capabilities.json");
+    assert.equal(store.deployments[0]?.config.ipcSocketPath, "/srv/brain/workspace/state/run/codex-chat.sock");
     assert.ok(store.deployments[0]?.config.envVars.every((envVar) => envVar.value === "redacted" && envVar.metadataOnly));
     assert.match(store.deployments[0]?.config.renderedEnvPreview ?? "", /<redacted:set-on-server>/);
 
@@ -1964,6 +2066,7 @@ function stackRegistryFixture(options: {
   codexPath?: string;
   deployHost?: string;
   deployPath?: string;
+  runtimeUser?: string;
   sshIdentity?: string;
   envFile?: string;
   configPath?: string;
@@ -1977,6 +2080,7 @@ function stackRegistryFixture(options: {
   const codexPath = options.codexPath ?? "/srv/src/codex-chat";
   const deployHost = options.deployHost ?? "app.example.test";
   const deployPath = options.deployPath ?? "/srv/codex-chat";
+  const runtimeUser = options.runtimeUser ?? "codex";
   const sshIdentity = options.sshIdentity ?? "codex@app.example.test";
   const envFile = options.envFile ?? "/etc/codex-chat/env";
   const configPath = options.configPath ?? "/etc/codex-chat/codex-chat.toml";
@@ -2018,7 +2122,7 @@ function stackRegistryFixture(options: {
     `              host: ${JSON.stringify(deployHost)}`,
     `              path: ${JSON.stringify(deployPath)}`,
     "              service: codex-chat.service",
-    "              runtime_user: codex",
+    `              runtime_user: ${JSON.stringify(runtimeUser)}`,
     ...(sshIdentity ? [`              ssh_identity: ${JSON.stringify(sshIdentity)}`] : []),
     `              env_file: ${JSON.stringify(envFile)}`,
     `              config_path: ${JSON.stringify(configPath)}`,
