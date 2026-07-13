@@ -216,14 +216,14 @@ export async function initializeBrainAdminCapabilityStore(config: BrainAdminServ
   try {
     const firstAdminEmail = firstAllowedAdminEmail(config);
     const seed = await createCapabilityStoreIfMissing({ storePath, adminEmail: firstAdminEmail });
-    if (seed.created) {
+    if (seed.created || seed.adminSeeded) {
       clearCapabilityStatusCache();
-      if (!firstAdminEmail) {
-        console.warn("[brain-admin] capability store created without a seeded admin; configure CLERK_ALLOWED_EMAILS and restart to bootstrap the first admin", {
-          action: "capability.store.seeded_empty",
-          adminSeeded: false,
-        });
-      }
+    }
+    if ((seed.effectiveAdminCount ?? 0) === 0) {
+      console.warn("[brain-admin] capability store has no reachable capability administrator; configure CLERK_ALLOWED_EMAILS and restart to bootstrap the first admin", {
+        action: "capability.store.seeded_empty",
+        adminSeeded: false,
+      });
     }
 
     const migration = await migrateCapabilityStore({ storePath, allowZeroAdminsBefore: true });

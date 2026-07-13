@@ -273,9 +273,30 @@ export const CAPABILITY_GROUP_DEFAULT_SELECTORS: Record<string, Record<string, s
   calendar: { scope: "*", calendarId: "*" },
   slack: { scope: "*", teamId: "*", channelId: "*", threadTs: "*" },
   todos: { scope: "*", listId: "*" },
+  events: runtimeSelectorDefaults(),
+  assistant: runtimeSelectorDefaults(),
+  output: runtimeSelectorDefaults(),
 };
 
 const DEFAULT_SELECTOR_FALLBACK: Record<string, string> = { scope: "*" };
+
+function runtimeSelectorDefaults(): Record<string, string> {
+  return Object.fromEntries([
+    "source",
+    "surfaceKind",
+    "teamId",
+    "channelId",
+    "threadTs",
+    "messageTs",
+    "chatId",
+    "messageId",
+    "conversationSessionId",
+    "actorId",
+    "targetId",
+    "targetPolicy",
+    "outputType",
+  ].map((key) => [key, "*"]));
+}
 
 function labelFromId(id: string): string {
   return id

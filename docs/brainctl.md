@@ -101,6 +101,28 @@ pnpm run brainctl web prune --dry-run
 
 ## Provisioning capability canary
 
+Provision or reconcile the Telegram owner before running the canary:
+
+```bash
+pnpm run brainctl owner bootstrap \
+  --telegram-user-id <telegram-user-id> \
+  --owner-email <owner@example.com> \
+  --display-name <owner-name> \
+  --telegram-chat-id <telegram-chat-id>
+```
+
+`--telegram-chat-id` is optional. `--owner-email` defaults to the ignored
+setup context's `ownerAdminEmail`, and the capability-store path uses the same
+repo-registry/setup-context contract resolution as the stack renderer unless
+`--store <path>` is explicitly supplied. The command is idempotent and prints
+the Telegram user id that must also be present in codex-chat's `/pair`
+allowlist; this command does not edit codex-chat pairing state.
+
+The owner receives Telegram-scoped `telegram.event.receive`, `assistant.run`,
+and `output.text.send`, plus the CRM contact/note, Calendar event/availability,
+Projects read/write/tasks, and all Todos baseline capabilities. Telegram grants
+set `surfaceKind` to `telegram` and wildcard the other runtime selector keys.
+
 `brainctl canary` is the read-only acceptance gate for a provisioned
 `codex-chat` instance. It reads the deployed TOML and capability store, sends
 only `check_capability` dry-runs over the local IPC socket, and never writes

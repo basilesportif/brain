@@ -11,7 +11,7 @@ import { fakeIpcToken, startFakeCodexChatIpc, type FakeCodexChatIpcServer } from
 import { mergeEnvFileText } from "./env-file.js";
 import { LIVE_CAPABILITY_STORE_JSON } from "./capability-store.fixture.js";
 import { evaluateAuthorization, parseCapabilityStore } from "./capability-store.js";
-import { assertValidStore, CapabilityWriteError, commitMutation, migrateCapabilityStore, planMigration } from "./capability-store-write.js";
+import { assertValidStore, CapabilityWriteError, commitMutation, effectiveCapabilityAdmins, migrateCapabilityStore, planMigration } from "./capability-store-write.js";
 
 const TEST_ADMIN_EMAIL = "tim@example.com";
 const SECOND_ADMIN_EMAIL = "tim-ukraine@example.com";
@@ -304,8 +304,13 @@ test("brain admin startup normalizes a zero-admin store without treating it as s
       grants: [{ id: "g_orphan", subjectId: "person:orphan", capabilityId: "projects.read", grantKind: "capability", resource: { selectors: {} }, actions: ["read"], status: "active", enforcement: "non_enforcing" }],
     });
     await initializeBrainAdminCapabilityStore(cfg);
-    const store = JSON.parse(await readFile(cfg.capabilityStorePath, "utf8")) as { grants: Array<{ id: string; enforcement: string }> };
-    assert.deepEqual(store.grants.map((grant) => ({ id: grant.id, enforcement: grant.enforcement })), [{ id: "g_orphan", enforcement: "enforcing" }]);
+    const store = parseCapabilityStore(await readFile(cfg.capabilityStorePath, "utf8"));
+    assert.equal(store.grants?.find((grant) => grant.id === "g_orphan")?.enforcement, "enforcing");
+    assert.deepEqual(
+      (store.grants ?? []).filter((grant) => typeof grant.source === "object" && grant.source?.kind === "startup_seed").map((grant) => grant.capabilityId).sort(),
+      ["audit.capability.read", "capability.catalog.read", "capability.grant.propose"],
+    );
+    assert.equal(effectiveCapabilityAdmins(store).size, 1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1911,7 +1916,7 @@ test("brain capability catalog degrades to store ids when the registry socket is
       assert.ok(payload.groups.some((group) => group.id === "projects"), "curated vocabulary remains visible without registry");
       assert.equal(payload.groups.at(-1)?.id, "other");
       const output = payload.groups.find((group) => group.id === "output");
-      assert.deepEqual(output?.children.find((child) => child.id === "output.text.send")?.selectorKeys, ["scope"]);
+      assert.deepEqual(output?.children.find((child) => child.id === "output.text.send")?.selectorKeys, RUNTIME_SELECTOR_KEYS);
       assert.equal(output?.children.find((child) => child.id === "output.text.send")?.description, undefined);
       assert.equal(output?.children.find((child) => child.id === "output.text.send")?.riskTier, undefined);
     });

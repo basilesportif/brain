@@ -16,7 +16,7 @@ import { AutomationRuntime, BrainRuntime, BrainSupervisor, EchoProviderAdapter, 
 import { FileTelegramPairingStore, FileTelegramPollingStateStore, OpenAITelegramAttachmentTranscriber, TelegramBotApiClient, TelegramEntrypointAdapter, loadTelegramToken, type TelegramAttachmentTranscriber } from "@brain/entrypoint-telegram";
 import { createCodexProvider, type CodexTransportKind } from "@brain/provider-codex";
 import { createClaudeCodeProvider, type ClaudeCodeTransportKind } from "@brain/provider-claude-code";
-import { pruneExpiredPages, publishPage, readManifest, validatePageDirectory } from "@brain/web";
+import { bootstrapTelegramOwner, CapabilityWriteError, OWNER_CHANNEL_BASELINE, OWNER_DOMAIN_BASELINE, pruneExpiredPages, publishPage, readManifest, validatePageDirectory } from "@brain/web";
 import { formatCanaryReport, runCanary } from "./canary.js";
 
 interface CliResult {
@@ -119,6 +119,22 @@ program.command("canary")
     process.stdout.write(options.json ? `${JSON.stringify(report, null, 2)}\n` : formatCanaryReport(report));
     if (!report.ok) process.exitCode = 1;
   });
+
+const owner = program.command("owner").description("Provision the instance owner in the capability store");
+owner.command("bootstrap")
+  .description("Idempotently link a Telegram owner and grant the canary/runtime baseline.")
+  .requiredOption("--telegram-user-id <id>", "Telegram user id to link and authorize")
+  .option("--owner-email <email>", "owner/admin email; defaults from setup-context ownerAdminEmail")
+  .requiredOption("--display-name <name>", "owner display name")
+  .option("--telegram-chat-id <id>", "Telegram chat id to record on the linked identity")
+  .option("--store <path>", "capability-store override; otherwise use the stack renderer's resolved path")
+  .option("--registry <path>", "repo-registry index used by stack path resolution")
+  .option("--repo <path>", "Brain checkout used to find private/setup-context.json", process.cwd())
+  .option("--setup-context <path>", "explicit setup-context.json path")
+  .option("--metadata-file <path>", "deployment metadata file used by stack path resolution")
+  .option("--workspace <id>", "workspace id", DEFAULT_WORKSPACE_ID)
+  .option("--environment <name>", "codex-chat app environment", "production")
+  .action(async (options) => exitWith(await ownerBootstrapCommand(options)));
 
 program.command("start")
   .description("Lab-only Brain supervisor seam. Production assistant service deployment must use `brainctl stack ...` to run codex-chat.")
@@ -917,6 +933,80 @@ interface StackCommandOptions {
   metadataFile?: string;
   workspace: string;
   environment: string;
+}
+
+interface OwnerBootstrapCommandOptions extends StackCommandOptions {
+  telegramUserId: string;
+  ownerEmail?: string;
+  displayName: string;
+  telegramChatId?: string;
+  store?: string;
+}
+
+async function ownerBootstrapCommand(options: OwnerBootstrapCommandOptions): Promise<CliResult> {
+  try {
+    const repoRoot = path.resolve(options.repo ?? process.cwd());
+    let setupContext = await readStackSetupContext(
+      options.setupContext ? path.resolve(options.setupContext) : localSetupContextPath(repoRoot),
+      options.workspace,
+    );
+    let storePath: string;
+    let storePathSource: "cli" | "stack-renderer";
+    if (options.store) {
+      storePath = path.resolve(options.store);
+      storePathSource = "cli";
+    } else {
+      const status = await resolveStackStatus(options);
+      setupContext = status.setupContext;
+      storePath = resolveStackContractPaths(status).capabilityStorePath;
+      storePathSource = "stack-renderer";
+    }
+
+    if (options.ownerEmail && !normalizeOwnerAdminEmail(options.ownerEmail)) {
+      return { ok: false, summary: "owner bootstrap requires a valid --owner-email" };
+    }
+    const ownerEmail = normalizeOwnerAdminEmail(options.ownerEmail) ?? setupContext.context?.ownerAdminEmail;
+    if (!ownerEmail) {
+      return {
+        ok: false,
+        summary: "owner bootstrap requires --owner-email or setup-context ownerAdminEmail",
+        details: { setupContextPath: setupContext.path },
+      };
+    }
+
+    const result = await bootstrapTelegramOwner({
+      storePath,
+      telegramUserId: options.telegramUserId,
+      telegramChatId: options.telegramChatId,
+      ownerEmail,
+      displayName: options.displayName,
+    });
+    return {
+      ok: true,
+      summary: result.mutation.outcome.changed
+        ? "Telegram owner bootstrapped in the capability store"
+        : "Telegram owner bootstrap already satisfied",
+      details: {
+        storePath,
+        storePathSource,
+        createdStore: result.createdStore,
+        seededFirstAdmin: result.seededFirstAdmin,
+        changed: result.mutation.outcome.changed,
+        personId: result.mutation.outcome.personId,
+        identityId: result.mutation.outcome.detail.identityId,
+        channelBaseline: OWNER_CHANNEL_BASELINE,
+        domainBaseline: OWNER_DOMAIN_BASELINE,
+        telegramGrantSelectors: { surfaceKind: "telegram", otherRuntimeSelectorKeys: "*" },
+        telegramUserId: result.telegramUserId,
+        pairingNote: result.pairingNote,
+      },
+    };
+  } catch (error) {
+    if (error instanceof CapabilityWriteError) {
+      return { ok: false, summary: error.message, details: { code: error.code, ...(error.details ?? {}) } };
+    }
+    return { ok: false, summary: `owner bootstrap failed: ${errorMessage(error)}` };
+  }
 }
 
 interface RegistryInitOptions extends StackCommandOptions {

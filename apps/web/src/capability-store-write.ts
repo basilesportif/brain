@@ -163,6 +163,8 @@ export interface CapabilityStoreSeedResult {
   created: boolean;
   storePath: string;
   adminEmail?: string;
+  adminSeeded?: boolean;
+  effectiveAdminCount?: number;
   storeHash?: string;
   backup?: BackupPaths;
 }
@@ -241,13 +243,48 @@ function buildSeedStore(adminEmail: string | undefined, now: Date = new Date()):
 
 export async function createCapabilityStoreIfMissing(options: { storePath: string; adminEmail?: string }): Promise<CapabilityStoreSeedResult> {
   return enqueueMutation(async () => {
+    let existingText: string | undefined;
     try {
-      await readFile(options.storePath, "utf8");
-      return { created: false, storePath: options.storePath };
+      existingText = await readFile(options.storePath, "utf8");
     } catch (error) {
       if (!isNodeError(error) || error.code !== "ENOENT") {
         throw new CapabilityWriteError("capability_store_unavailable", 503, "Capability store is unreachable");
       }
+    }
+
+    if (existingText !== undefined) {
+      let store: CapabilityStore;
+      try {
+        store = parseCapabilityStore(existingText);
+      } catch {
+        throw new CapabilityWriteError("invalid_store", 503, "Capability store is invalid and was not changed");
+      }
+      const adminEmail = options.adminEmail?.trim().toLowerCase();
+      const adminSeeded = effectiveCapabilityAdmins(store).size === 0 && Boolean(adminEmail)
+        ? seedFirstCapabilityAdmin(store, adminEmail as string)
+        : false;
+      if (!adminSeeded) {
+        return {
+          created: false,
+          storePath: options.storePath,
+          adminEmail,
+          adminSeeded: false,
+          effectiveAdminCount: effectiveCapabilityAdmins(store).size,
+          storeHash: hashStoreText(existingText),
+        };
+      }
+      assertValidStore(store);
+      const backup = await backupStore(options.storePath, existingText);
+      const writtenText = await atomicWriteStore(options.storePath, store);
+      return {
+        created: false,
+        storePath: options.storePath,
+        adminEmail,
+        adminSeeded: true,
+        effectiveAdminCount: effectiveCapabilityAdmins(store).size,
+        storeHash: hashStoreText(writtenText),
+        backup,
+      };
     }
 
     const store = buildSeedStore(options.adminEmail);
@@ -258,10 +295,101 @@ export async function createCapabilityStoreIfMissing(options: { storePath: strin
       created: true,
       storePath: options.storePath,
       adminEmail: options.adminEmail,
+      adminSeeded: Boolean(options.adminEmail),
+      effectiveAdminCount: effectiveCapabilityAdmins(store).size,
       storeHash: hashStoreText(writtenText),
       backup,
     };
   });
+}
+
+function seedFirstCapabilityAdmin(store: CapabilityStore, adminEmail: string): boolean {
+  const now = new Date().toISOString();
+  const suffix = seedSuffix(adminEmail);
+  const identityId = `identity_clerk_${suffix}`;
+  const identities = (store.externalIdentities ??= []);
+  let identity = identities.find((candidate) =>
+    candidate.provider === "clerk" && candidate.providerUserId.trim().toLowerCase() === adminEmail,
+  ) ?? identities.find((candidate) => candidate.id === identityId);
+  let person = identity?.personId
+    ? (store.people ?? []).find((candidate) => candidate.id === identity?.personId)
+    : (store.people ?? []).find((candidate) => candidate.id === `person_admin_${suffix}`);
+
+  if (!person) {
+    const personId = `person_admin_${suffix}`;
+    const subjectId = `person:${personId}`;
+    person = {
+      id: personId,
+      displayName: adminEmail,
+      status: "active",
+      personType: "human",
+      primarySubjectId: subjectId,
+      identityIds: [],
+      subjectIds: [subjectId],
+    };
+    (store.people ??= []).push(person);
+  }
+  person.status = "active";
+  const subjectId = person.primarySubjectId ?? `person:${person.id}`;
+  person.primarySubjectId = subjectId;
+  person.subjectIds = [...new Set([...(person.subjectIds ?? []), subjectId])];
+  const subjects = (store.subjects ??= []);
+  let subject = subjects.find((candidate) => candidate.id === subjectId);
+  if (!subject) {
+    subject = { id: subjectId, personId: person.id, status: "active", kind: "person", source: "startup_seed" };
+    subjects.push(subject);
+  } else {
+    subject.personId = person.id;
+    subject.status = "active";
+  }
+
+  if (!identity) {
+    identity = {
+      id: identityId,
+      provider: "clerk",
+      providerUserId: adminEmail,
+      personId: person.id,
+      status: "linked",
+      label: "Clerk admin email",
+      createdAt: now,
+      updatedAt: now,
+    };
+    identities.push(identity);
+  } else {
+    identity.personId = person.id;
+    identity.status = "linked";
+    identity.updatedAt = now;
+  }
+  person.identityIds = [...new Set([...(person.identityIds ?? []), identity.id])];
+
+  const activeCapabilityIds = grantedCapabilityIds(store, personActiveSubjectIds(store, person), capabilityAdminSeedCapabilityIds());
+  const grants = (store.grants ??= []);
+  for (const capabilityId of capabilityAdminSeedCapabilityIds()) {
+    if (activeCapabilityIds.has(capabilityId)) continue;
+    const baseId = `grant_startup_${capabilityId.replaceAll(".", "_")}_${suffix}`;
+    let grantId = baseId;
+    let recovery = 1;
+    while (grants.some((grant) => grant.id === grantId)) {
+      grantId = `${baseId}_recovery_${recovery}`;
+      recovery += 1;
+    }
+    grants.push({
+      id: grantId,
+      subjectId,
+      capabilityId,
+      grantKind: "capability",
+      resource: { selectors: defaultSelectorsForCapability(capabilityId) },
+      actions: ["*"],
+      status: "active",
+      enforcement: "enforcing",
+      grantedBy: "brain-admin-startup",
+      grantedAt: now,
+      source: { kind: "startup_seed", id: "brain-admin" },
+      reason: "Seeded from first Clerk allowlisted admin email",
+    });
+  }
+  store.updatedAt = now;
+  return effectiveCapabilityAdmins(store).size > 0;
 }
 
 // Guard against a rare copyFile-based rollback needing the raw file; exported so
@@ -275,7 +403,7 @@ export async function restoreLastKnownGood(storePath: string): Promise<void> {
 
 export type MutationSpec =
   | { kind: "create_person"; displayName: string; adminEmail: string }
-  | { kind: "link_identity"; personId: string; provider: string; externalId: string; teamId?: string; adminEmail: string }
+  | { kind: "link_identity"; personId: string; provider: string; externalId: string; teamId?: string; chatId?: string; adminEmail: string }
   | { kind: "unlink_identity"; personId: string; identityId: string; adminEmail: string }
   | { kind: "grant"; personId: string; target: string; selectors?: Record<string, unknown>; registry?: CapabilityCatalogRegistrySource; adminEmail: string }
   | { kind: "revoke"; personId: string; grantId: string; adminEmail: string }
@@ -283,7 +411,8 @@ export type MutationSpec =
   | {
       kind: "onboard_person";
       displayName: string;
-      identity: { provider: "slack"; externalId: string; teamId: string };
+      ownerEmail?: string;
+      identity: { provider: "slack" | "telegram"; externalId: string; teamId?: string; chatId?: string };
       grants: Array<{ capabilityId?: string; groupId?: string; selectors?: Record<string, unknown> }>;
       registry?: CapabilityCatalogRegistrySource;
       adminEmail: string;
@@ -541,8 +670,10 @@ function applyLinkIdentity(store: CapabilityStore, spec: Extract<MutationSpec, {
   }
   const externalId = requireNonEmpty(spec.externalId, "externalId");
   const teamId = provider === "slack" ? requireNonEmpty(spec.teamId, "teamId") : undefined;
+  const chatId = provider === "telegram" && spec.chatId !== undefined ? requireNonEmpty(spec.chatId, "chatId") : undefined;
   const identityId = externalIdentityId(provider, externalId, teamId);
   const now = new Date().toISOString();
+  let changed = false;
 
   const identities = (store.externalIdentities ??= []);
   if (provider === "slack") {
@@ -562,15 +693,20 @@ function applyLinkIdentity(store: CapabilityStore, spec: Extract<MutationSpec, {
         existingPersonId: identity.personId,
       });
     }
-    identity.personId = person.id;
-    identity.status = "linked";
-    identity.updatedAt = now;
+    if (identity.personId !== person.id || identity.status !== "linked" || (chatId !== undefined && identity.providerChatId !== chatId)) {
+      identity.personId = person.id;
+      identity.status = "linked";
+      if (chatId !== undefined) identity.providerChatId = chatId;
+      identity.updatedAt = now;
+      changed = true;
+    }
   } else {
     identity = {
       id: identityId,
       provider,
       providerUserId: externalId,
       ...(teamId ? { providerTeamId: teamId } : {}),
+      ...(chatId ? { providerChatId: chatId } : {}),
       personId: person.id,
       status: "linked",
       label: `${provider} ${externalId}`,
@@ -578,9 +714,13 @@ function applyLinkIdentity(store: CapabilityStore, spec: Extract<MutationSpec, {
       updatedAt: now,
     };
     identities.push(identity);
+    changed = true;
   }
 
-  person.identityIds = [...new Set([...(person.identityIds ?? []), identityId])];
+  if (!(person.identityIds ?? []).includes(identityId)) {
+    person.identityIds = [...(person.identityIds ?? []), identityId];
+    changed = true;
+  }
 
   // Record a manual_admin proof (secret-free) alongside the store's existing
   // proof records, if the store tracks them.
@@ -598,12 +738,13 @@ function applyLinkIdentity(store: CapabilityStore, spec: Extract<MutationSpec, {
         personId: person.id,
         evidence: { provider, providerUserId: externalId, ...(teamId ? { teamId } : {}), payloadBodiesLogged: false, secretValuesLogged: false },
       });
+      changed = true;
     }
   }
 
-  store.updatedAt = now;
+  if (changed) store.updatedAt = now;
   return {
-    changed: true,
+    changed,
     personId: person.id,
     // A new surface flips the person's whole in-force capability set: union.
     explicitCapabilityIds: undefined,
@@ -934,8 +1075,8 @@ function applyRevokeBatch(store: CapabilityStore, spec: Extract<MutationSpec, { 
 }
 
 function applyOnboardPerson(store: CapabilityStore, spec: Extract<MutationSpec, { kind: "onboard_person" }>): MutationOutcome {
-  if (!spec.identity || spec.identity.provider !== "slack") {
-    throw new CapabilityWriteError("invalid_request", 400, "identity.provider must be slack");
+  if (!spec.identity || (spec.identity.provider !== "slack" && spec.identity.provider !== "telegram")) {
+    throw new CapabilityWriteError("invalid_request", 400, "identity.provider must be slack or telegram");
   }
   if (!Array.isArray(spec.grants)) {
     throw new CapabilityWriteError("invalid_request", 400, "grants is required");
@@ -944,14 +1085,45 @@ function applyOnboardPerson(store: CapabilityStore, spec: Extract<MutationSpec, 
     throw new CapabilityWriteError("invalid_request", 400, "At least one grant is required");
   }
 
-  const created = applyCreatePerson(store, { kind: "create_person", displayName: spec.displayName, adminEmail: spec.adminEmail });
+  const externalId = requireNonEmpty(spec.identity.externalId, "externalId");
+  const teamId = spec.identity.provider === "slack" ? requireNonEmpty(spec.identity.teamId, "teamId") : undefined;
+  const existingIdentityId = externalIdentityId(spec.identity.provider, externalId, teamId);
+  const existingIdentity = (store.externalIdentities ?? []).find((candidate) => candidate.id === existingIdentityId);
+  const normalizedOwnerEmail = spec.ownerEmail?.trim().toLowerCase();
+  const ownerIdentity = normalizedOwnerEmail
+    ? (store.externalIdentities ?? []).find((candidate) =>
+      candidate.provider === "clerk"
+      && candidate.providerUserId.trim().toLowerCase() === normalizedOwnerEmail
+      && candidate.personId,
+    )
+    : undefined;
+  const existingPersonId = (spec.identity.provider === "telegram" ? existingIdentity?.personId : undefined) ?? ownerIdentity?.personId;
+  const existingPerson = existingPersonId ? (store.people ?? []).find((candidate) => candidate.id === existingPersonId) : undefined;
+  if (existingPersonId && !existingPerson) {
+    throw new CapabilityWriteError("identity_conflict", 409, "Identity points to a missing person", { existingIdentityId, existingPersonId });
+  }
+  const created = existingPerson
+    ? {
+        changed: false,
+        personId: existingPerson.id,
+        explicitCapabilityIds: [] as string[],
+        audit: {},
+        detail: {
+          personId: existingPerson.id,
+          subjectId: existingPerson.primarySubjectId,
+          displayName: existingPerson.displayName ?? spec.displayName,
+          reused: true,
+        },
+      }
+    : applyCreatePerson(store, { kind: "create_person", displayName: spec.displayName, adminEmail: spec.adminEmail });
   const personId = requireNonEmpty(created.personId, "personId");
   const linked = applyLinkIdentity(store, {
     kind: "link_identity",
     personId,
     provider: spec.identity.provider,
-    externalId: spec.identity.externalId,
-    teamId: spec.identity.teamId,
+    externalId,
+    teamId,
+    chatId: spec.identity.chatId,
     adminEmail: spec.adminEmail,
   });
 
@@ -960,6 +1132,7 @@ function applyOnboardPerson(store: CapabilityStore, spec: Extract<MutationSpec, 
   const requestedGrants: Array<{ target: string; expandedFromGroup: boolean; selectors: Record<string, unknown> | null; grantIds: string[]; grantedCapabilityIds: string[] }> = [];
   const explicitCapabilityIds: string[] = [];
   const impactResources: Record<string, Record<string, unknown>> = {};
+  let grantsChanged = false;
 
   for (const grant of spec.grants) {
     if (!grant || typeof grant !== "object" || Array.isArray(grant)) {
@@ -979,6 +1152,7 @@ function applyOnboardPerson(store: CapabilityStore, spec: Extract<MutationSpec, 
       registry: spec.registry,
       adminEmail: spec.adminEmail,
     });
+    grantsChanged ||= grantOutcome.changed;
     const detail = grantOutcome.detail as {
       expandedFromGroup?: unknown;
       selectors?: unknown;
@@ -1001,7 +1175,7 @@ function applyOnboardPerson(store: CapabilityStore, spec: Extract<MutationSpec, 
   }
 
   return {
-    changed: true,
+    changed: created.changed || linked.changed || grantsChanged,
     personId,
     explicitCapabilityIds: [...new Set(explicitCapabilityIds)],
     impactResources,
@@ -1012,8 +1186,9 @@ function applyOnboardPerson(store: CapabilityStore, spec: Extract<MutationSpec, 
       identityId: linked.detail.identityId,
       provider: spec.identity.provider,
       displayName: created.detail.displayName,
-      externalId: spec.identity.externalId,
-      teamId: spec.identity.teamId,
+      externalId,
+      ...(teamId ? { teamId } : {}),
+      ...(spec.identity.chatId ? { chatId: spec.identity.chatId } : {}),
       grantIds,
       capabilityIds: [...new Set(grantedCapabilityIds)],
     },
@@ -1023,8 +1198,10 @@ function applyOnboardPerson(store: CapabilityStore, spec: Extract<MutationSpec, 
       displayName: created.detail.displayName,
       identityId: linked.detail.identityId,
       provider: spec.identity.provider,
-      teamId: spec.identity.teamId,
-      externalId: spec.identity.externalId,
+      ...(teamId ? { teamId } : {}),
+      ...(spec.identity.chatId ? { chatId: spec.identity.chatId } : {}),
+      externalId,
+      reusedPerson: Boolean(existingPerson),
       grants: requestedGrants,
       grantIds,
       grantedCapabilityIds: [...new Set(grantedCapabilityIds)],

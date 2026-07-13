@@ -20,9 +20,10 @@ one-use hidden-input secret helper. Never put Clerk secret values in a command,
 deployment plan, setup context, log, or checked-in file.
 
 The saved private setup context must contain `ownerAdminEmail`. The stack
-renderer writes it as `CLERK_ALLOWED_EMAILS`. It must be present before the
-first service start because a missing capability store is initialized then and
-the first allowlisted email is seeded with capability-admin access.
+renderer writes it as `CLERK_ALLOWED_EMAILS`. On service start, the first
+allowlisted email is seeded with capability-admin access whenever the store has
+no reachable capability administrator, including when an empty store already
+exists. Repeated starts do not duplicate or demote administrators.
 
 After the Clerk values have been filled and reviewed, the service and health
 gates enable/start both system services and check brain-admin's liveness route:
@@ -101,8 +102,9 @@ the configured capability-store directory, or from the running service user's
 Brain admin initializes `BRAIN_CAPABILITY_STORE_PATH` before listening. A
 missing store is created through the validated, atomic writer. With a non-empty
 `CLERK_ALLOWED_EMAILS`, the first normalized email is seeded as an active owner
-with a linked Clerk identity and enforcing capability-admin grants. An empty
-allowlist creates no admin and logs a warning.
+with a linked Clerk identity and enforcing capability-admin grants when no
+effective administrator exists, whether the store is new or existing. An empty
+allowlist with no effective administrator logs a warning.
 
 Key routes are:
 
