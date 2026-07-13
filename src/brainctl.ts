@@ -47,6 +47,7 @@ program.command("setup")
   .option("--ssh-host <host>", "remote SSH IP/DNS host for setup defaults")
   .option("--ssh-user <user>", "remote initial SSH login user for setup defaults/bootstrap; defaults to root in remote mode")
   .option("--service-user <user>", "remote non-root service user for defaults", DEFAULT_SERVICE_USER)
+  .option("--owner-admin-email <email>", "owner email saved in private setup context for brain-admin first-start seeding")
   .option("--ssh-alias <alias>", "optional SSH config Host alias to generate/update after remote bootstrap")
   .option("--ssh-config <path>", "optional SSH config path to generate/update after remote bootstrap")
   .option("--service-name <name>", "systemd service name for setup status")
@@ -1035,6 +1036,29 @@ interface StackStatusDetails {
       healthChecks: Array<{ kind: string; command: string }>;
     };
   };
+  brainAdmin: {
+    host: string;
+    sshIdentity?: string;
+    workingDirectory: string;
+    runtimeUser: string;
+    serviceHome: string;
+    serviceName: string;
+    envFile: string;
+    unitPath: string;
+    bindHost: string;
+    port: number;
+    routePath: string;
+    healthUrl: string;
+    capabilityStorePath: string;
+    ipcSocketPath: string;
+    controlPlaneDir: string;
+    auditLogPath: string;
+    ownerAdminEmail?: string;
+    adminUiDir: string;
+    registryPath: string;
+    readiness: "ready-for-secret-fill" | "blocked-missing-owner-admin-email";
+    firstStartRequirements: string[];
+  };
   assistantLogic: StackRepoResolution;
   assistantData: StackRepoResolution & {
     workspacePath?: string;
@@ -1239,6 +1263,7 @@ async function registryInitCommand(options: RegistryInitOptions): Promise<CliRes
   const assistantDataCheckoutPath = resolveInstancePath(options.assistantDataPath ?? path.posix.join(serviceHome, "assistant-agent-data"), serviceHome);
   const deployPath = resolveInstancePath(options.deployPath ?? codexChatPath, serviceHome);
   const envFile = resolveInstancePath(options.envFile ?? path.posix.join(workspaceRoot, "config", "codex-chat.env"), serviceHome);
+  const brainAdminEnvFile = path.posix.join(workspaceRoot, "config", "brain-admin.env");
   const configPath = resolveInstancePath(options.configPath ?? path.posix.join(workspaceRoot, "config", "codex-chat.toml"), serviceHome);
   const capabilityStorePath = path.posix.join(serviceHome, ".brain", "control-plane", "capabilities.json");
   const ipcSocketPath = path.posix.join(workspaceRoot, "state", "run", "codex-chat.sock");
@@ -1272,7 +1297,32 @@ async function registryInitCommand(options: RegistryInitOptions): Promise<CliRes
     version: 1,
     controller_root: serviceHome,
     repos: {
-      brain: repoEntry("brain", brainPath, options.brainRef, remotes.brain.value),
+      brain: {
+        ...repoEntry("brain", brainPath, options.brainRef, remotes.brain.value),
+        apps: {
+          "brain-admin": {
+            kind: "service",
+            environments: {
+              [options.environment]: {
+                deploy: {
+                  host: deployHost,
+                  path: brainPath,
+                  service: "brain-admin.service",
+                  runtime_user: runtimeUser,
+                  ...(sshIdentity ? { ssh_identity: sshIdentity } : {}),
+                  env_file: brainAdminEnvFile,
+                  service_home: serviceHome,
+                  bind_host: "127.0.0.1",
+                  port: 49347,
+                  route_path: "/admin",
+                  ui_dir: path.posix.join(brainPath, "apps", "web", "ui", "dist"),
+                },
+                health_checks: [{ kind: "http", command: "curl --fail --silent --show-error http://127.0.0.1:49347/healthz >/dev/null" }],
+              },
+            },
+          },
+        },
+      },
       "codex-chat": {
         ...repoEntry("codex-chat", codexChatPath, options.codexChatRef, remotes.codexChat.value),
         apps: {
@@ -1666,6 +1716,57 @@ async function resolveStackStatus(options: StackCommandOptions): Promise<StackSt
     promptRequired: true,
     migrationPlaceholder: "Prompt the operator to confirm/pull/init the assistant-agent-data workspace; do not auto-migrate private data in this phase.",
   };
+  const contractPaths = resolveStackContractPaths({
+    setupContext,
+    servantRuntime,
+    assistantData: assistantDataResolution,
+  });
+  const brainRegistry = findRegistryRepo(registry.index, ["brain"], "brain");
+  const brainEnvironment = brainRegistry.repo ? registryAppEnvironment(brainRegistry.repo, "brain-admin", options.environment) : undefined;
+  const brainDeploy = asRecord(brainEnvironment?.environment?.deploy);
+  const brainAdminRuntimeUser = asString(brainDeploy?.runtime_user) ?? runtimeUser ?? setupContext.context?.serviceUser ?? DEFAULT_SERVICE_USER;
+  const brainAdminServiceHome = asString(brainDeploy?.service_home) ?? serviceHome ?? serviceUserHome(brainAdminRuntimeUser);
+  const brainAdminHost = asString(brainDeploy?.host) ?? deployHost ?? asString(brainRegistry.repo?.host) ?? "local";
+  const brainAdminSshIdentity = asString(brainDeploy?.ssh_identity)
+    ?? (brainAdminHost === deployHost ? sshIdentity : undefined)
+    ?? sshIdentityFromHost(brainAdminHost, brainAdminRuntimeUser);
+  const brainAdminWorkingDirectory = asString(brainDeploy?.path)
+    ?? setupContext.context?.repoPath
+    ?? asString(brainRegistry.repo?.path)
+    ?? controlPlane.path;
+  const brainAdminServiceName = asString(brainDeploy?.service) ?? "brain-admin.service";
+  const brainAdminEnvFile = asString(brainDeploy?.env_file) ?? path.posix.join(contractPaths.workspaceRoot, "config", "brain-admin.env");
+  const brainAdminBindHost = asString(brainDeploy?.bind_host) ?? asString(brainDeploy?.admin_host) ?? "127.0.0.1";
+  const brainAdminPort = asPositiveInteger(brainDeploy?.port) ?? 49347;
+  const brainAdminRoutePath = normalizeAdminRoutePathForStack(asString(brainDeploy?.route_path));
+  const brainAdminHealthHost = brainAdminBindHost === "0.0.0.0" || brainAdminBindHost === "::" ? "127.0.0.1" : brainAdminBindHost;
+  const ownerAdminEmail = normalizeOwnerAdminEmail(setupContext.context?.ownerAdminEmail);
+  const brainAdmin = {
+    host: brainAdminHost,
+    sshIdentity: brainAdminSshIdentity,
+    workingDirectory: brainAdminWorkingDirectory,
+    runtimeUser: brainAdminRuntimeUser,
+    serviceHome: brainAdminServiceHome,
+    serviceName: brainAdminServiceName,
+    envFile: brainAdminEnvFile,
+    unitPath: `/etc/systemd/system/${brainAdminServiceName}`,
+    bindHost: brainAdminBindHost,
+    port: brainAdminPort,
+    routePath: brainAdminRoutePath,
+    healthUrl: `http://${brainAdminHealthHost}:${brainAdminPort}/healthz`,
+    capabilityStorePath: contractPaths.capabilityStorePath,
+    ipcSocketPath: contractPaths.ipcSocketPath,
+    controlPlaneDir: contractPaths.controlPlaneDir,
+    auditLogPath: path.posix.join(contractPaths.controlPlaneDir, "audit.jsonl"),
+    ownerAdminEmail,
+    adminUiDir: asString(brainDeploy?.ui_dir) ?? path.posix.join(brainAdminWorkingDirectory, "apps", "web", "ui", "dist"),
+    registryPath: registry.path,
+    readiness: ownerAdminEmail ? "ready-for-secret-fill" as const : "blocked-missing-owner-admin-email" as const,
+    firstStartRequirements: [
+      "CLERK_ALLOWED_EMAILS must contain the saved setup-context owner admin email before first start so capability-admin seeding runs.",
+      "Fill CLERK_PUBLISHABLE_KEY and CLERK_SECRET_KEY on the target with a one-use hidden-input helper before approving service start; rendered plans never contain their values.",
+    ],
+  };
   const servicePaths = {
     deployHost,
     sshIdentity,
@@ -1694,13 +1795,14 @@ async function resolveStackStatus(options: StackCommandOptions): Promise<StackSt
     ...(!envFile ? ["codex-chat env file path missing from registry"] : []),
     ...(!configPath ? ["codex-chat config path missing from registry"] : []),
     ...(healthChecks.length === 0 ? ["codex-chat health checks missing from registry"] : []),
+    ...(!ownerAdminEmail ? ["brain-admin owner admin email missing from saved setup context (ownerAdminEmail)"] : []),
     ...(!deploymentMetadata.read.validation.ok ? deploymentMetadata.read.validation.issues.map((issue) => `deployment metadata store invalid: ${issue}`) : []),
     ...repoBoundaries.issues,
   ];
 
   return {
     workspaceId: options.workspace,
-    role: "Brain control plane manages the codex-chat servant runtime stack; Brain's own runtime remains experimental/lab.",
+    role: "Brain deploys the brain-admin control plane and manages the codex-chat servant runtime stack; Brain's in-repo assistant runtime remains experimental/lab.",
     dryRun: true,
     networkAccess: false,
     sideEffects: "none",
@@ -1715,6 +1817,7 @@ async function resolveStackStatus(options: StackCommandOptions): Promise<StackSt
     setupContext,
     controlPlane,
     servantRuntime,
+    brainAdmin,
     assistantLogic: assistantLogicResolution,
     assistantData: assistantDataResolution,
     servicePaths,
@@ -1744,9 +1847,9 @@ function stackApprovalGateDetails(approvals: Record<StackApprovalGate, boolean>)
   return [
     { gate: "apply", approved: approvals.apply, unlocks: ["repo preflight", "git clone/update", "build", "deployment metadata write"], requiredFlag: "--approve" },
     { gate: "data", approved: approvals.data, unlocks: ["assistant-agent-data clone/init/validation placeholders"], requiredFlag: "--approve --approve-data" },
-    { gate: "config", approved: approvals.config, unlocks: ["codex-chat config/env template writes without secret values"], requiredFlag: "--approve --approve-config" },
-    { gate: "service", approved: approvals.service, unlocks: ["systemd service install/enable/start"], requiredFlag: "--approve --approve-service" },
-    { gate: "health", approved: approvals.health, unlocks: ["live health verification commands"], requiredFlag: "--approve --approve-health" },
+    { gate: "config", approved: approvals.config, unlocks: ["codex-chat config/env and brain-admin env/system-unit template writes without secret values"], requiredFlag: "--approve --approve-config" },
+    { gate: "service", approved: approvals.service, unlocks: ["codex-chat and brain-admin system-service install/enable/start"], requiredFlag: "--approve --approve-service" },
+    { gate: "health", approved: approvals.health, unlocks: ["codex-chat and brain-admin live health verification commands"], requiredFlag: "--approve --approve-health" },
   ];
 }
 
@@ -1966,6 +2069,7 @@ async function readStackSetupContext(contextPath: string, workspace: string): Pr
         bootstrapSshUser: parsed.bootstrapSshUser,
         repoPath: parsed.repoPath,
         configPath: parsed.configPath,
+        ownerAdminEmail: normalizeOwnerAdminEmail(parsed.ownerAdminEmail),
         secretValuesStored: false,
       },
     };
@@ -2116,18 +2220,49 @@ interface CodexChatConfigRenderResult {
   ipcSocketPath: string;
 }
 
+interface StackContractPaths {
+  workspaceRoot: string;
+  serviceHome: string;
+  controlPlaneDir: string;
+  capabilityStorePath: string;
+  ipcSocketPath: string;
+}
+
+function resolveStackContractPaths(status: {
+  setupContext: StackStatusDetails["setupContext"];
+  servantRuntime: StackStatusDetails["servantRuntime"];
+  assistantData: StackStatusDetails["assistantData"];
+}): StackContractPaths {
+  const workspaceRoot = status.setupContext.context?.workspaceRoot
+    ?? status.servantRuntime.deploy.assistantWorkspace
+    ?? status.assistantData.workspacePath
+    ?? status.assistantData.path;
+  const serviceUser = status.servantRuntime.deploy.runtimeUser ?? DEFAULT_SERVICE_USER;
+  const serviceHome = status.servantRuntime.deploy.serviceHome ?? serviceUserHome(serviceUser);
+  const capabilityStorePath = status.servantRuntime.deploy.capabilityStorePath
+    ?? path.posix.join(serviceHome, ".brain", "control-plane", "capabilities.json");
+  const ipcSocketPath = status.servantRuntime.deploy.ipcSocketPath
+    ?? path.posix.join(workspaceRoot, "state", "run", "codex-chat.sock");
+  return {
+    workspaceRoot,
+    serviceHome,
+    controlPlaneDir: path.posix.dirname(capabilityStorePath),
+    capabilityStorePath,
+    ipcSocketPath,
+  };
+}
+
 function renderCodexChatConfigPreview(status: StackStatusDetails): CodexChatConfigRenderResult {
   const codexChatRoot = status.servantRuntime.deploy.path ?? status.servantRuntime.path;
-  const workspaceRoot = codexChatWorkspaceRoot(status);
+  const contractPaths = resolveStackContractPaths(status);
+  const workspaceRoot = contractPaths.workspaceRoot;
   const controlPlaneRoot = status.setupContext.context?.repoPath ?? status.controlPlane.path;
   const logicRepo = status.assistantLogic.path;
   const stateDir = path.posix.join(workspaceRoot, "state", "codex-chat");
   const artifactDir = path.posix.join(workspaceRoot, "artifacts", "subagents");
   const runDir = path.posix.join(workspaceRoot, "state", "run");
-  const ipcSocketPath = status.servantRuntime.deploy.ipcSocketPath ?? path.posix.join(runDir, "codex-chat.sock");
-  const serviceUser = status.servantRuntime.deploy.runtimeUser ?? DEFAULT_SERVICE_USER;
-  const capabilityStorePath = status.servantRuntime.deploy.capabilityStorePath
-    ?? path.posix.join(status.servantRuntime.deploy.serviceHome ?? serviceUserHome(serviceUser), ".brain", "control-plane", "capabilities.json");
+  const ipcSocketPath = contractPaths.ipcSocketPath;
+  const capabilityStorePath = contractPaths.capabilityStorePath;
   const addDirs = [
     controlPlaneRoot,
     codexChatRoot,
@@ -2230,10 +2365,7 @@ function renderCodexChatConfigPreview(status: StackStatusDetails): CodexChatConf
 }
 
 function codexChatWorkspaceRoot(status: StackStatusDetails): string {
-  return status.setupContext.context?.workspaceRoot
-    ?? status.servantRuntime.deploy.assistantWorkspace
-    ?? status.assistantData.workspacePath
-    ?? status.assistantData.path;
+  return resolveStackContractPaths(status).workspaceRoot;
 }
 
 function tomlString(value: string): string {
@@ -2267,6 +2399,76 @@ function renderSystemdServicePreview(status: StackStatusDetails): string {
   ].join("\n");
 }
 
+function renderBrainAdminServiceUnit(status: StackStatusDetails): string {
+  const admin = status.brainAdmin;
+  const writablePaths = [
+    admin.controlPlaneDir,
+    codexChatWorkspaceRoot(status),
+    path.posix.dirname(admin.envFile),
+    status.servantRuntime.deploy.envFile ? path.posix.dirname(status.servantRuntime.deploy.envFile) : undefined,
+    status.servantRuntime.deploy.configPath ? path.posix.dirname(status.servantRuntime.deploy.configPath) : undefined,
+  ].filter(isString).filter((value, index, values) => values.indexOf(value) === index);
+  return [
+    "[Unit]",
+    "Description=Brain admin control plane (deployed by brainctl stack)",
+    "After=network-online.target codex-chat.service",
+    "Wants=network-online.target",
+    "",
+    "[Service]",
+    "Type=simple",
+    `User=${admin.runtimeUser}`,
+    `WorkingDirectory=${admin.workingDirectory}`,
+    `EnvironmentFile=${admin.envFile}`,
+    `ExecStart=/usr/bin/env node ${path.posix.join(admin.workingDirectory, "apps", "web", "dist", "brain-admin.js")}`,
+    "Restart=always",
+    "RestartSec=5s",
+    "UMask=0077",
+    "PrivateTmp=true",
+    "ProtectSystem=full",
+    "ProtectHome=false",
+    ...writablePaths.map((value) => `ReadWritePaths=-${value}`),
+    "ProtectKernelTunables=true",
+    "ProtectKernelModules=true",
+    "ProtectControlGroups=true",
+    "LockPersonality=true",
+    "RestrictRealtime=true",
+    "",
+    "[Install]",
+    "WantedBy=multi-user.target",
+    "",
+  ].join("\n");
+}
+
+function renderBrainAdminEnvPreview(status: StackStatusDetails): string {
+  const admin = status.brainAdmin;
+  const deploy = status.servantRuntime.deploy;
+  return [
+    "# brain-admin system service environment rendered by Brain.",
+    "# Fill Clerk secret values on the target with a one-use hidden-input helper before first start.",
+    "# CLERK_ALLOWED_EMAILS must be present on first start so the owner capability-admin seed runs.",
+    "BRAIN_ADMIN_ENABLED=true",
+    `BRAIN_ADMIN_HOST=${admin.bindHost}`,
+    `BRAIN_ADMIN_PORT=${admin.port}`,
+    `BRAIN_ADMIN_ROUTE_PATH=${admin.routePath}`,
+    `BRAIN_ADMIN_AUDIT_LOG=${admin.auditLogPath}`,
+    `BRAIN_CAPABILITY_STORE_PATH=${admin.capabilityStorePath}`,
+    `BRAIN_CAPABILITY_AUDIT_LOG=${path.posix.join(admin.controlPlaneDir, "capability-audit.jsonl")}`,
+    `BRAIN_CODEX_CHAT_IPC_SOCKET=${admin.ipcSocketPath}`,
+    `BRAIN_WORKSPACE_PATH=${codexChatWorkspaceRoot(status)}`,
+    `BRAIN_ASSISTANT_AGENT_LOGIC_PATH=${status.assistantLogic.path}`,
+    `BRAIN_CODEX_CHAT_PATH=${deploy.path ?? status.servantRuntime.path}`,
+    ...(deploy.envFile ? [`BRAIN_CODEX_CHAT_ENV_FILE=${deploy.envFile}`] : []),
+    ...(deploy.configPath ?? status.servicePaths.setupContextConfigPath ? [`BRAIN_CODEX_CHAT_CONFIG_FILE=${deploy.configPath ?? status.servicePaths.setupContextConfigPath}`] : []),
+    `BRAIN_CODEX_CHAT_SERVICE_NAME=${deploy.serviceName ?? "codex-chat.service"}`,
+    `BRAIN_REPO_REGISTRY_PATH=${admin.registryPath}`,
+    `BRAIN_ADMIN_UI_DIR=${admin.adminUiDir}`,
+    `CLERK_ALLOWED_EMAILS=${admin.ownerAdminEmail ?? "<required:set-ownerAdminEmail-in-setup-context>"}`,
+    "CLERK_PUBLISHABLE_KEY=<redacted:set-on-server-with-one-use-helper>",
+    "CLERK_SECRET_KEY=<redacted:set-on-server-with-one-use-helper>",
+    "",
+  ].join("\n");
+}
+
 function renderStackExecutorActions(status: StackStatusDetails, approvals: Record<StackApprovalGate, boolean>): StackExecutorAction[] {
   const servant = status.servantRuntime;
   const logic = status.assistantLogic;
@@ -2284,6 +2486,9 @@ function renderStackExecutorActions(status: StackStatusDetails, approvals: Recor
   const configRender = renderCodexChatConfigPreview(status);
   const envPreview = renderCodexChatEnvPreview(status);
   const systemdPreview = renderSystemdServicePreview(status);
+  const brainAdmin = status.brainAdmin;
+  const brainAdminEnvPreview = renderBrainAdminEnvPreview(status);
+  const brainAdminSystemdPreview = renderBrainAdminServiceUnit(status);
   const action = (input: Omit<StackExecutorAction, "approved" | "displayCommand" | "secretValuesPrinted">): StackExecutorAction => ({
     ...input,
     approved: approvals[input.requiredGate],
@@ -2332,6 +2537,16 @@ function renderStackExecutorActions(status: StackStatusDetails, approvals: Recor
       hostIdentity: deployIdentity,
       command: `cd ${shellPathArg(deployPath)} && pnpm install --frozen-lockfile && pnpm run build`,
       sideEffectsIfExecuted: "would install dependencies and build codex-chat",
+    }),
+    action({
+      id: "build-brain-admin",
+      title: "Install dependencies and build the Brain admin service and UI.",
+      phase: "git",
+      executor: brainAdmin.sshIdentity ? "ssh" : "local",
+      requiredGate: "apply",
+      hostIdentity: brainAdmin.sshIdentity,
+      command: `cd ${shellPathArg(brainAdmin.workingDirectory)} && pnpm install --frozen-lockfile && pnpm run build`,
+      sideEffectsIfExecuted: "would install Brain dependencies and build apps/web/dist/brain-admin.js plus the admin UI",
     }),
     action({
       id: "clone-update-assistant-agent-logic",
@@ -2397,6 +2612,21 @@ function renderStackExecutorActions(status: StackStatusDetails, approvals: Recor
       sideEffectsIfExecuted: "would write codex-chat config and env template placeholders only; no secret values",
     })] : []),
     action({
+      id: "render-brain-admin-env-unit",
+      title: "Render the brain-admin env template and system unit without secret values.",
+      phase: "config",
+      executor: brainAdmin.sshIdentity ? "ssh" : "local",
+      requiredGate: "config",
+      hostIdentity: brainAdmin.sshIdentity,
+      command: renderBrainAdminConfigWriteShell({
+        envFile: brainAdmin.envFile,
+        envPreview: brainAdminEnvPreview,
+        unitPath: brainAdmin.unitPath,
+        unitPreview: brainAdminSystemdPreview,
+      }),
+      sideEffectsIfExecuted: "would write the brain-admin env placeholder template and generic system service unit; no Clerk secret values",
+    }),
+    action({
       id: "migrate-telegram-pairing-state",
       title: "Migrate legacy Brain Telegram pairing/admin state into codex-chat state.",
       phase: "state",
@@ -2418,6 +2648,16 @@ function renderStackExecutorActions(status: StackStatusDetails, approvals: Recor
         ? "would verify Telegram bot identity from remote env file, stop/disable legacy brain-personal.service, then install service unit, reload systemd, enable and restart codex-chat"
         : "would stop/disable legacy brain-personal.service, then install service unit, reload systemd, enable and restart codex-chat",
     }),
+    action({
+      id: "install-brain-admin-systemd",
+      title: "Install/enable/start the brain-admin system service.",
+      phase: "systemd",
+      executor: brainAdmin.sshIdentity ? "ssh" : "local",
+      requiredGate: "service",
+      hostIdentity: brainAdmin.sshIdentity,
+      command: renderBrainAdminEnableStartShell(brainAdmin),
+      sideEffectsIfExecuted: "would reload systemd, enable brain-admin.service, and restart it in the system service-manager namespace",
+    }),
     ...((deploy.healthChecks.length > 0 ? deploy.healthChecks : [{ kind: "systemd", command: `systemctl status ${shellArg(serviceName)} --no-pager` }]).map((check, index) => action({
       id: `health-check-${index + 1}`,
       title: `Run health check: ${check.kind}`,
@@ -2429,6 +2669,17 @@ function renderStackExecutorActions(status: StackStatusDetails, approvals: Recor
       metadataOnly: true,
       sideEffectsIfExecuted: "read-only health verification",
     }))),
+    action({
+      id: "health-check-brain-admin",
+      title: "Run brain-admin HTTP health check.",
+      phase: "health",
+      executor: brainAdmin.sshIdentity ? "ssh" : "local",
+      requiredGate: "health",
+      hostIdentity: brainAdmin.sshIdentity,
+      command: `curl --fail --silent --show-error ${shellArg(brainAdmin.healthUrl)} >/dev/null`,
+      metadataOnly: true,
+      sideEffectsIfExecuted: "read-only brain-admin /healthz verification",
+    }),
     action({
       id: "record-deployment-metadata",
       title: "Record deployment metadata in canonical Brain workspace/control-plane state.",
@@ -2535,6 +2786,33 @@ function renderConfigEnvWriteShell(input: { configPath: string; configPreview: s
     commands.push(`if [ ! -f ${shellPathArg(input.envFile)} ]; then\n  umask 077\n  cat > ${shellPathArg(input.envFile)} <<'BRAIN_CODEX_CHAT_ENV'\n${input.envPreview}\nBRAIN_CODEX_CHAT_ENV\nfi`);
   }
   return commands.join("\n");
+}
+
+function renderBrainAdminConfigWriteShell(input: { envFile: string; envPreview: string; unitPath: string; unitPreview: string }): string {
+  return [
+    "set -e",
+    `mkdir -p ${shellPathArg(path.posix.dirname(input.envFile))}`,
+    `if [ ! -f ${shellPathArg(input.envFile)} ]; then`,
+    "  umask 077",
+    `  cat > ${shellPathArg(input.envFile)} <<'BRAIN_ADMIN_ENV'`,
+    input.envPreview.trimEnd(),
+    "BRAIN_ADMIN_ENV",
+    "fi",
+    `cat <<'BRAIN_ADMIN_SERVICE' | sudo tee ${shellPathArg(input.unitPath)} >/dev/null`,
+    input.unitPreview.trimEnd(),
+    "BRAIN_ADMIN_SERVICE",
+  ].join("\n");
+}
+
+function renderBrainAdminEnableStartShell(admin: StackStatusDetails["brainAdmin"]): string {
+  return [
+    "set -euo pipefail",
+    `test -r ${shellPathArg(admin.envFile)}`,
+    `grep -qE '^CLERK_ALLOWED_EMAILS=[^<[:space:]]+@[^<[:space:]]+$' ${shellPathArg(admin.envFile)}`,
+    `grep -qE '^CLERK_PUBLISHABLE_KEY=[^<[:space:]].+$' ${shellPathArg(admin.envFile)}`,
+    `grep -qE '^CLERK_SECRET_KEY=[^<[:space:]].+$' ${shellPathArg(admin.envFile)}`,
+    `sudo systemctl daemon-reload && sudo systemctl enable ${shellArg(admin.serviceName)} && sudo systemctl restart ${shellArg(admin.serviceName)}`,
+  ].join("\n");
 }
 
 function renderTelegramBotIdentityGuardShell(input: { envFile: string; expected: TelegramBotIdentity }): string {
@@ -2689,8 +2967,9 @@ function renderStackNoNetworkPlan(status: StackStatusDetails) {
   const deployIdentity = deploy.sshIdentity;
   const serviceName = deploy.serviceName ?? "codex-chat.service";
   const configRender = renderCodexChatConfigPreview(status);
+  const brainAdmin = status.brainAdmin;
   return {
-    goal: "Deploy/manage the codex-chat servant runtime stack from Brain as a control-plane orchestrator while keeping repositories separate.",
+    goal: "Deploy/manage codex-chat plus the Brain admin control plane while keeping servant repositories separate.",
     mode: "dry-run/no-network",
     steps: [
       {
@@ -2777,6 +3056,26 @@ function renderStackNoNetworkPlan(status: StackStatusDetails) {
         sideEffectsIfExecuted: "would write private env/config files only after explicit operator confirmation; not executed by this command",
       },
       {
+        id: "render-brain-admin-env-unit",
+        title: "Render the generic brain-admin system unit and private env template.",
+        target: {
+          host: brainAdmin.host,
+          sshIdentity: brainAdmin.sshIdentity,
+          serviceName: brainAdmin.serviceName,
+          envFile: brainAdmin.envFile,
+          unitPath: brainAdmin.unitPath,
+        },
+        capabilityStorePath: brainAdmin.capabilityStorePath,
+        ipcSocketPath: brainAdmin.ipcSocketPath,
+        auditLogPath: brainAdmin.auditLogPath,
+        ownerAdminEmail: brainAdmin.ownerAdminEmail,
+        readiness: brainAdmin.readiness,
+        firstStartRequirements: brainAdmin.firstStartRequirements,
+        renderedEnvPreview: renderBrainAdminEnvPreview(status),
+        renderedUnitPreview: renderBrainAdminServiceUnit(status),
+        sideEffectsIfExecuted: "would write the private env placeholder template and /etc/systemd/system unit after config approval; not executed by this command",
+      },
+      {
         id: "migrate-telegram-pairing-state",
         title: "Preserve Telegram paired/admin identities when moving from brain-personal to codex-chat.",
         target: {
@@ -2803,6 +3102,23 @@ function renderStackNoNetworkPlan(status: StackStatusDetails) {
         sideEffectsIfExecuted: "would install dependencies/build, stop legacy Brain polling if present, and restart systemd service; not executed by this command",
       },
       {
+        id: "install-start-brain-admin-service",
+        title: "Install, enable, and start brain-admin in the system service-manager namespace.",
+        target: {
+          host: brainAdmin.host,
+          sshIdentity: brainAdmin.sshIdentity,
+          path: brainAdmin.workingDirectory,
+          serviceName: brainAdmin.serviceName,
+          runtimeUser: brainAdmin.runtimeUser,
+        },
+        commands: [
+          remotePlanCommand(brainAdmin.sshIdentity, `cd ${shellPathArg(brainAdmin.workingDirectory)} && pnpm install --frozen-lockfile && pnpm run build`),
+          remotePlanCommand(brainAdmin.sshIdentity, renderBrainAdminEnableStartShell(brainAdmin)),
+        ],
+        firstStartRequirements: brainAdmin.firstStartRequirements,
+        sideEffectsIfExecuted: "would build Brain, reload systemd, enable brain-admin.service, and restart the system service after explicit approvals; not executed by this command",
+      },
+      {
         id: "record-deployment-metadata",
         title: "Record/list deployment metadata on the Brain/control-plane host.",
         target: status.deploymentMetadata.canonical,
@@ -2819,6 +3135,13 @@ function renderStackNoNetworkPlan(status: StackStatusDetails) {
           ? deploy.healthChecks.map((check) => remotePlanCommand(deployIdentity, check.command))
           : [remotePlanCommand(deployIdentity, `systemctl status ${shellArg(serviceName)} --no-pager`)],
         sideEffectsIfExecuted: "health/readiness checks only; not executed by this command",
+      },
+      {
+        id: "health-check-brain-admin",
+        title: "Run the brain-admin HTTP health check.",
+        target: { host: brainAdmin.host, sshIdentity: brainAdmin.sshIdentity, serviceName: brainAdmin.serviceName, url: brainAdmin.healthUrl },
+        commands: [remotePlanCommand(brainAdmin.sshIdentity, `curl --fail --silent --show-error ${shellArg(brainAdmin.healthUrl)} >/dev/null`)],
+        sideEffectsIfExecuted: "read-only /healthz readiness check; not executed by this command",
       },
     ],
     execution: {
@@ -3037,7 +3360,10 @@ function stackDeploymentRecord(status: StackStatusDetails, input: {
     },
     health: {
       status: input.failedActionCount > 0 ? "failed" : input.healthApproved && !input.dryRun ? "passed" : input.healthApproved ? "planned" : "not_run",
-      checks: status.servantRuntime.deploy.healthChecks,
+      checks: [
+        ...status.servantRuntime.deploy.healthChecks,
+        { kind: "brain-admin-http", command: `curl --fail --silent --show-error ${shellArg(status.brainAdmin.healthUrl)} >/dev/null` },
+      ],
     },
     approvals: input.approvals,
     executor: {
@@ -3274,6 +3600,26 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function asPositiveInteger(value: unknown): number | undefined {
+  const parsed = typeof value === "number"
+    ? value
+    : typeof value === "string" && /^\d+$/.test(value.trim())
+      ? Number.parseInt(value, 10)
+      : Number.NaN;
+  return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= 65535 ? parsed : undefined;
+}
+
+function normalizeAdminRoutePathForStack(value: string | undefined): string {
+  const trimmed = (value ?? "/admin").trim();
+  if (!trimmed || trimmed === "/") return "/admin";
+  return `/${trimmed.replace(/^\/+|\/+$/g, "")}`;
+}
+
+function normalizeOwnerAdminEmail(value: string | undefined): string | undefined {
+  const normalized = value?.trim().toLowerCase();
+  return normalized && /^[^\s,@]+@[^\s,@]+\.[^\s,@]+$/.test(normalized) ? normalized : undefined;
 }
 
 function asStringArray(value: unknown): string[] {
@@ -5108,6 +5454,7 @@ interface SetupInspectOptions {
   sshHost?: string;
   sshUser?: string;
   serviceUser?: string;
+  ownerAdminEmail?: string;
   serviceName?: string;
   dryRun?: boolean;
 }
@@ -5124,6 +5471,7 @@ interface LocalSetupContext {
   bootstrapSshUser?: string;
   repoPath?: string;
   configPath?: string;
+  ownerAdminEmail?: string;
   secretValuesStored?: false;
 }
 
@@ -5171,6 +5519,7 @@ interface SetupDefaultsOptions {
   sshHost?: string;
   sshUser?: string;
   serviceUser?: string;
+  ownerAdminEmail?: string;
   path?: string;
   repo?: string;
   dryRun?: boolean;
@@ -5579,7 +5928,7 @@ function remoteSetupDefaults(options: Pick<SetupDefaultsOptions, "workspace" | "
   };
 }
 
-function remoteLocalSetupContext(options: Pick<SetupDefaultsOptions, "workspace">, defaults: RemoteSetupDefaults): LocalSetupContext {
+function remoteLocalSetupContext(options: Pick<SetupDefaultsOptions, "workspace" | "ownerAdminEmail">, defaults: RemoteSetupDefaults): LocalSetupContext {
   return {
     version: 1,
     target: "remote",
@@ -5592,6 +5941,7 @@ function remoteLocalSetupContext(options: Pick<SetupDefaultsOptions, "workspace"
     bootstrapSshUser: defaults.bootstrapSshUser,
     repoPath: defaults.repoPath,
     configPath: defaults.configPath,
+    ownerAdminEmail: normalizeOwnerAdminEmail(options.ownerAdminEmail),
     secretValuesStored: false,
   };
 }
@@ -6363,6 +6713,7 @@ async function readLocalSetupContext(repoRoot: string, workspace: string): Promi
         bootstrapSshUser: parsed.bootstrapSshUser,
         repoPath: parsed.repoPath,
         configPath: parsed.configPath,
+        ownerAdminEmail: normalizeOwnerAdminEmail(parsed.ownerAdminEmail),
         secretValuesStored: false,
       },
     };
@@ -6400,10 +6751,20 @@ async function writeLocalSetupContext(repoRootInput: string | undefined, context
     };
   }
   try {
+    let contextToWrite = context;
+    if (!context.ownerAdminEmail) {
+      try {
+        const existing = JSON.parse(await readFile(contextPath, "utf8")) as Partial<LocalSetupContext>;
+        const existingOwnerAdminEmail = normalizeOwnerAdminEmail(existing.ownerAdminEmail);
+        if (existingOwnerAdminEmail) contextToWrite = { ...context, ownerAdminEmail: existingOwnerAdminEmail };
+      } catch {
+        // No prior valid pointer field to preserve.
+      }
+    }
     await mkdir(path.dirname(contextPath), { recursive: true, mode: 0o700 });
-    await writeFile(contextPath, `${JSON.stringify(context, null, 2)}\n`, { mode: 0o600 });
+    await writeFile(contextPath, `${JSON.stringify(contextToWrite, null, 2)}\n`, { mode: 0o600 });
     await chmod(contextPath, 0o600);
-    return { present: true, path: contextPath, wrote: true, metadata: await fileMetadata(contextPath), context, git };
+    return { present: true, path: contextPath, wrote: true, metadata: await fileMetadata(contextPath), context: contextToWrite, git };
   } catch (error) {
     return {
       present: false,

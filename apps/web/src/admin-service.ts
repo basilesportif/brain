@@ -142,8 +142,14 @@ export function loadBrainAdminServiceConfig(env: NodeJS.ProcessEnv = process.env
   const localHostname = os.hostname();
   const localIp = defaultLocalIp();
   const codexChatPath = env.BRAIN_CODEX_CHAT_PATH || "/home/tim/pkg/tim/codex-chat";
-  const auditLogPath = env.BRAIN_ADMIN_AUDIT_LOG || "/home/tim/.brain/control-plane/audit.jsonl";
-  const controlPlaneDir = path.dirname(resolveEnvFilePath(auditLogPath));
+  const defaultControlPlaneDir = path.join(os.homedir(), ".brain", "control-plane");
+  const configuredCapabilityStorePath = env.BRAIN_CAPABILITY_STORE_PATH;
+  const controlPlaneDir = configuredCapabilityStorePath
+    ? path.dirname(resolveEnvFilePath(configuredCapabilityStorePath))
+    : env.BRAIN_ADMIN_AUDIT_LOG
+      ? path.dirname(resolveEnvFilePath(env.BRAIN_ADMIN_AUDIT_LOG))
+    : defaultControlPlaneDir;
+  const auditLogPath = env.BRAIN_ADMIN_AUDIT_LOG || path.join(controlPlaneDir, "audit.jsonl");
   const capabilityStorePath = env.BRAIN_CAPABILITY_STORE_PATH || path.join(controlPlaneDir, "capabilities.json");
   const capabilityAuditLogPath = env.BRAIN_CAPABILITY_AUDIT_LOG || path.join(path.dirname(resolveEnvFilePath(capabilityStorePath)), "capability-audit.jsonl");
   return {

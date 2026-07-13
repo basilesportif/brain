@@ -1454,6 +1454,7 @@ test("brainctl registry init generates a stack-ready generic registry idempotent
       serviceUser: "servant",
       repoPath: path.join(serviceHome, "brain"),
       configPath: path.join(workspace, "config", "runtime.yaml"),
+      ownerAdminEmail: "owner@example.test",
       secretValuesStored: false,
     }, null, 2)}\n`);
 
@@ -1493,7 +1494,10 @@ test("brainctl registry init generates a stack-ready generic registry idempotent
         path: string;
         remote_url: string;
         current_branch: string;
-        apps?: { "codex-chat": { environments: { production: { deploy: Record<string, unknown>; health_checks: Array<{ command: string }> } } } };
+        apps?: {
+          "codex-chat"?: { environments: { production: { deploy: Record<string, unknown>; health_checks: Array<{ command: string }> } } };
+          "brain-admin"?: { environments: { production: { deploy: Record<string, unknown>; health_checks: Array<{ command: string }> } } };
+        };
       }>;
     };
     assert.equal(parsed.controller_root, serviceHome);
@@ -1501,7 +1505,7 @@ test("brainctl registry init generates a stack-ready generic registry idempotent
     assert.equal(parsed.repos.brain?.remote_url, "https://git.example.test/acme/brain.git");
     assert.equal(parsed.repos["assistant-agent-logic"]?.current_branch, "main");
     assert.equal(parsed.repos["assistant-agent-data"]?.path, path.join(serviceHome, "assistant-agent-data"));
-    const deploy = parsed.repos["codex-chat"]?.apps?.["codex-chat"].environments.production.deploy;
+    const deploy = parsed.repos["codex-chat"]?.apps?.["codex-chat"]?.environments.production.deploy;
     assert.equal(deploy?.host, "local");
     assert.equal(deploy?.path, path.join(serviceHome, "codex-chat"));
     assert.equal(deploy?.service, "codex-chat.service");
@@ -1510,7 +1514,14 @@ test("brainctl registry init generates a stack-ready generic registry idempotent
     assert.equal(deploy?.config_path, path.join(workspace, "config", "codex-chat.toml"));
     assert.equal(deploy?.capability_store_path, path.join(serviceHome, ".brain", "control-plane", "capabilities.json"));
     assert.equal(deploy?.ipc_socket_path, path.join(workspace, "state", "run", "codex-chat.sock"));
-    assert.match(parsed.repos["codex-chat"]?.apps?.["codex-chat"].environments.production.health_checks[0]?.command ?? "", /brainctl canary/);
+    assert.match(parsed.repos["codex-chat"]?.apps?.["codex-chat"]?.environments.production.health_checks[0]?.command ?? "", /brainctl canary/);
+    const brainAdminDeploy = parsed.repos.brain?.apps?.["brain-admin"]?.environments.production.deploy;
+    assert.equal(brainAdminDeploy?.service, "brain-admin.service");
+    assert.equal(brainAdminDeploy?.runtime_user, "servant");
+    assert.equal(brainAdminDeploy?.env_file, path.join(workspace, "config", "brain-admin.env"));
+    assert.equal(brainAdminDeploy?.bind_host, "127.0.0.1");
+    assert.equal(brainAdminDeploy?.port, 49347);
+    assert.match(parsed.repos.brain?.apps?.["brain-admin"]?.environments.production.health_checks[0]?.command ?? "", /127\.0\.0\.1:49347\/healthz/);
     assert.ok(Object.values(parsed.repos).every((repo) => repo.remote_url.includes("git.example.test/acme/")));
     assert.doesNotMatch(firstContents, new RegExp(escapeRegExp(userInfo().homedir)));
 
@@ -1565,6 +1576,7 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
       serviceUser: "brain",
       repoPath: "/srv/brain/control-plane",
       configPath: "/srv/brain/workspace/config/runtime.yaml",
+      ownerAdminEmail: "owner@example.test",
       secretValuesStored: false,
     }, null, 2)}\n`);
 
@@ -1583,6 +1595,7 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
         sideEffects: string;
         secretValuesPrinted: boolean;
         servantRuntime: { repoName: string; deploy: { sshIdentity: string; serviceName: string; envFile: string; configPath: string; envVars: string[]; expectedTelegramBot?: { id?: string; username?: string } } };
+        brainAdmin: { serviceName: string; runtimeUser: string; envFile: string; bindHost: string; port: number; ownerAdminEmail: string; readiness: string; capabilityStorePath: string; ipcSocketPath: string; auditLogPath: string };
         assistantLogic: { alias: string; repoName: string; path: string };
         assistantData: { workspacePath: string; promptRequired: boolean; migrationPlaceholder: string };
         servicePaths: { deployHost: string; sshIdentity: string; envFile: string; configPath: string; setupContextConfigPath: string };
@@ -1605,6 +1618,14 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
     assert.equal(statusJson.details.servantRuntime.deploy.configPath, "/etc/codex-chat/codex-chat.toml");
     assert.deepEqual(statusJson.details.servantRuntime.deploy.envVars, ["TELEGRAM_BOT_TOKEN", "OPENAI_API_KEY"]);
     assert.deepEqual(statusJson.details.servantRuntime.deploy.expectedTelegramBot, { id: "1234567890", username: "ExampleServantBot" });
+    assert.equal(statusJson.details.brainAdmin.serviceName, "brain-admin.service");
+    assert.equal(statusJson.details.brainAdmin.runtimeUser, "codex");
+    assert.equal(statusJson.details.brainAdmin.envFile, "/srv/brain/workspace/config/brain-admin.env");
+    assert.equal(statusJson.details.brainAdmin.bindHost, "127.0.0.1");
+    assert.equal(statusJson.details.brainAdmin.port, 49347);
+    assert.equal(statusJson.details.brainAdmin.ownerAdminEmail, "owner@example.test");
+    assert.equal(statusJson.details.brainAdmin.readiness, "ready-for-secret-fill");
+    assert.equal(statusJson.details.brainAdmin.auditLogPath, "/home/codex/.brain/control-plane/audit.jsonl");
     assert.equal(statusJson.details.assistantLogic.alias, "assistant-claude");
     assert.equal(statusJson.details.assistantLogic.repoName, "assistant-agent-logic");
     assert.equal(statusJson.details.assistantLogic.path, "/srv/src/assistant-agent-logic");
@@ -1641,7 +1662,7 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
         networkAccess: boolean;
         sideEffects: string;
         secretValuesPrinted: boolean;
-        plan: { mode: string; steps: Array<{ id: string; commands?: string[]; prompts?: string[]; migrationPlaceholder?: string; target?: Record<string, string>; status?: string; renderedEnvPreview?: string }>; execution: { actions: Array<{ id: string; executor: string; displayCommand?: string }> }; forbidden: string[] };
+        plan: { mode: string; steps: Array<{ id: string; commands?: string[]; prompts?: string[]; migrationPlaceholder?: string; target?: Record<string, string>; status?: string; renderedEnvPreview?: string; renderedUnitPreview?: string; capabilityStorePath?: string; ipcSocketPath?: string; auditLogPath?: string; ownerAdminEmail?: string }>; execution: { actions: Array<{ id: string; executor: string; requiredGate: string; displayCommand?: string }> }; forbidden: string[] };
       };
     };
     assert.equal(planJson.ok, true);
@@ -1659,6 +1680,12 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
     assert.match(steps.get("assistant-data-workspace")?.migrationPlaceholder ?? "", /do not auto-migrate/);
     assert.ok(steps.get("render-codex-chat-config-env")?.target?.envFile);
     assert.doesNotMatch(steps.get("render-codex-chat-config-env")?.renderedEnvPreview ?? "", new RegExp(secretValue));
+    assert.equal(steps.get("render-brain-admin-env-unit")?.capabilityStorePath, statusJson.details.brainAdmin.capabilityStorePath);
+    assert.equal(steps.get("render-brain-admin-env-unit")?.ipcSocketPath, statusJson.details.brainAdmin.ipcSocketPath);
+    assert.equal(steps.get("render-brain-admin-env-unit")?.auditLogPath, "/home/codex/.brain/control-plane/audit.jsonl");
+    assert.equal(steps.get("render-brain-admin-env-unit")?.ownerAdminEmail, "owner@example.test");
+    assert.match(steps.get("render-brain-admin-env-unit")?.renderedEnvPreview ?? "", /CLERK_PUBLISHABLE_KEY=<redacted:set-on-server-with-one-use-helper>/);
+    assert.match(steps.get("render-brain-admin-env-unit")?.renderedUnitPreview ?? "", /\/etc\/systemd\/system|WantedBy=multi-user\.target/);
     assert.ok(steps.get("migrate-telegram-pairing-state")?.commands?.some((command) => command.includes("state/telegram-pairing") && command.includes("state/codex-chat")));
     assert.ok(steps.get("install-start-codex-chat-service")?.commands?.some((command) => /systemctl disable --now brain-personal\.service/.test(command)));
     assert.ok(steps.get("install-start-codex-chat-service")?.commands?.some((command) => /systemctl enable codex-chat\.service.*systemctl restart codex-chat\.service/.test(command)));
@@ -1668,6 +1695,9 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
     assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "install-assistant-agent-logic-deps" && action.executor === "ssh" && /ssh dev\.example\.test/.test(action.displayCommand ?? "") && /BRAIN_COMPOSIO_WORKFLOW_DEPS/.test(action.displayCommand ?? "")));
     assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "migrate-telegram-pairing-state" && /BRAIN_PAIRING_MIGRATION/.test(action.displayCommand ?? "") && /rawIdentifiersPrinted=false/.test(action.displayCommand ?? "")));
     assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "install-codex-chat-systemd" && /BRAIN_EXPECTED_BOT_USERNAME=ExampleServantBot/.test(action.displayCommand ?? "") && /systemctl restart codex-chat\.service/.test(action.displayCommand ?? "")));
+    assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "render-brain-admin-env-unit" && action.requiredGate === "config" && /CLERK_ALLOWED_EMAILS=owner@example\.test/.test(action.displayCommand ?? "")));
+    assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "install-brain-admin-systemd" && action.requiredGate === "service" && /CLERK_PUBLISHABLE_KEY/.test(action.displayCommand ?? "") && /systemctl enable brain-admin\.service.*systemctl restart brain-admin\.service/.test(action.displayCommand ?? "")));
+    assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "health-check-brain-admin" && action.requiredGate === "health" && /127\.0\.0\.1:49347\/healthz/.test(action.displayCommand ?? "")));
     assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "assistant-agent-data-clone-or-init-placeholder" && action.executor === "ssh" && /ssh brain@brain\.example\.test/.test(action.displayCommand ?? "")));
     assert.ok(planJson.details.plan.forbidden.some((line) => /Do not vendor or merge/.test(line)));
   } finally {
@@ -1706,6 +1736,7 @@ test("brainctl stack plan renders local executor actions for local control-plane
       workspaceRoot,
       repoPath: brainRepo,
       configPath: path.join(workspaceRoot, "config", "runtime.yaml"),
+      ownerAdminEmail: "owner@example.test",
       secretValuesStored: false,
     }, null, 2)}\n`);
 
@@ -1747,6 +1778,7 @@ test("brainctl stack status can bind assistant-agent-logic to the service-host c
       serviceUser: "brain",
       repoPath: "/srv/brain/control-plane",
       configPath: "/srv/brain/workspace/config/runtime.yaml",
+      ownerAdminEmail: "owner@example.test",
       secretValuesStored: false,
     }, null, 2)}\n`);
 
@@ -1805,20 +1837,39 @@ test("brainctl stack plan renders and exposes the new-owner path, store, and soc
       serviceUser: "brain",
       repoPath: "/home/brain/brain",
       configPath: `${workspaceRoot}/config/runtime.yaml`,
+      ownerAdminEmail: "owner@example.test",
       secretValuesStored: false,
     }, null, 2)}\n`);
 
     const plan = spawnBrainctl(["stack", "plan", "--registry", registry, "--repo", brainRepo, "--setup-context", setupContext, "--workspace", "personal"]);
     assert.equal(plan.status, 0, plan.stderr);
     const parsed = JSON.parse(plan.stdout) as {
-      details: { plan: { steps: Array<{ id: string; renderedConfigPreview?: string; capabilityStorePath?: string; ipcSocketPath?: string }> } };
+      details: { plan: { steps: Array<{ id: string; renderedConfigPreview?: string; renderedEnvPreview?: string; renderedUnitPreview?: string; capabilityStorePath?: string; ipcSocketPath?: string; auditLogPath?: string; ownerAdminEmail?: string }> } };
     };
     const render = parsed.details.plan.steps.find((step) => step.id === "render-codex-chat-config-env");
+    const adminRender = parsed.details.plan.steps.find((step) => step.id === "render-brain-admin-env-unit");
     assert.equal(render?.capabilityStorePath, capabilityStorePath);
     assert.equal(render?.ipcSocketPath, ipcSocketPath);
+    assert.equal(adminRender?.capabilityStorePath, render?.capabilityStorePath, "brain-admin and codex-chat must render the exact same capability store path");
+    assert.equal(adminRender?.ipcSocketPath, render?.ipcSocketPath, "brain-admin and codex-chat must render the exact same IPC socket path");
+    assert.equal(adminRender?.auditLogPath, "/home/brain/.brain/control-plane/audit.jsonl");
+    assert.equal(adminRender?.ownerAdminEmail, "owner@example.test");
     assert.ok(render?.renderedConfigPreview?.includes(`[service]\nname = "codex-chat"\nworkspace = "${workspaceRoot}"\nstateDir = "${workspaceRoot}/state/codex-chat"\nlogLevel = "info"\ntimezone = "Etc/UTC"\nipcSocket = "${ipcSocketPath}"`));
     assert.ok(render?.renderedConfigPreview?.includes(`[paths]\nlogicRepo = "${logicRepo}"\nassistantWorkspace = "${workspaceRoot}"`));
     assert.ok(render?.renderedConfigPreview?.includes(`[brain]\nstorePath = "${capabilityStorePath}"\nenforcementEnabled = true`));
+    assert.match(adminRender?.renderedEnvPreview ?? "", new RegExp(`BRAIN_CAPABILITY_STORE_PATH=${escapeRegExp(capabilityStorePath)}`));
+    assert.match(adminRender?.renderedEnvPreview ?? "", new RegExp(`BRAIN_CODEX_CHAT_IPC_SOCKET=${escapeRegExp(ipcSocketPath)}`));
+    assert.match(adminRender?.renderedEnvPreview ?? "", /BRAIN_ADMIN_AUDIT_LOG=\/home\/brain\/\.brain\/control-plane\/audit\.jsonl/);
+    assert.match(adminRender?.renderedEnvPreview ?? "", /BRAIN_ADMIN_HOST=127\.0\.0\.1/);
+    assert.match(adminRender?.renderedEnvPreview ?? "", /BRAIN_ADMIN_PORT=49347/);
+    assert.match(adminRender?.renderedEnvPreview ?? "", /CLERK_ALLOWED_EMAILS=owner@example\.test/);
+    assert.match(adminRender?.renderedEnvPreview ?? "", /CLERK_SECRET_KEY=<redacted:set-on-server-with-one-use-helper>/);
+    assert.match(adminRender?.renderedUnitPreview ?? "", /User=brain/);
+    assert.match(adminRender?.renderedUnitPreview ?? "", /WorkingDirectory=\/home\/brain\/brain/);
+    assert.match(adminRender?.renderedUnitPreview ?? "", /EnvironmentFile=\/home\/brain\/\.brain\/workspace\/config\/brain-admin\.env/);
+    assert.match(adminRender?.renderedUnitPreview ?? "", /ExecStart=\/usr\/bin\/env node \/home\/brain\/brain\/apps\/web\/dist\/brain-admin\.js/);
+    assert.match(adminRender?.renderedUnitPreview ?? "", /Restart=always/);
+    assert.doesNotMatch(`${adminRender?.renderedEnvPreview}\n${adminRender?.renderedUnitPreview}`, /\/home\/tim|basilesportif|@gmail\.com/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1855,6 +1906,7 @@ test("brainctl stack plan derives Tim-style config paths from deployment metadat
       serviceUser: "tim",
       repoPath: "/home/tim/pkg/tim/brain",
       configPath: `${workspaceRoot}/config/runtime.yaml`,
+      ownerAdminEmail: "owner@example.test",
       secretValuesStored: false,
     }, null, 2)}\n`);
 
@@ -1895,6 +1947,7 @@ test("brainctl stack apply defaults to dry-run, enforces approval gates, and wri
       serviceUser: "brain",
       repoPath: "/srv/brain/control-plane",
       configPath: "/srv/brain/workspace/config/runtime.yaml",
+      ownerAdminEmail: "owner@example.test",
       secretValuesStored: false,
     }, null, 2)}\n`);
 
@@ -2021,6 +2074,7 @@ test("brainctl stack apply local updates configured repo refs and records resolv
       workspaceRoot: path.join(root, "workspace"),
       repoPath: brainRepo,
       configPath: path.join(root, "workspace", "config", "runtime.yaml"),
+      ownerAdminEmail: "owner@example.test",
       secretValuesStored: false,
     }, null, 2)}\n`);
 

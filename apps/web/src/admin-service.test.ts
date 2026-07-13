@@ -76,6 +76,15 @@ function authDeps(email = "Tim@Example.Com"): BrainAdminServiceDeps {
   };
 }
 
+test("brain admin derives its default audit log beside the configured capability store", () => {
+  const capabilityStorePath = "/home/brain/.brain/control-plane/capabilities.json";
+  const loaded = loadBrainAdminServiceConfig({ BRAIN_CAPABILITY_STORE_PATH: capabilityStorePath });
+  assert.equal(loaded.capabilityStorePath, capabilityStorePath);
+  assert.equal(loaded.auditLogPath, "/home/brain/.brain/control-plane/audit.jsonl");
+  assert.equal(loaded.capabilityAuditLogPath, "/home/brain/.brain/control-plane/capability-audit.jsonl");
+  assert.doesNotMatch(loaded.auditLogPath, /\/home\/tim/);
+});
+
 async function listen(server: http.Server): Promise<string> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
