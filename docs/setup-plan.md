@@ -628,10 +628,12 @@ parent `/home/brain/.brain`, and private workspace
 9. Write private Telegram/provider secret files only if the user supplies the
    values through a private temporary script/secret store flow; otherwise mark
    them pending.
-10. Render and review the servant-stack service plan with `brainctl stack plan`.
-    For production this must target the real `codex-chat.service` from the
-    registry, not the deprecated/lab Brain supervisor unit rendered by
-    `brainctl operations systemd`.
+10. Generate the repo registry from confirmed generic repository remotes and
+    saved setup metadata with `brainctl registry init`, confirm its
+    `unresolvedRemotes` list is empty, then render and review the servant-stack
+    service plan with `brainctl stack plan`. For production this must target
+    the real `codex-chat.service` from the registry, not the deprecated/lab
+    Brain supervisor unit rendered by `brainctl operations systemd`.
     Record its `ExecStart`, env file, working directory, restart policy, log
     command, health command, requested refs, and resolved repository SHAs.
 11. Run metadata-only checks and report exactly what remains before a live start:
@@ -651,6 +653,9 @@ pnpm run brainctl entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN \
   --pairing-state <workspace>/state/telegram-pairing
 pnpm run brainctl start --config <runtime-config> --workspace <name>
 pnpm run brainctl run --config <runtime-config> --workspace <name> --fake --once --fake-text help
+pnpm run brainctl registry init --workspace <name> --deploy-host <local-or-ssh-target> \
+  --brain-remote <url> --codex-chat-remote <url> \
+  --assistant-logic-remote <url> --assistant-data-remote <url>
 pnpm run brainctl stack status --workspace <name>
 pnpm run brainctl stack plan --workspace <name>
 ```

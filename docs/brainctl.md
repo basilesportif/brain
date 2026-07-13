@@ -47,6 +47,7 @@ pnpm run brainctl canary --config /path/to/codex-chat.toml --owner person:owner 
 pnpm run brainctl canary --config /path/to/codex-chat.toml --live --since 10m
 pnpm run brainctl config validate examples/config/runtime.yaml
 pnpm run brainctl secrets check --config examples/config/runtime.yaml
+pnpm run brainctl registry init --workspace personal --deploy-host local
 pnpm run brainctl stack status --workspace personal
 pnpm run brainctl stack plan --workspace personal
 pnpm run brainctl stack apply --workspace personal
@@ -184,11 +185,46 @@ Secret refs are checked only by env/file existence, mode, and byte size.
 
 ## Control-plane servant stack
 
-`stack status`, `stack plan`, and `stack apply` are the control-plane commands
-for the production architecture where Brain manages the `codex-chat` servant
-runtime stack instead of replacing it:
+`registry init` creates the private repo-registry needed by `stack status`,
+`stack plan`, and `stack apply`. It resolves the output below the saved setup
+workspace unless `--registry` or `BRAIN_REPO_REGISTRY` is supplied, derives
+checkout/deployment defaults from the effective service home and setup context,
+and accepts explicit source remote/path/ref flags for all four repositories:
 
 ```bash
+pnpm run brainctl registry init \
+  --workspace personal \
+  --brain-remote <brain-git-url> \
+  --codex-chat-remote <codex-chat-git-url> \
+  --assistant-logic-remote <assistant-agent-logic-git-url> \
+  --assistant-data-remote <assistant-agent-data-git-url> \
+  --deploy-host <local-or-ssh-target>
+```
+
+Checkout overrides are `--brain-path`, `--codex-chat-path`,
+`--assistant-logic-path`, and `--assistant-data-path`; their matching ref flags
+end in `-ref` and default to `main`. Deployment overrides are `--deploy-path`,
+`--service-name`, `--env-file`, `--config-path`, `--runtime-user`, and repeatable
+`--health-command`. `--service-home`, `--workspace-root`, `--repo`, and
+`--setup-context` provide explicit resolution inputs. When a remote flag is
+omitted, Brain derives an `origin` from a locally available checkout where
+possible; otherwise it writes
+a conspicuous `REQUIRED: set --...-remote <url>` placeholder and reports that
+flag in `unresolvedRemotes` for the operator to confirm before apply.
+
+The command writes `index.yaml` through a same-directory temporary file with
+mode `0600`. It first validates the candidate with the same resolver used by
+`stack status`; an invalid candidate leaves the existing index untouched. A
+changed existing index is copied to a timestamped `.backup-*` file before the
+atomic rename. Identical generated content is only revalidated, not rewritten
+or backed up.
+
+`stack status`, `stack plan`, and `stack apply` then manage the production
+architecture where Brain controls the `codex-chat` servant runtime instead of
+replacing it:
+
+```bash
+pnpm run brainctl registry init --workspace personal --deploy-host local
 pnpm run brainctl stack status --workspace personal
 pnpm run brainctl stack plan --workspace personal
 pnpm run brainctl stack apply --workspace personal

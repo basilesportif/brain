@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { tmpdir, userInfo } from "node:os";
 import path from "node:path";
+import YAML from "yaml";
 
 const brainctl = new URL("./brainctl.js", import.meta.url);
 const repoRoot = path.resolve(new URL("..", import.meta.url).pathname);
@@ -1430,6 +1431,115 @@ test("brainctl backup, web setup, and Composio status are safe and metadata-only
     assert.equal(composioJson.details.credentialsUsed, false);
     assert.equal(composioJson.details.secretValuesPrinted, false);
     assert.ok(composioJson.details.refs.some((ref) => ref.kind === "env" && ref.present && ref.value === "redacted"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("brainctl registry init generates a stack-ready generic registry idempotently and backs up changed input", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-registry-init-"));
+  try {
+    const brainRepo = path.join(root, "control-plane-checkout");
+    const serviceHome = path.join(root, "service-home");
+    const workspace = path.join(root, "private-workspace");
+    const setupContext = path.join(root, "setup-context.json");
+    const registry = path.join(workspace, ".claude", "repo-registry", "index.yaml");
+    await mkdir(brainRepo, { recursive: true });
+    await mkdir(workspace, { recursive: true });
+    await writeFile(setupContext, `${JSON.stringify({
+      version: 1,
+      target: "local",
+      workspace: "generic",
+      workspaceRoot: workspace,
+      serviceUser: "servant",
+      repoPath: path.join(serviceHome, "brain"),
+      configPath: path.join(workspace, "config", "runtime.yaml"),
+      secretValuesStored: false,
+    }, null, 2)}\n`);
+
+    const initArgs = (codexRef = "main") => [
+      "registry", "init",
+      "--repo", brainRepo,
+      "--setup-context", setupContext,
+      "--workspace", "generic",
+      "--service-home", serviceHome,
+      "--brain-remote", "https://git.example.test/acme/brain.git",
+      "--codex-chat-remote", "https://git.example.test/acme/codex-chat.git",
+      "--codex-chat-ref", codexRef,
+      "--assistant-logic-remote", "https://git.example.test/acme/assistant-agent-logic.git",
+      "--assistant-data-remote", "ssh://git@git.example.test/acme/assistant-agent-data.git",
+      "--deploy-host", "local",
+      "--runtime-user", "servant",
+    ];
+
+    const first = spawnBrainctl(initArgs());
+    assert.equal(first.status, 0, first.stderr);
+    const firstJson = JSON.parse(first.stdout) as {
+      ok: boolean;
+      details: { registryPath: string; changed: boolean; backupPath?: string; unresolvedRemotes: string[]; validation: { stackReady: boolean; missing: string[] } };
+    };
+    assert.equal(firstJson.ok, true);
+    assert.equal(firstJson.details.registryPath, registry);
+    assert.equal(firstJson.details.changed, true);
+    assert.equal(firstJson.details.backupPath, undefined);
+    assert.deepEqual(firstJson.details.unresolvedRemotes, []);
+    assert.equal(firstJson.details.validation.stackReady, true);
+    assert.deepEqual(firstJson.details.validation.missing, []);
+
+    const firstContents = await readFile(registry, "utf8");
+    const parsed = YAML.parse(firstContents) as {
+      controller_root: string;
+      repos: Record<string, {
+        path: string;
+        remote_url: string;
+        current_branch: string;
+        apps?: { "codex-chat": { environments: { production: { deploy: Record<string, unknown>; health_checks: Array<{ command: string }> } } } };
+      }>;
+    };
+    assert.equal(parsed.controller_root, serviceHome);
+    assert.deepEqual(Object.keys(parsed.repos).sort(), ["assistant-agent-data", "assistant-agent-logic", "brain", "codex-chat"]);
+    assert.equal(parsed.repos.brain?.remote_url, "https://git.example.test/acme/brain.git");
+    assert.equal(parsed.repos["assistant-agent-logic"]?.current_branch, "main");
+    assert.equal(parsed.repos["assistant-agent-data"]?.path, path.join(serviceHome, "assistant-agent-data"));
+    const deploy = parsed.repos["codex-chat"]?.apps?.["codex-chat"].environments.production.deploy;
+    assert.equal(deploy?.host, "local");
+    assert.equal(deploy?.path, path.join(serviceHome, "codex-chat"));
+    assert.equal(deploy?.service, "codex-chat.service");
+    assert.equal(deploy?.runtime_user, "servant");
+    assert.equal(deploy?.env_file, path.join(workspace, "config", "codex-chat.env"));
+    assert.equal(deploy?.config_path, path.join(workspace, "config", "codex-chat.toml"));
+    assert.equal(deploy?.capability_store_path, path.join(serviceHome, ".brain", "control-plane", "capabilities.json"));
+    assert.equal(deploy?.ipc_socket_path, path.join(workspace, "state", "run", "codex-chat.sock"));
+    assert.match(parsed.repos["codex-chat"]?.apps?.["codex-chat"].environments.production.health_checks[0]?.command ?? "", /brainctl canary/);
+    assert.ok(Object.values(parsed.repos).every((repo) => repo.remote_url.includes("git.example.test/acme/")));
+    assert.doesNotMatch(firstContents, new RegExp(escapeRegExp(userInfo().homedir)));
+
+    const status = spawnBrainctl(["stack", "status", "--repo", brainRepo, "--setup-context", setupContext, "--workspace", "generic"]);
+    assert.equal(status.status, 0, status.stderr);
+    const statusJson = JSON.parse(status.stdout) as { ok: boolean; details: { missing: string[]; assistantLogic: { present: boolean }; assistantData: { present: boolean; workspacePath: string }; servantRuntime: { present: boolean } } };
+    assert.equal(statusJson.ok, true);
+    assert.deepEqual(statusJson.details.missing, []);
+    assert.equal(statusJson.details.servantRuntime.present, true);
+    assert.equal(statusJson.details.assistantLogic.present, true);
+    assert.equal(statusJson.details.assistantData.present, true);
+    assert.equal(statusJson.details.assistantData.workspacePath, workspace);
+
+    const second = spawnBrainctl(initArgs());
+    assert.equal(second.status, 0, second.stderr);
+    const secondJson = JSON.parse(second.stdout) as { details: { changed: boolean; backupPath?: string } };
+    assert.equal(secondJson.details.changed, false);
+    assert.equal(secondJson.details.backupPath, undefined);
+    assert.equal(await readFile(registry, "utf8"), firstContents);
+    assert.deepEqual((await readdir(path.dirname(registry))).filter((name) => name.includes(".backup-")), []);
+
+    const changed = spawnBrainctl(initArgs("stable"));
+    assert.equal(changed.status, 0, changed.stderr);
+    const changedJson = JSON.parse(changed.stdout) as { details: { changed: boolean; backupPath?: string } };
+    assert.equal(changedJson.details.changed, true);
+    assert.ok(changedJson.details.backupPath);
+    assert.equal(await readFile(changedJson.details.backupPath!, "utf8"), firstContents);
+    const changedParsed = YAML.parse(await readFile(registry, "utf8")) as { repos: Record<string, { current_branch: string }> };
+    assert.equal(changedParsed.repos["codex-chat"]?.current_branch, "stable");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

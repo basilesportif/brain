@@ -392,9 +392,14 @@ Use this flow only after the user chooses remote mode and confirms the host.
    - keep all provider and Telegram secrets out of the checkout.
 4. Verify service-user access through the local SSH config alias.
 5. Clone/update the user-confirmed Brain control-plane repository remote into
-   the chosen repo path, then resolve and clone/update the configured
-   `codex-chat` and `assistant-agent-logic` repositories from repo-registry
-   authority.
+   the chosen repo path. Collect or confirm the four generic Git remotes, then
+   run `pnpm run brainctl registry init --workspace <name> --brain-remote
+   <url> --codex-chat-remote <url> --assistant-logic-remote <url>
+   --assistant-data-remote <url> --deploy-host <local-or-ssh-target>` (plus
+   saved `--repo`/`--setup-context` fields when needed). Use its validated
+   repo-registry authority to resolve and clone/update `codex-chat` and
+   `assistant-agent-logic`; do not proceed to stack apply while
+   `unresolvedRemotes` is non-empty.
 6. Run dependency/check commands from the remote repo root, at minimum
    `pnpm run check` after any install step.
 7. Create the remote private workspace directories listed in the local flow.
@@ -402,10 +407,13 @@ Use this flow only after the user chooses remote mode and confirms the host.
    chosen provider identifier. Store real secret values only if supplied, and
    only through a private temporary script/secret store flow that keeps values
    out of shell history, chat, logs, and the checkout.
-9. Render servant-stack metadata with `brainctl stack plan`; install or enable
-   `codex-chat.service` only after explicit confirmation. Record working
-   directory, env/config refs, `ExecStart`, requested refs, resolved SHAs,
-   restart policy, log command, health command, and rollback/update notes.
+9. Re-run `brainctl registry init` with the same confirmed inputs. It must
+   report either an unchanged stack-ready index or an atomic update with a
+   backup. Then render servant-stack metadata with `brainctl stack plan`;
+   install or enable `codex-chat.service` only after explicit confirmation.
+   Record working directory, env/config refs, `ExecStart`, requested refs,
+   resolved SHAs, restart policy, log command, health command, and
+   rollback/update notes.
 10. Report remaining blockers before any live start in this order: Codex auth,
     reviewed service install/start, Telegram bot token, first-user pairing or
     selected admin bootstrap, webhook/firewall, and optional web preview.
@@ -481,6 +489,9 @@ pnpm run brainctl entrypoint check telegram --token-env TELEGRAM_BOT_TOKEN \
   --polling-state <workspace>/state/telegram-offset.json \
   --pairing-state <workspace>/state/telegram-pairing
 pnpm run brainctl doctor --config <workspace>/config/runtime.yaml --pack assistant-packs/core
+pnpm run brainctl registry init --workspace <name> --deploy-host <local-or-ssh-target> \
+  --brain-remote <url> --codex-chat-remote <url> \
+  --assistant-logic-remote <url> --assistant-data-remote <url>
 pnpm run brainctl stack status --workspace <name>
 pnpm run brainctl stack plan --workspace <name>
 ```

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { access, appendFile, chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, appendFile, chmod, copyFile, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -242,6 +242,37 @@ operations.command("validate")
   .option("--service-user <user>", "systemd service user", "brain")
   .option("--repo <path>", "deployment checkout path", process.cwd())
   .action(async (options) => exitWith(await operationsValidateCommand(options)));
+
+const registry = program.command("registry").description("Repo-registry generation commands for the servant runtime stack");
+registry.command("init")
+  .description("Generate and stack-validate an idempotent repo-registry index for a Brain instance.")
+  .option("--registry <path>", "repo-registry index.yaml output path; defaults under the resolved workspace")
+  .option("--repo <path>", "Brain checkout used for setup context and origin discovery", process.cwd())
+  .option("--setup-context <path>", "explicit setup-context.json path")
+  .option("--workspace <id>", "workspace id", DEFAULT_WORKSPACE_ID)
+  .option("--workspace-root <path>", "assistant-agent-data/private workspace root; defaults from setup context")
+  .option("--environment <name>", "codex-chat app environment", "production")
+  .option("--service-home <path>", "effective runtime user's home used for checkout defaults")
+  .option("--brain-remote <url>", "Brain source remote URL")
+  .option("--brain-path <path>", "Brain checkout path on the service host")
+  .option("--brain-ref <ref>", "Brain requested ref", "main")
+  .option("--codex-chat-remote <url>", "codex-chat source remote URL")
+  .option("--codex-chat-path <path>", "codex-chat checkout path on the service host")
+  .option("--codex-chat-ref <ref>", "codex-chat requested ref", "main")
+  .option("--assistant-logic-remote <url>", "assistant-agent-logic source remote URL")
+  .option("--assistant-logic-path <path>", "assistant-agent-logic checkout path on the service host")
+  .option("--assistant-logic-ref <ref>", "assistant-agent-logic requested ref", "main")
+  .option("--assistant-data-remote <url>", "assistant-agent-data source remote URL")
+  .option("--assistant-data-path <path>", "assistant-agent-data/workspace checkout path on the service host")
+  .option("--assistant-data-ref <ref>", "assistant-agent-data requested ref", "main")
+  .option("--deploy-host <host>", "codex-chat deploy host: local, SSH host, or SSH identity")
+  .option("--deploy-path <path>", "codex-chat deployed checkout path")
+  .option("--service-name <name>", "codex-chat systemd service name", "codex-chat.service")
+  .option("--env-file <path>", "codex-chat private service env file")
+  .option("--config-path <path>", "rendered codex-chat TOML path")
+  .option("--runtime-user <user>", "codex-chat systemd runtime user")
+  .option("--health-command <command>", "health command; repeat to configure more than one", collectStringOption, [])
+  .action(async (options) => exitWith(await registryInitCommand(options)));
 
 const stack = program.command("stack").description("Control-plane inspection and no-network plans for the servant runtime stack");
 stack.command("status")
@@ -887,6 +918,30 @@ interface StackCommandOptions {
   environment: string;
 }
 
+interface RegistryInitOptions extends StackCommandOptions {
+  workspaceRoot?: string;
+  serviceHome?: string;
+  brainRemote?: string;
+  brainPath?: string;
+  brainRef: string;
+  codexChatRemote?: string;
+  codexChatPath?: string;
+  codexChatRef: string;
+  assistantLogicRemote?: string;
+  assistantLogicPath?: string;
+  assistantLogicRef: string;
+  assistantDataRemote?: string;
+  assistantDataPath?: string;
+  assistantDataRef: string;
+  deployHost?: string;
+  deployPath?: string;
+  serviceName: string;
+  envFile?: string;
+  configPath?: string;
+  runtimeUser?: string;
+  healthCommand: string[];
+}
+
 type StackExecutorKind = "dry-run" | "mock" | "local" | "ssh";
 type StackApprovalGate = "apply" | "data" | "config" | "service" | "health";
 
@@ -971,6 +1026,10 @@ interface StackStatusDetails {
       serviceName?: string;
       envFile?: string;
       configPath?: string;
+      serviceHome?: string;
+      assistantWorkspace?: string;
+      capabilityStorePath?: string;
+      ipcSocketPath?: string;
       envVars: string[];
       expectedTelegramBot?: TelegramBotIdentity;
       healthChecks: Array<{ kind: string; command: string }>;
@@ -1135,7 +1194,6 @@ interface StackExecutorAction {
   sideEffectsIfExecuted: string;
 }
 
-const DEFAULT_REPO_REGISTRY_INDEX = "/home/tim/.assistant-claude/workspace/.claude/repo-registry/index.yaml";
 const DEPLOYMENT_METADATA_VERSION = 1 as const;
 const DEPLOYMENT_METADATA_KIND = "brain.control-plane.deployments" as const;
 const DEPLOYMENT_METADATA_RELATIVE_PATH = "state/control-plane/deployments.json";
@@ -1144,6 +1202,284 @@ const STACK_REQUIRED_ALIASES = {
   assistantLogic: ["assistant-agent-logic", "assistant-claude"],
   assistantData: ["assistant-agent-data", "assistant-data"],
 } as const;
+
+async function registryInitCommand(options: RegistryInitOptions): Promise<CliResult> {
+  const repoRoot = path.resolve(options.repo ?? process.cwd());
+  const setupContextPath = options.setupContext ? path.resolve(options.setupContext) : localSetupContextPath(repoRoot);
+  const setupContext = await readStackSetupContext(setupContextPath, options.workspace);
+  if (setupContext.warning) {
+    return {
+      ok: false,
+      summary: "repo registry was not generated because saved setup context is invalid",
+      details: { setupContext, sideEffects: "none" },
+    };
+  }
+
+  const context = setupContext.context;
+  const runtimeUser = options.runtimeUser ?? context?.serviceUser ?? DEFAULT_SERVICE_USER;
+  const conventionalHome = serviceUserHome(runtimeUser);
+  const serviceHome = resolveInstancePath(options.serviceHome ?? conventionalHome, conventionalHome);
+  const workspaceRoot = resolveInstancePath(options.workspaceRoot ?? context?.workspaceRoot ?? options.assistantDataPath ?? defaultWorkspaceRootDisplay(options.workspace, serviceHome), serviceHome);
+  const deployHost = options.deployHost ?? (context?.target === "remote" ? context.sshHost : "local");
+  if (!deployHost) {
+    return {
+      ok: false,
+      summary: "repo registry needs a codex-chat deploy host",
+      details: { missing: ["--deploy-host <local-or-ssh-target>"], setupContext, sideEffects: "none" },
+    };
+  }
+
+  const sshIdentity = deployHost === "local"
+    ? undefined
+    : (context?.sshHost === deployHost ? sshIdentityFromSetupContext(context) : undefined) ?? sshIdentityFromHost(deployHost, runtimeUser);
+  const sourceHost = deployHost === "local" ? "local" : sshIdentity ?? deployHost;
+  const brainPath = resolveInstancePath(options.brainPath ?? context?.repoPath ?? path.posix.join(serviceHome, "brain"), serviceHome);
+  const codexChatPath = resolveInstancePath(options.codexChatPath ?? path.posix.join(serviceHome, "codex-chat"), serviceHome);
+  const assistantLogicPath = resolveInstancePath(options.assistantLogicPath ?? path.posix.join(serviceHome, "assistant-agent-logic"), serviceHome);
+  const assistantDataCheckoutPath = resolveInstancePath(options.assistantDataPath ?? path.posix.join(serviceHome, "assistant-agent-data"), serviceHome);
+  const deployPath = resolveInstancePath(options.deployPath ?? codexChatPath, serviceHome);
+  const envFile = resolveInstancePath(options.envFile ?? path.posix.join(workspaceRoot, "config", "codex-chat.env"), serviceHome);
+  const configPath = resolveInstancePath(options.configPath ?? path.posix.join(workspaceRoot, "config", "codex-chat.toml"), serviceHome);
+  const capabilityStorePath = path.posix.join(serviceHome, ".brain", "control-plane", "capabilities.json");
+  const ipcSocketPath = path.posix.join(workspaceRoot, "state", "run", "codex-chat.sock");
+  const healthCommands = options.healthCommand.length > 0
+    ? options.healthCommand
+    : [`pnpm --dir ${shellArg(brainPath)} run brainctl canary --config ${shellArg(configPath)} --workspace-id ${shellArg(options.workspace)} --repo ${shellArg(brainPath)}`];
+
+  const remotes = {
+    brain: resolveRegistryRemote(options.brainRemote, repoRoot, "--brain-remote"),
+    codexChat: resolveRegistryRemote(options.codexChatRemote, sourceHost === "local" ? codexChatPath : undefined, "--codex-chat-remote"),
+    assistantLogic: resolveRegistryRemote(options.assistantLogicRemote, sourceHost === "local" ? assistantLogicPath : undefined, "--assistant-logic-remote"),
+    assistantData: resolveRegistryRemote(options.assistantDataRemote, sourceHost === "local" ? (options.assistantDataPath ?? context?.workspaceRoot ?? assistantDataCheckoutPath) : undefined, "--assistant-data-remote"),
+  };
+  const source = (repoPath: string, ref: string, remoteUrl: string) => ({
+    host: sourceHost,
+    path: repoPath,
+    ref,
+    remote_url: remoteUrl,
+  });
+  const repoEntry = (alias: string, repoPath: string, ref: string, remoteUrl: string) => ({
+    alias,
+    host: sourceHost,
+    path: repoPath,
+    repo_name: alias,
+    default_branch: ref,
+    current_branch: ref,
+    remote_url: remoteUrl,
+    ops: { repository: { source: source(repoPath, ref, remoteUrl) } },
+  });
+  const index = {
+    version: 1,
+    controller_root: serviceHome,
+    repos: {
+      brain: repoEntry("brain", brainPath, options.brainRef, remotes.brain.value),
+      "codex-chat": {
+        ...repoEntry("codex-chat", codexChatPath, options.codexChatRef, remotes.codexChat.value),
+        apps: {
+          "codex-chat": {
+            kind: "service",
+            environments: {
+              [options.environment]: {
+                source: source(codexChatPath, options.codexChatRef, remotes.codexChat.value),
+                deploy: {
+                  host: deployHost,
+                  path: deployPath,
+                  service: options.serviceName,
+                  runtime_user: runtimeUser,
+                  ...(sshIdentity ? { ssh_identity: sshIdentity } : {}),
+                  env_file: envFile,
+                  config_path: configPath,
+                  service_home: serviceHome,
+                  assistant_workspace: workspaceRoot,
+                  capability_store_path: capabilityStorePath,
+                  ipc_socket_path: ipcSocketPath,
+                  env_vars: ["TELEGRAM_BOT_TOKEN", "OPENAI_API_KEY"],
+                },
+                assistant_logic: source(assistantLogicPath, options.assistantLogicRef, remotes.assistantLogic.value),
+                assistant_data: source(workspaceRoot, options.assistantDataRef, remotes.assistantData.value),
+                health_checks: healthCommands.map((command) => ({ kind: "command", command })),
+              },
+            },
+          },
+        },
+      },
+      "assistant-agent-logic": repoEntry("assistant-agent-logic", assistantLogicPath, options.assistantLogicRef, remotes.assistantLogic.value),
+      "assistant-agent-data": repoEntry("assistant-agent-data", assistantDataCheckoutPath, options.assistantDataRef, remotes.assistantData.value),
+    },
+  };
+  const registryPath = resolveRepoRegistryIndexPath(options.registry, workspaceRoot, options.workspace);
+  const registryDirectory = path.dirname(registryPath);
+  const rendered = `# Generated by brainctl registry init. Re-run with the same inputs to validate without rewriting.\n${YAML.stringify(index, { indent: 2, lineWidth: 0 })}`;
+  const contractIssues = validateGeneratedRegistryContract(index, {
+    serviceHome,
+    workspaceRoot,
+    capabilityStorePath,
+    ipcSocketPath,
+    configPath,
+    envFile,
+    healthCommands,
+  });
+  if (contractIssues.length > 0) {
+    return { ok: false, summary: "generated repo registry failed its path/deployment contract", details: { registryPath, issues: contractIssues, sideEffects: "none" } };
+  }
+
+  await mkdir(registryDirectory, { recursive: true, mode: 0o700 });
+  const temporaryPath = path.join(registryDirectory, `.${path.basename(registryPath)}.${process.pid}.${Date.now()}.tmp`);
+  await writeFile(temporaryPath, rendered, { mode: 0o600 });
+  const candidateStatus = await resolveStackStatus({
+    registry: temporaryPath,
+    repo: repoRoot,
+    setupContext: setupContextPath,
+    workspace: options.workspace,
+    environment: options.environment,
+  });
+  const candidateConfig = renderCodexChatConfigPreview(candidateStatus);
+  const candidateContractIssues = [
+    ...(candidateStatus.assistantData.workspacePath !== workspaceRoot ? ["stack resolver assistant workspace does not match generated deployment metadata"] : []),
+    ...(candidateConfig.capabilityStorePath !== capabilityStorePath ? ["stack renderer capability store does not match generated deployment metadata"] : []),
+    ...(candidateConfig.ipcSocketPath !== ipcSocketPath ? ["stack renderer IPC socket does not match generated deployment metadata"] : []),
+  ];
+  if (candidateStatus.missing.length > 0 || !candidateStatus.repoBoundaries.ok || candidateContractIssues.length > 0) {
+    await rm(temporaryPath, { force: true });
+    return {
+      ok: false,
+      summary: "generated repo registry is not stack-ready; existing index was left unchanged",
+      details: { registryPath, missing: [...candidateStatus.missing, ...candidateContractIssues], repoBoundaries: candidateStatus.repoBoundaries, sideEffects: "none" },
+    };
+  }
+
+  let existing: string | undefined;
+  try {
+    existing = await readFile(registryPath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      await rm(temporaryPath, { force: true });
+      throw error;
+    }
+  }
+  let backupPath: string | undefined;
+  const changed = existing !== rendered;
+  if (!changed) {
+    await rm(temporaryPath, { force: true });
+  } else {
+    if (existing !== undefined) {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      backupPath = `${registryPath}.backup-${timestamp}-${process.pid}`;
+      await copyFile(registryPath, backupPath);
+      await chmod(backupPath, 0o600);
+    }
+    await rename(temporaryPath, registryPath);
+    await chmod(registryPath, 0o600);
+  }
+
+  const finalStatus = await resolveStackStatus({
+    registry: registryPath,
+    repo: repoRoot,
+    setupContext: setupContextPath,
+    workspace: options.workspace,
+    environment: options.environment,
+  });
+  const finalConfig = renderCodexChatConfigPreview(finalStatus);
+  const finalContractIssues = [
+    ...(finalStatus.assistantData.workspacePath !== workspaceRoot ? ["stack resolver assistant workspace does not match generated deployment metadata"] : []),
+    ...(finalConfig.capabilityStorePath !== capabilityStorePath ? ["stack renderer capability store does not match generated deployment metadata"] : []),
+    ...(finalConfig.ipcSocketPath !== ipcSocketPath ? ["stack renderer IPC socket does not match generated deployment metadata"] : []),
+  ];
+  if (finalStatus.missing.length > 0 || !finalStatus.repoBoundaries.ok || finalContractIssues.length > 0) {
+    if (changed && backupPath) await copyFile(backupPath, registryPath);
+    else if (changed) await rm(registryPath, { force: true });
+    return {
+      ok: false,
+      summary: "repo registry write failed post-write stack validation and was rolled back",
+      details: { registryPath, backupPath, missing: [...finalStatus.missing, ...finalContractIssues], repoBoundaries: finalStatus.repoBoundaries },
+    };
+  }
+
+  const unresolvedRemotes = Object.values(remotes).filter((remote) => remote.placeholder).map((remote) => remote.requiredFlag);
+  return {
+    ok: true,
+    summary: changed ? "repo registry generated atomically and validated as stack-ready" : "repo registry already matched requested inputs and remains stack-ready",
+    details: {
+      registryPath,
+      changed,
+      backupPath,
+      workspace: options.workspace,
+      environment: options.environment,
+      serviceContract: { runtimeUser, serviceHome, workspaceRoot, capabilityStorePath, ipcSocketPath },
+      unresolvedRemotes,
+      validation: {
+        validator: "brainctl stack status resolver",
+        stackReady: true,
+        requiredServantReposResolved: ["codex-chat", "assistant-agent-logic", "assistant-agent-data"],
+        missing: [...finalStatus.missing, ...finalContractIssues],
+        repoBoundaries: finalStatus.repoBoundaries,
+      },
+      sideEffects: changed ? "wrote private repo-registry metadata only" : "none",
+    },
+  };
+}
+
+function resolveRepoRegistryIndexPath(registryPath: string | undefined, workspaceRoot: string | undefined, workspace: string): string {
+  const configured = registryPath ?? process.env.BRAIN_REPO_REGISTRY;
+  if (configured) return path.resolve(configured);
+  return path.resolve(workspaceRoot ?? defaultWorkspaceRoot(workspace), ".claude", "repo-registry", "index.yaml");
+}
+
+function resolveInstancePath(value: string, serviceHome: string): string {
+  const expanded = normalizeRemoteDisplayPath(value, serviceHome);
+  return path.posix.isAbsolute(expanded) ? path.posix.normalize(expanded) : path.resolve(expanded);
+}
+
+function resolveRegistryRemote(explicit: string | undefined, checkoutPath: string | undefined, requiredFlag: string): { value: string; placeholder: boolean; requiredFlag: string } {
+  const discovered = explicit ?? (checkoutPath ? gitOriginUrl(checkoutPath) : undefined);
+  return discovered
+    ? { value: redactRemoteUrl(discovered), placeholder: false, requiredFlag }
+    : { value: `REQUIRED: set ${requiredFlag} <url>`, placeholder: true, requiredFlag };
+}
+
+function gitOriginUrl(checkoutPath: string): string | undefined {
+  const result = spawnSync("git", ["-C", checkoutPath, "config", "--get", "remote.origin.url"], { encoding: "utf8" });
+  return result.status === 0 ? asString(result.stdout.trim()) : undefined;
+}
+
+function validateGeneratedRegistryContract(index: Record<string, unknown>, expected: {
+  serviceHome: string;
+  workspaceRoot: string;
+  capabilityStorePath: string;
+  ipcSocketPath: string;
+  configPath: string;
+  envFile: string;
+  healthCommands: string[];
+}): string[] {
+  const issues: string[] = [];
+  const repos = asRecord(index.repos);
+  for (const name of ["brain", "codex-chat", "assistant-agent-logic", "assistant-agent-data"]) {
+    if (!asRecord(repos?.[name])) issues.push(`repo registry entry missing: ${name}`);
+  }
+  const codex = asRecord(repos?.["codex-chat"]);
+  const apps = asRecord(codex?.apps);
+  const app = asRecord(apps?.["codex-chat"]);
+  const environments = asRecord(app?.environments);
+  const environment = Object.values(environments ?? {}).map(asRecord).find(Boolean);
+  const deploy = asRecord(environment?.deploy);
+  const expectedDeploy = {
+    service_home: expected.serviceHome,
+    assistant_workspace: expected.workspaceRoot,
+    capability_store_path: expected.capabilityStorePath,
+    ipc_socket_path: expected.ipcSocketPath,
+    config_path: expected.configPath,
+    env_file: expected.envFile,
+  };
+  for (const [key, value] of Object.entries(expectedDeploy)) {
+    if (deploy?.[key] !== value) issues.push(`codex-chat deploy.${key} does not match the resolved provisioning contract`);
+  }
+  const healthChecks = Array.isArray(environment?.health_checks) ? environment.health_checks : [];
+  const commands = healthChecks.map(asRecord).map((check) => asString(check?.command)).filter(isString);
+  if (commands.length !== expected.healthCommands.length || commands.some((command, index) => command !== expected.healthCommands[index])) {
+    issues.push("codex-chat health checks do not match requested commands");
+  }
+  return issues;
+}
 
 async function stackStatusCommand(options: StackCommandOptions): Promise<CliResult> {
   const status = await resolveStackStatus(options);
@@ -1260,9 +1596,9 @@ async function stackApplyCommand(options: StackApplyOptions): Promise<CliResult>
 
 async function resolveStackStatus(options: StackCommandOptions): Promise<StackStatusDetails> {
   const repoRoot = path.resolve(options.repo ?? process.cwd());
-  const registryPath = path.resolve(options.registry ?? process.env.BRAIN_REPO_REGISTRY ?? DEFAULT_REPO_REGISTRY_INDEX);
-  const registry = await loadRepoRegistry(registryPath);
   const setupContext = await readStackSetupContext(options.setupContext ? path.resolve(options.setupContext) : localSetupContextPath(repoRoot), options.workspace);
+  const registryPath = resolveRepoRegistryIndexPath(options.registry, setupContext.context?.workspaceRoot, options.workspace);
+  const registry = await loadRepoRegistry(registryPath);
   const codexChat = findRegistryRepo(registry.index, STACK_REQUIRED_ALIASES.codexChat, "codex-chat");
   const assistantLogic = findRegistryRepo(registry.index, STACK_REQUIRED_ALIASES.assistantLogic, "assistant-agent-logic");
   const assistantData = findRegistryRepo(registry.index, STACK_REQUIRED_ALIASES.assistantData, "assistant-agent-data");
@@ -1276,6 +1612,10 @@ async function resolveStackStatus(options: StackCommandOptions): Promise<StackSt
   const serviceName = asString(codexDeploy?.service);
   const envFile = asString(codexDeploy?.env_file);
   const configPath = asString(codexDeploy?.config_path) ?? asString(codexDeploy?.config);
+  const serviceHome = asString(codexDeploy?.service_home);
+  const assistantWorkspace = asString(codexDeploy?.assistant_workspace);
+  const capabilityStorePath = asString(codexDeploy?.capability_store_path);
+  const ipcSocketPath = asString(codexDeploy?.ipc_socket_path);
   const envVars = asStringArray(codexDeploy?.env_vars);
   const expectedTelegramBot = readExpectedTelegramBot(codexDeploy, codexEnvironment?.environment);
   const healthChecks = readStackHealthChecks(codexEnvironment?.environment);
@@ -1291,6 +1631,10 @@ async function resolveStackStatus(options: StackCommandOptions): Promise<StackSt
       serviceName,
       envFile,
       configPath,
+      serviceHome,
+      assistantWorkspace,
+      capabilityStorePath,
+      ipcSocketPath,
       envVars,
       expectedTelegramBot,
       healthChecks,
@@ -1345,8 +1689,11 @@ async function resolveStackStatus(options: StackCommandOptions): Promise<StackSt
     ...(!assistantData.repo ? ["repo registry entry missing: assistant-agent-data"] : []),
     ...(!deployHost ? ["codex-chat deploy host missing from registry/setup context"] : []),
     ...(!deployPath ? ["codex-chat deploy path missing from registry"] : []),
+    ...(!runtimeUser ? ["codex-chat runtime user missing from registry"] : []),
     ...(!serviceName ? ["codex-chat service name missing from registry"] : []),
     ...(!envFile ? ["codex-chat env file path missing from registry"] : []),
+    ...(!configPath ? ["codex-chat config path missing from registry"] : []),
+    ...(healthChecks.length === 0 ? ["codex-chat health checks missing from registry"] : []),
     ...(!deploymentMetadata.read.validation.ok ? deploymentMetadata.read.validation.issues.map((issue) => `deployment metadata store invalid: ${issue}`) : []),
     ...repoBoundaries.issues,
   ];
@@ -1777,9 +2124,10 @@ function renderCodexChatConfigPreview(status: StackStatusDetails): CodexChatConf
   const stateDir = path.posix.join(workspaceRoot, "state", "codex-chat");
   const artifactDir = path.posix.join(workspaceRoot, "artifacts", "subagents");
   const runDir = path.posix.join(workspaceRoot, "state", "run");
-  const ipcSocketPath = path.posix.join(runDir, "codex-chat.sock");
+  const ipcSocketPath = status.servantRuntime.deploy.ipcSocketPath ?? path.posix.join(runDir, "codex-chat.sock");
   const serviceUser = status.servantRuntime.deploy.runtimeUser ?? DEFAULT_SERVICE_USER;
-  const capabilityStorePath = path.posix.join(serviceUserHome(serviceUser), ".brain", "control-plane", "capabilities.json");
+  const capabilityStorePath = status.servantRuntime.deploy.capabilityStorePath
+    ?? path.posix.join(status.servantRuntime.deploy.serviceHome ?? serviceUserHome(serviceUser), ".brain", "control-plane", "capabilities.json");
   const addDirs = [
     controlPlaneRoot,
     codexChatRoot,
@@ -1882,7 +2230,10 @@ function renderCodexChatConfigPreview(status: StackStatusDetails): CodexChatConf
 }
 
 function codexChatWorkspaceRoot(status: StackStatusDetails): string {
-  return status.setupContext.context?.workspaceRoot ?? status.assistantData.workspacePath ?? status.assistantData.path;
+  return status.setupContext.context?.workspaceRoot
+    ?? status.servantRuntime.deploy.assistantWorkspace
+    ?? status.assistantData.workspacePath
+    ?? status.assistantData.path;
 }
 
 function tomlString(value: string): string {
@@ -7134,6 +7485,10 @@ function parseNumberOption(value: string): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`Expected positive number, got ${value}`);
   return parsed;
+}
+
+function collectStringOption(value: string, previous: string[]): string[] {
+  return [...previous, value];
 }
 
 function configSummary(config: BrainConfig | undefined) {
