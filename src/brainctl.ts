@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { access, appendFile, chmod, copyFile, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { access, appendFile, chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -404,7 +404,12 @@ backup.command("status")
   .option("--path <path>", "private workspace path override")
   .action(async (options) => exitWith(await backupCommand("status", options)));
 
-const workspaceCommands = program.command("workspace").description("Legacy/lab Brain assistant workspace helpers; production uses assistant-agent-logic plus assistant-agent-data");
+const workspaceCommands = program.command("workspace").description("Assistant workspace helpers; production seed sources come from the resolved assistant-agent-logic checkout");
+workspaceCommands.command("seed")
+  .description("Seed a private assistant-agent-data workspace from an assistant-agent-logic workspace template without overwriting files or writing secrets.")
+  .requiredOption("--logic-path <path>", "resolved assistant-agent-logic checkout path")
+  .requiredOption("--path <path>", "resolved assistant-agent-data/private workspace root")
+  .action(async (options) => exitWith(await workspaceSeedCommand(options)));
 workspaceCommands.command("scaffold")
   .description("Create the legacy/lab Brain assistant workspace scaffold without overwriting stores or secrets.")
   .option("--workspace <id>", "workspace id", "personal")
@@ -2691,6 +2696,16 @@ function renderStackExecutorActions(status: StackStatusDetails, approvals: Recor
         : `mkdir -p ${shellPathArg(data.path)} && test -d ${shellPathArg(`${data.path}/.git`)} || git -C ${shellPathArg(data.path)} init -b ${shellArg(data.branch ?? "main")}`,
       sideEffectsIfExecuted: "would clone or initialize assistant-agent-data only after data approval; migration placeholder only",
     }),
+    action({
+      id: "seed-assistant-agent-data-workspace",
+      title: "Seed missing assistant-agent-data workspace files from the resolved assistant-agent-logic template.",
+      phase: "assistant-data",
+      executor: dataIdentity ? "ssh" : "local",
+      requiredGate: "data",
+      hostIdentity: dataIdentity,
+      command: `cd ${shellPathArg(brainAdmin.workingDirectory)} && pnpm run brainctl workspace seed --logic-path ${shellPathArg(logic.path)} --path ${shellPathArg(data.path)}`,
+      sideEffectsIfExecuted: "would copy only missing workspace-template files, create missing workspace directories, sanitize .env.example values to placeholders, and preserve all existing private files and secrets",
+    }),
     ...(configPath ? [action({
       id: "render-codex-chat-config-env",
       title: "Render codex-chat config and env template without secret values.",
@@ -4011,6 +4026,178 @@ async function backupStatusFor(plan: ReturnType<typeof backupPlanFor>): Promise<
   const metadata = await fileMetadata(plan.config.privateGit.repoPath);
   const git = await gitMetadata(plan.config.privateGit.repoPath);
   return { ok: metadata.present && Boolean(git.present), metadata, git };
+}
+
+const ASSISTANT_WORKSPACE_TEMPLATE_FILES = [
+  ".env.example",
+  ".gitignore",
+  "composio.yaml",
+  "messaging.yaml",
+  "telegram.yaml",
+] as const;
+const ASSISTANT_WORKSPACE_TEMPLATE_DIRECTORIES = ["instructions", "skills", "tasks"] as const;
+const ASSISTANT_WORKSPACE_REQUIRED_DIRECTORIES = ["data", "instructions", "tasks"] as const;
+
+interface AssistantWorkspaceSeedResult {
+  templateRoot: string;
+  workspaceRoot: string;
+  createdDirectories: string[];
+  skippedDirectories: string[];
+  createdFiles: string[];
+  skippedFiles: string[];
+  ignoredEntries: string[];
+  envExampleSanitized: boolean;
+  secretValuesWritten: false;
+}
+
+async function workspaceSeedCommand(options: { logicPath: string; path: string }): Promise<CliResult> {
+  const logicPath = path.resolve(options.logicPath);
+  const workspaceRoot = path.resolve(options.path);
+  const templateRoot = path.join(logicPath, "config", "workspace-template");
+  try {
+    const seed = await seedAssistantDataWorkspace(templateRoot, workspaceRoot);
+    return {
+      ok: true,
+      summary: seed.createdFiles.length > 0 || seed.createdDirectories.length > 0
+        ? "assistant-agent-data workspace seeded from the resolved assistant-agent-logic template"
+        : "assistant-agent-data workspace already contains the template files; nothing was overwritten",
+      details: {
+        logicPath,
+        ...seed,
+        source: "resolved assistant-agent-logic checkout config/workspace-template",
+        sideEffects: "created missing directories/files only; existing files, stores, and secrets were preserved",
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      summary: `assistant-agent-data workspace seed failed: ${errorMessage(error)}`,
+      details: { logicPath, templateRoot, workspaceRoot, secretValuesWritten: false },
+    };
+  }
+}
+
+async function seedAssistantDataWorkspace(templateRoot: string, workspaceRoot: string): Promise<AssistantWorkspaceSeedResult> {
+  const result: AssistantWorkspaceSeedResult = {
+    templateRoot,
+    workspaceRoot,
+    createdDirectories: [],
+    skippedDirectories: [],
+    createdFiles: [],
+    skippedFiles: [],
+    ignoredEntries: [],
+    envExampleSanitized: false,
+    secretValuesWritten: false,
+  };
+  await requireSeedDirectory(templateRoot, "workspace template root");
+  await ensureSeedDirectory(workspaceRoot, workspaceRoot, result);
+  for (const relativePath of ASSISTANT_WORKSPACE_REQUIRED_DIRECTORIES) {
+    await ensureSeedDirectory(workspaceRoot, path.join(workspaceRoot, relativePath), result);
+  }
+  for (const relativePath of ASSISTANT_WORKSPACE_TEMPLATE_FILES) {
+    await copyWorkspaceTemplateFile({ templateRoot, workspaceRoot, relativePath, result });
+  }
+  for (const relativePath of ASSISTANT_WORKSPACE_TEMPLATE_DIRECTORIES) {
+    const sourcePath = path.join(templateRoot, relativePath);
+    await requireSeedDirectory(sourcePath, `workspace template directory ${relativePath}`);
+    await copyWorkspaceTemplateDirectory({ templateRoot, workspaceRoot, relativePath, result });
+  }
+  for (const values of [result.createdDirectories, result.skippedDirectories, result.createdFiles, result.skippedFiles, result.ignoredEntries]) {
+    values.sort();
+  }
+  return result;
+}
+
+async function copyWorkspaceTemplateDirectory(input: {
+  templateRoot: string;
+  workspaceRoot: string;
+  relativePath: string;
+  result: AssistantWorkspaceSeedResult;
+}): Promise<void> {
+  const sourceDirectory = path.join(input.templateRoot, input.relativePath);
+  const targetDirectory = path.join(input.workspaceRoot, input.relativePath);
+  await ensureSeedDirectory(input.workspaceRoot, targetDirectory, input.result);
+  const entries = await readdir(sourceDirectory, { withFileTypes: true });
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    const relativePath = path.join(input.relativePath, entry.name);
+    if (entry.isDirectory()) {
+      await copyWorkspaceTemplateDirectory({ ...input, relativePath });
+    } else if (entry.isFile()) {
+      await copyWorkspaceTemplateFile({ ...input, relativePath });
+    } else {
+      input.result.ignoredEntries.push(relativePath);
+    }
+  }
+}
+
+async function copyWorkspaceTemplateFile(input: {
+  templateRoot: string;
+  workspaceRoot: string;
+  relativePath: string;
+  result: AssistantWorkspaceSeedResult;
+}): Promise<void> {
+  const sourcePath = path.join(input.templateRoot, input.relativePath);
+  const sourceMetadata = await lstat(sourcePath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") throw new Error(`workspace template is missing required file: ${input.relativePath}`);
+    throw error;
+  });
+  if (!sourceMetadata.isFile()) throw new Error(`workspace template entry is not a regular file: ${input.relativePath}`);
+  const targetPath = path.join(input.workspaceRoot, input.relativePath);
+  const targetMetadata = await lstat(targetPath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (targetMetadata) {
+    input.result.skippedFiles.push(input.relativePath);
+    return;
+  }
+  await ensureSeedDirectory(input.workspaceRoot, path.dirname(targetPath), input.result);
+  try {
+    if (input.relativePath === ".env.example") {
+      const source = await readFile(sourcePath, "utf8");
+      const placeholderOnly = sanitizeWorkspaceEnvExample(source);
+      await writeFile(targetPath, placeholderOnly, { flag: "wx", mode: 0o600 });
+      input.result.envExampleSanitized = placeholderOnly !== source;
+    } else {
+      await copyFile(sourcePath, targetPath, fsConstants.COPYFILE_EXCL);
+      await chmod(targetPath, 0o600);
+    }
+    input.result.createdFiles.push(input.relativePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    input.result.skippedFiles.push(input.relativePath);
+  }
+}
+
+async function ensureSeedDirectory(workspaceRoot: string, targetPath: string, result: AssistantWorkspaceSeedResult): Promise<void> {
+  const relativePath = path.relative(workspaceRoot, targetPath) || ".";
+  const metadata = await lstat(targetPath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (metadata) {
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error(`workspace seed directory is not a safe directory: ${relativePath}`);
+    result.skippedDirectories.push(relativePath);
+    return;
+  }
+  await mkdir(targetPath, { recursive: true, mode: 0o700 });
+  result.createdDirectories.push(relativePath);
+}
+
+async function requireSeedDirectory(targetPath: string, label: string): Promise<void> {
+  const metadata = await lstat(targetPath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") throw new Error(`${label} does not exist: ${targetPath}`);
+    throw error;
+  });
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error(`${label} is not a safe directory: ${targetPath}`);
+}
+
+function sanitizeWorkspaceEnvExample(source: string): string {
+  return source.split(/(\r?\n)/).map((part) => {
+    if (/^\r?\n$/.test(part)) return part;
+    const assignment = part.match(/^(\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=).*$/);
+    return assignment ? assignment[1] : part;
+  }).join("");
 }
 
 async function workspaceScaffoldCommand(options: { workspace: string; path?: string; assistantRepo?: string; dryRun?: boolean }): Promise<CliResult> {

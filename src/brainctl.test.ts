@@ -1002,6 +1002,63 @@ test("brainctl keeps setup coordinator-only and exposes legacy/lab assistant-log
   }
 });
 
+test("brainctl workspace seed creates missing logic-template files once without overwriting private data or secrets", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brainctl-workspace-seed-"));
+  try {
+    const logic = path.join(root, "assistant-agent-logic");
+    const template = path.join(logic, "config", "workspace-template");
+    const workspace = path.join(root, "assistant-agent-data");
+    const secret = "real-secret-value-must-not-be-seeded";
+    await mkdir(path.join(template, "instructions", "prompts"), { recursive: true });
+    await mkdir(path.join(template, "skills"), { recursive: true });
+    await mkdir(path.join(template, "tasks"), { recursive: true });
+    await writeFile(path.join(template, ".env.example"), `OPENAI_API_KEY=${secret}\nTELEGRAM_BOT_TOKEN=<replace-me>\n`);
+    await writeFile(path.join(template, ".env"), `OPENAI_API_KEY=${secret}\n`);
+    await writeFile(path.join(template, ".gitignore"), ".env\n");
+    await writeFile(path.join(template, "composio.yaml"), "api_key: env:COMPOSIO_API_KEY\n");
+    await writeFile(path.join(template, "messaging.yaml"), "version: 1\n");
+    await writeFile(path.join(template, "telegram.yaml"), "template telegram config\n");
+    await writeFile(path.join(template, "instructions", "README.md"), "template instructions\n");
+    await writeFile(path.join(template, "instructions", "prompts", "reply.md"), "template reply preferences\n");
+    await writeFile(path.join(template, "skills", "message-check.md"), "template skill\n");
+    await writeFile(path.join(template, "tasks", "README.md"), "template tasks\n");
+
+    await mkdir(path.join(workspace, "data"), { recursive: true });
+    await writeFile(path.join(workspace, ".env"), `OPENAI_API_KEY=${secret}\n`);
+    await writeFile(path.join(workspace, "capabilities.json"), `{"secret":"${secret}"}\n`);
+    await writeFile(path.join(workspace, "telegram.yaml"), "operator telegram config\n");
+    await writeFile(path.join(workspace, "data", "todos.json"), `{"private":"${secret}"}\n`);
+
+    const first = spawnBrainctl(["workspace", "seed", "--logic-path", logic, "--path", workspace]);
+    assert.equal(first.status, 0, first.stderr);
+    assert.doesNotMatch(first.stdout, new RegExp(secret));
+    const firstJson = JSON.parse(first.stdout) as { details: { createdDirectories: string[]; createdFiles: string[]; skippedFiles: string[]; envExampleSanitized: boolean; secretValuesWritten: boolean } };
+    assert.ok(firstJson.details.createdDirectories.includes("instructions"));
+    assert.ok(firstJson.details.createdDirectories.includes("tasks"));
+    assert.ok(firstJson.details.createdFiles.includes(".env.example"));
+    assert.ok(firstJson.details.createdFiles.includes(path.join("skills", "message-check.md")));
+    assert.ok(firstJson.details.skippedFiles.includes("telegram.yaml"));
+    assert.equal(firstJson.details.envExampleSanitized, true);
+    assert.equal(firstJson.details.secretValuesWritten, false);
+    assert.equal(await readFile(path.join(workspace, ".env.example"), "utf8"), "OPENAI_API_KEY=\nTELEGRAM_BOT_TOKEN=\n");
+    assert.equal(await readFile(path.join(workspace, ".env"), "utf8"), `OPENAI_API_KEY=${secret}\n`);
+    assert.equal(await readFile(path.join(workspace, "telegram.yaml"), "utf8"), "operator telegram config\n");
+    assert.equal(await readFile(path.join(workspace, "capabilities.json"), "utf8"), `{"secret":"${secret}"}\n`);
+    assert.equal(await readFile(path.join(workspace, "data", "todos.json"), "utf8"), `{"private":"${secret}"}\n`);
+
+    await writeFile(path.join(template, "messaging.yaml"), "changed template must not overwrite\n");
+    const second = spawnBrainctl(["workspace", "seed", "--logic-path", logic, "--path", workspace]);
+    assert.equal(second.status, 0, second.stderr);
+    const secondJson = JSON.parse(second.stdout) as { details: { createdFiles: string[]; skippedFiles: string[]; secretValuesWritten: boolean } };
+    assert.deepEqual(secondJson.details.createdFiles, []);
+    assert.ok(secondJson.details.skippedFiles.includes("messaging.yaml"));
+    assert.equal(secondJson.details.secretValuesWritten, false);
+    assert.equal(await readFile(path.join(workspace, "messaging.yaml"), "utf8"), "version: 1\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("brainctl setup status requires Codex auth for the service user", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brainctl-setup-service-user-auth-"));
   try {
@@ -1699,6 +1756,7 @@ test("brainctl stack status and plan resolve servant runtime control-plane metad
     assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "install-brain-admin-systemd" && action.requiredGate === "service" && /CLERK_PUBLISHABLE_KEY/.test(action.displayCommand ?? "") && /systemctl enable brain-admin\.service.*systemctl restart brain-admin\.service/.test(action.displayCommand ?? "")));
     assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "health-check-brain-admin" && action.requiredGate === "health" && /127\.0\.0\.1:49347\/healthz/.test(action.displayCommand ?? "")));
     assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "assistant-agent-data-clone-or-init-placeholder" && action.executor === "ssh" && /ssh brain@brain\.example\.test/.test(action.displayCommand ?? "")));
+    assert.ok(planJson.details.plan.execution.actions.some((action) => action.id === "seed-assistant-agent-data-workspace" && action.requiredGate === "data" && /workspace seed/.test(action.displayCommand ?? "") && /assistant-agent-logic/.test(action.displayCommand ?? "")));
     assert.ok(planJson.details.plan.forbidden.some((line) => /Do not vendor or merge/.test(line)));
   } finally {
     await rm(root, { recursive: true, force: true });
