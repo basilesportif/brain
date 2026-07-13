@@ -121,9 +121,76 @@ deployment handoff.
 ## Canonical user flow
 
 The user clones/opens the Brain repo root in Codex or Claude Code and says
-`setup`. The agent then reads the referenced root docs/skill files, checks for
-saved setup context/progress, and only asks the first local-vs-remote question
-after progress has been checked or ruled out.
+`setup` (or "get it up and running"). The agent then reads the referenced root
+docs/skill files, checks for saved setup context/progress, and only asks the
+first local-vs-remote question after progress has been checked or ruled out.
+
+## Canonical provisioning sequence (get it up and running)
+
+This is the ordered, resumable, prompt-driven path from a bare box to a working
+Telegram instance for a NEW owner. The commands referenced here all exist. Run
+the steps in order — the ordering is load-bearing: the control plane must exist
+before the owner can be granted capabilities, and secrets must be in place
+before the services first start. Persist every non-secret answer to
+setup-context so an interrupted session resumes; enter every secret through a
+one-use hidden-input helper (never echo, never commit). Setup is DONE only when
+the acceptance gate (step 12) is green.
+
+1. **Resume inspection.** `pnpm run brainctl setup status --repo <repo-root>
+   --workspace <name>`; read `private/setup-context.json`; resume from
+   `setupWizard.nextIncompleteStep` rather than restarting.
+2. **Mode + guided answers.** Ask local vs remote, then collect and persist:
+   service user (default `brain`); **owner admin email** (`ownerAdminEmail`,
+   required — becomes the Clerk first admin and `CLERK_ALLOWED_EMAILS`); **owner
+   Telegram user id** (`ownerTelegramUserId`, required — from @userinfobot); the
+   four repo remotes (brain, codex-chat, assistant-agent-logic,
+   assistant-agent-data); and remote SSH host/user/path if remote.
+3. **Bare-server prerequisites (remote).** Prepare the service user with
+   `pnpm run brainctl setup remote-bootstrap`, then install the base runtime per
+   the fresh-remote prerequisites (Node >= 24, pnpm >= 10, git, cron, systemd
+   with lingering as needed). Verify the versions before continuing.
+4. **Brain checkout + workspace.** Clone/build brain (`pnpm install`,
+   `pnpm run check`), then `pnpm run brainctl setup` to create the private
+   workspace + setup-context.
+5. **Repo registry.** `pnpm run brainctl registry init` with the collected
+   remotes/paths and codex-chat deploy metadata. Resolve any
+   `REQUIRED: set --…-remote <url>` placeholders it emits before proceeding —
+   `brainctl stack` cannot run until the registry is complete.
+6. **Secrets (one-use hidden-input helpers).** Telegram bot token; Clerk
+   publishable key + secret key + `CLERK_ALLOWED_EMAILS` = the owner admin email
+   (this MUST be set before brain-admin first starts, or the first admin is not
+   seeded); OpenAI transcription key (optional). Written only into the rendered
+   service env files, never into metadata, logs, or chat.
+7. **Behavior pack for the new owner.** Point the new instance's codex-chat
+   `behavior.dir` at codex-chat's `behavior-templates/generic` and set the
+   config `[owner]` block (`name`, `telegramChatId`) so the generic, owner-neutral
+   pack renders for this owner. (An existing personal instance keeps its own
+   `behavior/` — this applies to NEW instances.)
+8. **Deploy the stack.** `pnpm run brainctl stack plan` then `... stack apply`
+   through the approval gates (apply → config → service → health). This builds
+   and installs BOTH `codex-chat.service` and `brain-admin.service`, writes the
+   codex-chat config with `[paths]`/`[brain]`/socket (per
+   `docs/provisioning-contract.md`) and the brain-admin env with the SAME store
+   path + IPC socket, and seeds the assistant-agent-data workspace from the logic
+   template.
+9. **Control plane up.** brain-admin starts, creates the capability store, and
+   seeds the first Clerk admin from `CLERK_ALLOWED_EMAILS`. Confirm `/healthz`.
+10. **Owner bootstrap.** `pnpm run brainctl owner bootstrap --telegram-user-id
+    <id> --owner-email <email> --display-name <name>` — creates the owner person,
+    links the Telegram identity, and grants the runtime channel baseline
+    (`telegram.event.receive`/`assistant.run`/`output.text.send` with
+    `surfaceKind:"telegram"` selectors) plus the domain baseline. It prints the
+    Telegram user id that codex-chat's `/pair` allowlist must also include.
+11. **Pair the channel.** Ensure the owner's Telegram id is in codex-chat's
+    allowlist: the owner messages the bot and completes `/pair <code>` (the
+    runtime pairing), targeting the SAME id printed in step 10 so pairing and
+    capability grants line up.
+12. **Acceptance gate.** `pnpm run brainctl canary --config <codex-chat.toml>`
+    (add `--live` after the owner sends a test message). Every check must PASS —
+    config resolves, store valid, Telegram-linked owner, IPC reachable, owner
+    authorizes the runtime baseline, a stranger is denied, behavior pack present.
+    If any check FAILs, follow its printed remediation and re-run. Green canary =
+    provisioned.
 
 ## Required first action
 
@@ -494,4 +561,14 @@ pnpm run brainctl registry init --workspace <name> --deploy-host <local-or-ssh-t
   --assistant-logic-remote <url> --assistant-data-remote <url>
 pnpm run brainctl stack status --workspace <name>
 pnpm run brainctl stack plan --workspace <name>
+pnpm run brainctl stack apply --workspace <name> --approve --approve-config --approve-service --approve-health
+pnpm run brainctl owner bootstrap --telegram-user-id <owner-tg-id> --owner-email <owner-email> --display-name "<Owner Name>"
+# Acceptance gate — provisioning is DONE only when this is PASS:
+pnpm run brainctl canary --config <workspace>/config/codex-chat.toml
+# After the owner sends a test Telegram message, confirm the full path lit up:
+pnpm run brainctl canary --config <workspace>/config/codex-chat.toml --live
 ```
+
+The `canary` command is the definition of "provisioned": a green run means a
+new owner can message the Telegram bot and get an authorized reply with
+capabilities enforced. Do not consider setup complete until it passes.
