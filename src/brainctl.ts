@@ -17,6 +17,7 @@ import { FileTelegramPairingStore, FileTelegramPollingStateStore, OpenAITelegram
 import { createCodexProvider, type CodexTransportKind } from "@brain/provider-codex";
 import { createClaudeCodeProvider, type ClaudeCodeTransportKind } from "@brain/provider-claude-code";
 import { pruneExpiredPages, publishPage, readManifest, validatePageDirectory } from "@brain/web";
+import { formatCanaryReport, runCanary } from "./canary.js";
 
 interface CliResult {
   ok: boolean;
@@ -96,6 +97,27 @@ program.command("doctor")
   .option("--config <path>", "runtime YAML/TOML/JSON config", "examples/config/runtime.yaml")
   .option("--pack <path>", "assistant pack directory", "assistant-packs/core")
   .action(async (options) => exitWith(await doctorCommand(options)));
+
+program.command("canary")
+  .description("Run the read-only end-to-end provisioning capability acceptance gate.")
+  .option("--config <path>", "provisioned codex-chat TOML")
+  .option("--socket <path>", "override [service].ipcSocket")
+  .option("--store <path>", "override [brain].storePath")
+  .option("--logic-repo <path>", "override [paths].logicRepo")
+  .option("--workspace <path>", "override [paths].assistantWorkspace")
+  .option("--owner <subjectIdOrTelegramUserId>", "verify a specific owner subject or Telegram user id")
+  .option("--live", "inspect recent codex-chat state for a real owner Telegram turn and reply")
+  .option("--since <duration>", "live confirmation window (for example 30s, 10m, 2h, or 1d)", "10m")
+  .option("--json", "emit a structured JSON report")
+  .option("--repo <path>", "Brain checkout used to find private/setup-context.json", process.cwd())
+  .option("--setup-context <path>", "explicit setup-context.json path")
+  .option("--metadata-file <path>", "explicit deployment metadata file used to resolve codex-chat config")
+  .option("--workspace-id <id>", "workspace id used for deployment metadata resolution", DEFAULT_WORKSPACE_ID)
+  .action(async (options) => {
+    const report = await runCanary(options);
+    process.stdout.write(options.json ? `${JSON.stringify(report, null, 2)}\n` : formatCanaryReport(report));
+    if (!report.ok) process.exitCode = 1;
+  });
 
 program.command("start")
   .description("Lab-only Brain supervisor seam. Production assistant service deployment must use `brainctl stack ...` to run codex-chat.")

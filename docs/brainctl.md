@@ -41,6 +41,10 @@ pnpm run brainctl setup status --config ~/.brain/workspace/config/runtime.yaml -
 pnpm run brainctl setup reset --workspace personal --path ~/.brain/workspace --dry-run
 pnpm run brainctl setup reset --workspace personal --path ~/.brain/workspace --yes
 pnpm run brainctl doctor --config examples/config/runtime.yaml --pack assistant-packs/core
+pnpm run brainctl canary --config /path/to/codex-chat.toml
+pnpm run brainctl canary --config /path/to/legacy-codex-chat.toml --logic-repo /path/to/assistant-agent-logic --workspace /path/to/assistant-workspace
+pnpm run brainctl canary --config /path/to/codex-chat.toml --owner person:owner --json
+pnpm run brainctl canary --config /path/to/codex-chat.toml --live --since 10m
 pnpm run brainctl config validate examples/config/runtime.yaml
 pnpm run brainctl secrets check --config examples/config/runtime.yaml
 pnpm run brainctl stack status --workspace personal
@@ -93,6 +97,33 @@ pnpm run brainctl web validate --dir /path/to/static-page
 pnpm run brainctl web publish --dir /path/to/static-page --id demo-page --dry-run
 pnpm run brainctl web prune --dry-run
 ```
+
+## Provisioning capability canary
+
+`brainctl canary` is the read-only acceptance gate for a provisioned
+`codex-chat` instance. It reads the deployed TOML and capability store, sends
+only `check_capability` dry-runs over the local IPC socket, and never writes
+configuration/state, sends an entrypoint message, or manages a service. The
+default human report lists PASS/FAIL/SKIP for config paths, store schema and
+counts, Telegram owner linkage, IPC reachability, the four owner baseline
+capabilities, an absent-subject negative control, and the behavior entrypoint.
+Any failed check makes the command exit non-zero.
+
+Pass `--config <codex-chat.toml>` directly, or let the command resolve it from
+the ignored `private/setup-context.json` and its local deployment ledger.
+`--metadata-file` and `--setup-context` select explicit metadata inputs;
+`--logic-repo`, `--workspace`, `--socket`, and `--store` are intentional path
+overrides, including for legacy configs without `[paths]`. `--workspace-id`
+selects the workspace id when resolving deployment metadata. `--owner` accepts
+either an active subject id or Telegram user id without including the Telegram
+id in the report. `--json` emits the structured report.
+
+`--live` remains read-only and inspects `turns/`, `outbound_messages/`,
+and `capability_decisions/` under the configured codex-chat state root. It
+uses owner identity plus timestamps to confirm a recent completed inbound
+Telegram turn had allowed receive/run decisions and an outbound reply.
+`--since` defaults to `10m` and accepts `s`, `m`, `h`, or `d`
+durations.
 
 ## Setup, inspect, and re-runnable plans
 

@@ -5,3 +5,7 @@ export * from "./admin-auth.js";
 export * from "./admin-service.js";
 
 export * from "./env-file.js";
+
+export * from "./capability-store.js";
+
+export * from "./codex-chat-ipc.js";

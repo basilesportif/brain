@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fakeIpcToken, startFakeCodexChatIpc, type FakeCodexChatIpcServer } from "./codex-chat-ipc.test-helpers.js";
-import { CodexChatIpcError, getCapabilityRegistry, sendSetConfig } from "./codex-chat-ipc.js";
+import { checkCapability, CodexChatIpcError, getCapabilityRegistry, sendSetConfig } from "./codex-chat-ipc.js";
 
 test("sendSetConfig sends one authenticated line and returns restart metadata", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-ipc-client-success-"));
@@ -53,6 +53,34 @@ test("getCapabilityRegistry sends one tokenless metadata line", async () => {
       ],
     });
     assert.deepEqual(ipc.requests, [{ type: "get_capability_registry", keys: [], brainSubjectIdPresent: false }]);
+  } finally {
+    if (ipc) await ipc.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("checkCapability sends a tokenless read-only dry-run and validates the result", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-ipc-capability-check-"));
+  let ipc: FakeCodexChatIpcServer | undefined;
+  try {
+    ipc = await startFakeCodexChatIpc(root, {
+      capabilityCheck(message) {
+        assert.equal(message.brainSubjectId, "person:owner");
+        assert.equal(message.operation, "assistant.run");
+        assert.equal(message.action, "*");
+        assert.deepEqual(message.resource, {});
+        assert.equal(Object.prototype.hasOwnProperty.call(message, "token"), false);
+        return { allowed: true, reason: "active_brain_grant" };
+      },
+    });
+    const result = await checkCapability(ipc.socketPath, {
+      brainSubjectId: "person:owner",
+      operation: "assistant.run",
+      action: "*",
+      resource: {},
+    }, { timeoutMs: 500 });
+    assert.deepEqual(result, { allowed: true, reason: "active_brain_grant" });
+    assert.deepEqual(ipc.requests, [{ type: "check_capability", keys: [], brainSubjectIdPresent: true }]);
   } finally {
     if (ipc) await ipc.close();
     await rm(root, { recursive: true, force: true });

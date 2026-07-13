@@ -324,6 +324,7 @@ export function grantAllowsCapability(store: CapabilityStore, grant: StoreGrant,
 }
 
 function grantAllowsAction(grant: StoreGrant, action: string): boolean {
+  if (!action || action === "*") return true;
   const actions = (grant.actions ?? []).map((item) => String(item));
   return actions.includes(action) || actions.includes("*");
 }

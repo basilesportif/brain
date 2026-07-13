@@ -21,6 +21,7 @@ export interface FakeCodexChatIpcOptions {
   persistEnvFile?: string;
   fieldErrors?: Record<string, string>;
   capabilityRegistry?: Record<string, unknown>;
+  capabilityCheck?: (message: Record<string, unknown>) => { allowed: boolean; reason: string };
   responseDelayMs?: number;
   response?: Record<string, unknown>;
   withholdResponse?: boolean;
@@ -84,6 +85,17 @@ async function handleFakeIpcLine(
     if (options.withholdResponse) return;
     if (options.responseDelayMs) await delay(options.responseDelayMs);
     socket.write(`${JSON.stringify({ ok: true, result: options.capabilityRegistry ?? { registryVersion: 1, capabilities: [] } })}\n`);
+    return;
+  }
+  if (message.type === "check_capability") {
+    if (options.destroyAfterRead) {
+      setTimeout(() => socket.destroy(), 5);
+      return;
+    }
+    if (options.withholdResponse) return;
+    if (options.responseDelayMs) await delay(options.responseDelayMs);
+    const result = options.capabilityCheck?.(message) ?? { allowed: false, reason: "actor_not_linked_to_brain_subject" };
+    socket.write(`${JSON.stringify({ ok: true, result })}\n`);
     return;
   }
   if (message.token !== expectedToken) {

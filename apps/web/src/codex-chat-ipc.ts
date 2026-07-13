@@ -25,6 +25,18 @@ export interface CodexChatCapabilityRegistry {
   capabilities: CodexChatCapabilityRegistryEntry[];
 }
 
+export interface CodexChatCapabilityCheck {
+  brainSubjectId: string;
+  operation: string;
+  action?: string;
+  resource: Record<string, unknown>;
+}
+
+export interface CodexChatCapabilityCheckResult {
+  allowed: boolean;
+  reason: string;
+}
+
 export type CodexChatIpcErrorKind = "UNAVAILABLE" | "FAILED";
 export type CodexChatIpcErrorCode =
   | "TOKEN_UNAVAILABLE"
@@ -79,6 +91,19 @@ export async function getCapabilityRegistry(
   const requestLine = `${JSON.stringify({ type: "get_capability_registry" })}\n`;
 
   return sendOneLineIpcRequest(socketPath, requestLine, timeoutMs, "codex-chat IPC get_capability_registry timed out", parseCapabilityRegistryResponse);
+}
+
+// Read-only authorization dry-run. Like registry reads, codex-chat serves this
+// over the owner-only local socket without an IPC mutation token.
+export async function checkCapability(
+  socketPath: string,
+  check: CodexChatCapabilityCheck,
+  options: { timeoutMs?: number } = {},
+): Promise<CodexChatCapabilityCheckResult> {
+  const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_CODEX_CHAT_IPC_TIMEOUT_MS);
+  const requestLine = `${JSON.stringify({ type: "check_capability", ...check })}\n`;
+
+  return sendOneLineIpcRequest(socketPath, requestLine, timeoutMs, "codex-chat IPC check_capability timed out", parseCapabilityCheckResponse);
 }
 
 function sendOneLineIpcRequest<T>(
@@ -230,6 +255,28 @@ function parseCapabilityRegistryResponse(line: string, requestLineWritten: boole
     registryVersion,
     capabilities: result.capabilities.map((entry) => parseCapabilityRegistryEntry(entry, requestLineWritten)),
   };
+}
+
+function parseCapabilityCheckResponse(line: string, requestLineWritten: boolean): CodexChatCapabilityCheckResult {
+  if (!line) throw new CodexChatIpcError("FAILED", "MALFORMED_RESPONSE", "codex-chat IPC response was empty", undefined, requestLineWritten);
+  const parsed = parseJsonObject(line, requestLineWritten);
+  if (parsed.ok === false) {
+    const message = typeof parsed.error === "string" ? parsed.error : "codex-chat IPC request was rejected";
+    const responseCode = typeof parsed.code === "string" ? parsed.code : "";
+    throw new CodexChatIpcError(
+      "FAILED",
+      responseCode === "unauthorized" ? "AUTH_REJECTED" : "IPC_REJECTED",
+      message,
+      undefined,
+      requestLineWritten,
+    );
+  }
+  if (parsed.ok !== true) throw new CodexChatIpcError("FAILED", "MALFORMED_RESPONSE", "codex-chat IPC response missing ok flag", undefined, requestLineWritten);
+  const result = parsed.result;
+  if (!isRecord(result) || typeof result.allowed !== "boolean" || typeof result.reason !== "string" || !result.reason.trim()) {
+    throw new CodexChatIpcError("FAILED", "MALFORMED_RESPONSE", "codex-chat IPC capability result was malformed", undefined, requestLineWritten);
+  }
+  return { allowed: result.allowed, reason: result.reason };
 }
 
 function parseCapabilityRegistryEntry(value: unknown, requestLineWritten: boolean): CodexChatCapabilityRegistryEntry {
