@@ -15,10 +15,13 @@ Implemented now:
 - approved plan/deploy/restart operation APIs for `codex-chat.service`;
 - Slack settings presence/write APIs and Slack manifest rendering using Brain's
   public Events URL;
-- Phase 5 non-enforcing Capabilities tab/API with store schema v2 for
-  people/users, Telegram/Slack identities, proofs, channels, subjects, grants,
-  owner/all bundle expansion, grouped catalog semantics, and audit schema (no
-  grant/link writes; no runtime enforcement);
+- Enforcing Capabilities tab/API with store schema v2 for people/users,
+  Telegram/Slack identities, proofs, channels, subjects, grants, grouped catalog
+  semantics, and audit schema. Grant/link/onboard mutations write atomically to
+  the capability store, and codex-chat enforces those grants at runtime via the
+  IPC `check_capability` path. (The admin seed creates a generic Clerk-admin
+  person from `CLERK_ALLOWED_EMAILS`; it no longer seeds a specific owner or an
+  `owner_all` bundle — owners are provisioned via `brainctl owner bootstrap`.)
 - static generated page validation (`index.html`, static files only, no symlinks/path traversal);
 - secret-like filename/content checks;
 - TTL manifest entries and local runtime copy;

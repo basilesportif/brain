@@ -533,8 +533,31 @@ Before a new server test, confirm:
 - Ubuntu LTS, SSH reachability, local SSH config alias, and dedicated service
   user.
 - Base packages: `git`, `curl`, `unzip`, `build-essential`, `tmux`, `jq`,
-  `ca-certificates`, and systemd.
-- Node and pnpm satisfy `package.json`; Bun/Docker only if explicitly needed.
+  `ca-certificates`, `cron`, and systemd (with lingering if a user service is
+  ever used — the stack deploys SYSTEM services, so lingering is not required).
+- Node **>= 24** and pnpm **>= 10** (per `package.json` `engines`). Install them
+  system-wide so the systemd unit (which runs `/usr/bin/env node`) can see them —
+  do NOT rely on an nvm-only install in the operator's shell, or the service will
+  fail to find `node`. Concretely, as root during bootstrap:
+
+  ```bash
+  # Node 24 system-wide (NodeSource)
+  curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
+  apt-get install -y nodejs cron
+  systemctl enable --now cron
+  # pnpm >= 10 via corepack (ships with Node 24)
+  corepack enable && corepack prepare pnpm@latest --activate
+  node -v   # must be >= v24
+  pnpm -v   # must be >= 10
+  ```
+
+  If a Node manager is used instead, ensure the resolved `node`/`pnpm` are on the
+  PATH of the systemd unit (set `Environment=PATH=...` in the unit or symlink into
+  `/usr/local/bin`) — the rendered units assume `node` resolves via `/usr/bin/env`.
+- `cron` must be installed and running: codex-chat loops are registered into the
+  service user's crontab, so a missing `cron` breaks loop scheduling (not first
+  chat, but any recurring job).
+- Bun/Docker only if explicitly needed.
 - Provider selected and auth either present or pending with clear next steps.
 - Repo clone path and workspace path known; workspace is outside the checkout.
 - systemd service name, env file path, logs, health, restart, update, backup,
@@ -544,6 +567,34 @@ Before a new server test, confirm:
 - Generated web/pages disabled unless explicitly enabled.
 - Firewall/ports: outbound HTTPS for polling; inbound HTTPS only for optional
   webhook/web preview.
+
+## Control-plane and provider secrets
+
+Every secret goes in through a one-use hidden-input helper (prompt with hidden
+input, write to the private service env, then self-delete). Never echo, log, or
+commit a value. The secrets a Telegram-only instance needs:
+
+- **Telegram bot token** → codex-chat service env (`TELEGRAM_BOT_TOKEN`). From
+  BotFather. Required.
+- **Clerk** (the brain-admin control-plane login) → brain-admin env, required for
+  the admin surface and the first-admin seed:
+  - `CLERK_PUBLISHABLE_KEY` and `CLERK_SECRET_KEY` (from the Clerk dashboard).
+  - `CLERK_ALLOWED_EMAILS` = the owner admin email. This is NOT secret but MUST
+    be set before brain-admin first starts, or no first admin is seeded (an
+    admin-less store is a bootstrap lockout — the owner-bootstrap step also
+    repairs this, but set it up front).
+- **OpenAI** (optional, voice transcription) → codex-chat service env
+  (`OPENAI_API_KEY`). Transcription starts disabled; only needed if enabled.
+
+Enter each with a one-use script, e.g. (Clerk secret key):
+
+```bash
+umask 077; f=$(mktemp); cat >"$f" <<'SH'
+read -rsp "Clerk secret key: " V; echo
+printf 'CLERK_SECRET_KEY=%s\n' "$V" >> "$BRAIN_ADMIN_ENV_FILE"
+SH
+bash "$f"; rm -f "$f"
+```
 
 ## Verification commands
 
