@@ -458,7 +458,7 @@ test("brain admin env write handlers persist through codex-chat IPC", async () =
         body: JSON.stringify({
           preset: "openrouter-glm-5.2",
           confirmation: {
-            token: "brain-admin-main-loop-model-confirmed-v1",
+            token: "brain-admin-main-loop-model-confirmed-v2",
             action: "codex-chat.main-loop-model.write",
             envFile: mainSummary.env.envFile,
             preset: "openrouter-glm-5.2",
@@ -730,18 +730,32 @@ test("brain admin does not fall back to disk when IPC auth fails", async () => {
 
 
 
-test("brain admin main-loop model switch writes only CODEX_CHAT_CODEX selectors and keeps subagent settings separate", async () => {
+test("brain admin main-loop model switch governs provider and effort selectors while keeping subagent settings separate", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "brain-admin-main-model-"));
   try {
     const cfg = config(root, { codexChatConfigFile: path.join(root, "codex-chat", "config", "codex-chat.toml") });
     await mkdir(path.dirname(cfg.codexChatConfigFile ?? ""), { recursive: true });
-    await writeFile(cfg.codexChatConfigFile ?? "", `version = 1\n\n[codex]\nmodel = "gpt-5.5"\nprofile = ""\nserviceTier = "fast"\n\n[subagents]\ndefaultModel = "gpt-5.5"\ndefaultCodexProfile = ""\n`);
+    await writeFile(cfg.codexChatConfigFile ?? "", `version = 1\n\n[codex]\nmodel = "gpt-5.6-luna"\neffort = "xhigh"\nprofile = ""\nserviceTier = "fast"\n\n[mainAgent]\nprovider = "claude_agent_sdk"\n\n[mainAgent.claude]\nmodel = "claude-sonnet-5"\neffort = "high"\n\n[subagents]\ndefaultModel = "gpt-5.6-luna"\ndefaultCodexProfile = ""\n`);
     await withServer(cfg, authDeps(), async (baseUrl) => {
       const summaryResponse = await fetch(`${baseUrl}/api/admin/brain/codex-chat/main-model`, { headers: authHeaders() });
       assert.equal(summaryResponse.status, 200);
-      const summary = await summaryResponse.json() as { env: { envFile: string }; effective: { model: string; profile: string; modelProvider: string; serviceTierMode: string }; activePreset: string; openRouter: { apiKeyPresent: boolean } };
-      assert.equal(summary.effective.model, "gpt-5.5");
-      assert.equal(summary.activePreset, "codex-openai-default");
+      const summary = await summaryResponse.json() as {
+        env: { envFile: string };
+        confirmationKeys: string[];
+        confirmation: { token: string };
+        configFile: { mainAgent: { provider: string; claude: { model: string; effort: string } } };
+        selectors: Array<{ name: string; source: string }>;
+        effective: { provider: string; model: string; effort: string; profile: string; modelProvider: string; serviceTierMode: string; claudeModel: string; claudeEffort: string };
+        activePreset: string;
+        presets: Array<{ id: string; updates: Record<string, string> }>;
+        openRouter: { apiKeyPresent: boolean };
+      };
+      assert.equal(summary.effective.provider, "claude_agent_sdk");
+      assert.equal(summary.selectors.find((selector) => selector.name === "provider")?.source, "config");
+      assert.equal(summary.configFile.mainAgent.provider, "claude_agent_sdk");
+      assert.equal(summary.configFile.mainAgent.claude.model, "claude-sonnet-5");
+      assert.equal(summary.configFile.mainAgent.claude.effort, "high");
+      assert.equal(summary.activePreset, "claude-sonnet-main");
       assert.equal(summary.openRouter.apiKeyPresent, false);
 
       const keys = [
@@ -750,7 +764,21 @@ test("brain admin main-loop model switch writes only CODEX_CHAT_CODEX selectors 
         "CODEX_CHAT_CODEX_MODEL_PROVIDER",
         "CODEX_CHAT_CODEX_SERVICE_TIER",
         "CODEX_CHAT_CODEX_SERVICE_TIER_MODE",
+        "CODEX_CHAT_CODEX_EFFORT",
+        "CODEX_CHAT_MAIN_PROVIDER",
+        "CODEX_CHAT_MAIN_CLAUDE_MODEL",
+        "CODEX_CHAT_MAIN_CLAUDE_EFFORT",
       ];
+      assert.deepEqual(summary.confirmationKeys, keys);
+      assert.equal(summary.confirmation.token, "brain-admin-main-loop-model-confirmed-v2");
+      const rollbackPreset = summary.presets.find((preset) => preset.id === "codex-openai-default");
+      assert.equal(rollbackPreset?.updates.CODEX_CHAT_CODEX_MODEL, "gpt-5.6-luna");
+      assert.equal(rollbackPreset?.updates.CODEX_CHAT_CODEX_EFFORT, "xhigh");
+      assert.equal(rollbackPreset?.updates.CODEX_CHAT_MAIN_PROVIDER, "codex");
+      const claudePreset = summary.presets.find((preset) => preset.id === "claude-sonnet-main");
+      assert.equal(claudePreset?.updates.CODEX_CHAT_MAIN_PROVIDER, "claude_agent_sdk");
+      assert.equal(claudePreset?.updates.CODEX_CHAT_MAIN_CLAUDE_MODEL, "claude-sonnet-5");
+      assert.equal(claudePreset?.updates.CODEX_CHAT_MAIN_CLAUDE_EFFORT, "high");
       const missingConfirmation = await fetch(`${baseUrl}/api/admin/brain/codex-chat/main-model`, {
         method: "POST",
         headers: { ...authHeaders(), "content-type": "application/json" },
@@ -761,7 +789,7 @@ test("brain admin main-loop model switch writes only CODEX_CHAT_CODEX selectors 
       const writeGlm = await fetch(`${baseUrl}/api/admin/brain/codex-chat/main-model`, {
         method: "POST",
         headers: { ...authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ preset: "openrouter-glm-5.2", confirmation: { token: "brain-admin-main-loop-model-confirmed-v1", action: "codex-chat.main-loop-model.write", envFile: summary.env.envFile, preset: "openrouter-glm-5.2", keys } }),
+        body: JSON.stringify({ preset: "openrouter-glm-5.2", confirmation: { token: "brain-admin-main-loop-model-confirmed-v2", action: "codex-chat.main-loop-model.write", envFile: summary.env.envFile, preset: "openrouter-glm-5.2", keys } }),
       });
       assert.equal(writeGlm.status, 200);
       const payload = await writeGlm.json() as { writtenKeys: string[]; restartRequired: boolean; scope: string; summary: { activePreset: string } };
@@ -775,19 +803,39 @@ test("brain admin main-loop model switch writes only CODEX_CHAT_CODEX selectors 
       assert.match(envText, /CODEX_CHAT_CODEX_PROFILE='openrouter'/);
       assert.match(envText, /CODEX_CHAT_CODEX_MODEL_PROVIDER='openrouter'/);
       assert.match(envText, /CODEX_CHAT_CODEX_SERVICE_TIER_MODE='omit'/);
+      assert.match(envText, /CODEX_CHAT_CODEX_EFFORT='xhigh'/);
+      assert.match(envText, /CODEX_CHAT_MAIN_PROVIDER='codex'/);
+      assert.doesNotMatch(envText, /CODEX_CHAT_MAIN_CLAUDE_MODEL=/);
+      assert.doesNotMatch(envText, /CODEX_CHAT_MAIN_CLAUDE_EFFORT=/);
       assert.equal(envText.includes("CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL"), false);
       assert.equal(envText.includes("OPENROUTER_API_KEY"), false);
+
+      const writeClaude = await fetch(`${baseUrl}/api/admin/brain/codex-chat/main-model`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ preset: "claude-sonnet-main", confirmation: { token: "brain-admin-main-loop-model-confirmed-v2", action: "codex-chat.main-loop-model.write", envFile: summary.env.envFile, preset: "claude-sonnet-main", keys } }),
+      });
+      assert.equal(writeClaude.status, 200);
+      const claudePayload = await writeClaude.json() as { summary: { effective: { provider: string; claudeModel: string; claudeEffort: string }; selectors: Array<{ name: string; source: string }> } };
+      assert.equal(claudePayload.summary.effective.provider, "claude_agent_sdk");
+      assert.equal(claudePayload.summary.effective.claudeModel, "claude-sonnet-5");
+      assert.equal(claudePayload.summary.effective.claudeEffort, "high");
+      assert.equal(claudePayload.summary.selectors.find((selector) => selector.name === "provider")?.source, "env");
 
       const rollback = await fetch(`${baseUrl}/api/admin/brain/codex-chat/main-model`, {
         method: "POST",
         headers: { ...authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ preset: "codex-openai-default", confirmation: { token: "brain-admin-main-loop-model-confirmed-v1", action: "codex-chat.main-loop-model.write", envFile: summary.env.envFile, preset: "codex-openai-default", keys } }),
+        body: JSON.stringify({ preset: "codex-openai-default", confirmation: { token: "brain-admin-main-loop-model-confirmed-v2", action: "codex-chat.main-loop-model.write", envFile: summary.env.envFile, preset: "codex-openai-default", keys } }),
       });
       assert.equal(rollback.status, 200);
       const rollbackText = await readFile(path.join(root, "codex-chat.env"), "utf8");
-      assert.match(rollbackText, /CODEX_CHAT_CODEX_MODEL='gpt-5\.5'/);
+      assert.match(rollbackText, /CODEX_CHAT_CODEX_MODEL='gpt-5\.6-luna'/);
+      assert.match(rollbackText, /CODEX_CHAT_CODEX_EFFORT='xhigh'/);
+      assert.match(rollbackText, /CODEX_CHAT_MAIN_PROVIDER='codex'/);
       assert.doesNotMatch(rollbackText, /CODEX_CHAT_CODEX_PROFILE=/);
       assert.doesNotMatch(rollbackText, /CODEX_CHAT_CODEX_MODEL_PROVIDER=/);
+      assert.doesNotMatch(rollbackText, /CODEX_CHAT_MAIN_CLAUDE_MODEL=/);
+      assert.doesNotMatch(rollbackText, /CODEX_CHAT_MAIN_CLAUDE_EFFORT=/);
       assert.match(rollbackText, /CODEX_CHAT_CODEX_SERVICE_TIER_MODE='auto'/);
 
       const configText = await readFile(cfg.codexChatConfigFile ?? "", "utf8");
@@ -1475,7 +1523,7 @@ test("brain admin env schema exposes grouped metadata including an other group f
       const res = await fetch(`${baseUrl}/api/admin/brain/env/schema`, { headers: authHeaders() });
       assert.equal(res.status, 200);
       // Plan §6.4: the endpoint returns the bare schema array (no wrapper object).
-      const payload = await res.json() as Array<{ key: string; group: string; required: boolean; secret: boolean; writable: boolean; description: string }>;
+      const payload = await res.json() as Array<{ key: string; group: string; required: boolean; secret: boolean; writable: boolean; description: string; kind: string; enumValues?: string[] }>;
       assert.ok(Array.isArray(payload));
       const by = Object.fromEntries(payload.map((entry) => [entry.key, entry]));
       assert.equal(by.SLACK_BOT_TOKEN.group, "slack");
@@ -1483,6 +1531,11 @@ test("brain admin env schema exposes grouped metadata including an other group f
       assert.equal(by.SLACK_BOT_TOKEN.required, true);
       assert.equal(by.CODEX_CHAT_BASE_URL.group, "slack");
       assert.equal(by.CODEX_CHAT_CODEX_MODEL.group, "model");
+      assert.equal(by.CODEX_CHAT_CODEX_EFFORT.group, "model");
+      assert.deepEqual(by.CODEX_CHAT_MAIN_PROVIDER.enumValues, ["codex", "claude_agent_sdk"]);
+      assert.equal(by.CODEX_CHAT_MAIN_CLAUDE_MODEL.kind, "string");
+      assert.deepEqual(by.CODEX_CHAT_MAIN_CLAUDE_EFFORT.enumValues, ["low", "medium", "high", "xhigh"]);
+      assert.match(by.CODEX_CHAT_MAIN_PROVIDER.description, /OAuth.*restart.*Employees must remain disabled/);
       assert.equal(by.OPENROUTER_API_KEY.group, "openrouter");
       assert.equal(by.CODEX_CHAT_API_ENABLED.group, "feature_flags");
       // `writable` reflects the service's env-write allowlist (config allows only

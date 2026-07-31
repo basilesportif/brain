@@ -58,11 +58,15 @@ export const BRAIN_ENV_SCHEMA: EnvKeyBaseEntry[] = [
   entry("SLACK_BOT_TOKEN", "slack", true, "Slack bot token (xoxb-…) used to post replies.", "secret"),
   entry("SLACK_APP_TOKEN", "slack", false, "Slack app-level token (xapp-…) for Socket Mode, when used.", "secret"),
   // Main-loop model
-  entry("CODEX_CHAT_CODEX_MODEL", "model", false, "Main-loop model slug (e.g. gpt-5.5 or z-ai/glm-5.2).", "string"),
+  entry("CODEX_CHAT_CODEX_MODEL", "model", false, "Main-loop Codex model slug (e.g. gpt-5.6-luna or z-ai/glm-5.2).", "string"),
+  entry("CODEX_CHAT_CODEX_EFFORT", "model", false, "Reasoning effort for the main-loop Codex model.", "enum", ["low", "medium", "high", "xhigh"]),
   entry("CODEX_CHAT_CODEX_PROFILE", "model", false, "Codex profile name for the main loop (blank for the subscription default).", "string"),
   entry("CODEX_CHAT_CODEX_MODEL_PROVIDER", "model", false, "Model provider for the main loop (blank for the subscription default).", "string"),
   entry("CODEX_CHAT_CODEX_SERVICE_TIER", "model", false, "Requested service tier for the main loop (e.g. fast).", "string"),
   entry("CODEX_CHAT_CODEX_SERVICE_TIER_MODE", "model", false, "How the service tier is applied.", "enum", [...SERVICE_TIER_MODES]),
+  entry("CODEX_CHAT_MAIN_PROVIDER", "model", false, "Main-loop provider. Claude Agent SDK requires service-user OAuth and a restart; Employees must remain disabled.", "enum", ["codex", "claude_agent_sdk"]),
+  entry("CODEX_CHAT_MAIN_CLAUDE_MODEL", "model", false, "Claude model slug used when the main-loop provider is claude_agent_sdk.", "string"),
+  entry("CODEX_CHAT_MAIN_CLAUDE_EFFORT", "model", false, "Claude effort used when the main-loop provider is claude_agent_sdk.", "enum", ["low", "medium", "high", "xhigh"]),
   // OpenRouter / subagents
   entry("OPENROUTER_API_KEY", "openrouter", false, "OpenRouter API key used by subagents / OpenRouter presets.", "secret"),
   entry("CODEX_CHAT_SUBAGENTS_BACKEND", "openrouter", false, "Subagent execution backend.", "enum", ["codex_exec", "codex_app_server"]),

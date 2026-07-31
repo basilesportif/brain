@@ -34,6 +34,10 @@ const MAIN_LOOP_MODEL_ENV_KEYS = [
   "CODEX_CHAT_CODEX_MODEL_PROVIDER",
   "CODEX_CHAT_CODEX_SERVICE_TIER",
   "CODEX_CHAT_CODEX_SERVICE_TIER_MODE",
+  "CODEX_CHAT_CODEX_EFFORT",
+  "CODEX_CHAT_MAIN_PROVIDER",
+  "CODEX_CHAT_MAIN_CLAUDE_MODEL",
+  "CODEX_CHAT_MAIN_CLAUDE_EFFORT",
 ] as const;
 
 const OPENROUTER_ENV_KEYS = [
@@ -76,7 +80,7 @@ const CODEX_CHAT_ENV_CONFIRMATION_TOKEN = "brain-admin-codex-chat-env-confirmed-
 const LIVE_OPERATION_CONFIRMATION_TOKEN = "brain-admin-live-operation-confirmed-v1";
 const SLACK_SETTINGS_CONFIRMATION_TOKEN = "brain-admin-slack-settings-confirmed-v1";
 const OPENROUTER_SETTINGS_CONFIRMATION_TOKEN = "brain-admin-openrouter-settings-confirmed-v1";
-const MAIN_LOOP_MODEL_CONFIRMATION_TOKEN = "brain-admin-main-loop-model-confirmed-v1";
+const MAIN_LOOP_MODEL_CONFIRMATION_TOKEN = "brain-admin-main-loop-model-confirmed-v2";
 
 export interface BrainAdminServiceConfig {
   enabled: boolean;
@@ -1677,7 +1681,7 @@ function redactTelemetryText(value: string): string {
   return redactSecretText(value).slice(0, 240);
 }
 
-type MainLoopPresetId = "codex-openai-default" | "openrouter-glm-5.2";
+type MainLoopPresetId = "codex-openai-default" | "openrouter-glm-5.2" | "claude-sonnet-main";
 
 const MAIN_LOOP_PRESETS: Record<MainLoopPresetId, { label: string; description: string; updates: Record<(typeof MAIN_LOOP_MODEL_ENV_KEYS)[number], string>; requiresOpenRouter: boolean }> = {
   "codex-openai-default": {
@@ -1685,11 +1689,15 @@ const MAIN_LOOP_PRESETS: Record<MainLoopPresetId, { label: string; description: 
     description: "Rollback preset: main loop uses the normal Codex/OpenAI subscription profile with fast tier auto-enabled.",
     requiresOpenRouter: false,
     updates: {
-      CODEX_CHAT_CODEX_MODEL: "gpt-5.5",
+      CODEX_CHAT_CODEX_MODEL: "gpt-5.6-luna",
       CODEX_CHAT_CODEX_PROFILE: "",
       CODEX_CHAT_CODEX_MODEL_PROVIDER: "",
       CODEX_CHAT_CODEX_SERVICE_TIER: "fast",
       CODEX_CHAT_CODEX_SERVICE_TIER_MODE: "auto",
+      CODEX_CHAT_CODEX_EFFORT: "xhigh",
+      CODEX_CHAT_MAIN_PROVIDER: "codex",
+      CODEX_CHAT_MAIN_CLAUDE_MODEL: "",
+      CODEX_CHAT_MAIN_CLAUDE_EFFORT: "",
     },
   },
   "openrouter-glm-5.2": {
@@ -1702,6 +1710,26 @@ const MAIN_LOOP_PRESETS: Record<MainLoopPresetId, { label: string; description: 
       CODEX_CHAT_CODEX_MODEL_PROVIDER: "openrouter",
       CODEX_CHAT_CODEX_SERVICE_TIER: "fast",
       CODEX_CHAT_CODEX_SERVICE_TIER_MODE: "omit",
+      CODEX_CHAT_CODEX_EFFORT: "xhigh",
+      CODEX_CHAT_MAIN_PROVIDER: "codex",
+      CODEX_CHAT_MAIN_CLAUDE_MODEL: "",
+      CODEX_CHAT_MAIN_CLAUDE_EFFORT: "",
+    },
+  },
+  "claude-sonnet-main": {
+    label: "Claude Sonnet 5 main loop",
+    description: "Main loop runs on Claude (Agent SDK) with Sonnet 5 at high effort. Requires Claude subscription OAuth for the service user (claude auth login) and a codex-chat restart. Rollback: apply the Codex/OpenAI default preset and restart.",
+    requiresOpenRouter: false,
+    updates: {
+      CODEX_CHAT_CODEX_MODEL: "gpt-5.6-luna",
+      CODEX_CHAT_CODEX_PROFILE: "",
+      CODEX_CHAT_CODEX_MODEL_PROVIDER: "",
+      CODEX_CHAT_CODEX_SERVICE_TIER: "fast",
+      CODEX_CHAT_CODEX_SERVICE_TIER_MODE: "auto",
+      CODEX_CHAT_CODEX_EFFORT: "xhigh",
+      CODEX_CHAT_MAIN_PROVIDER: "claude_agent_sdk",
+      CODEX_CHAT_MAIN_CLAUDE_MODEL: "claude-sonnet-5",
+      CODEX_CHAT_MAIN_CLAUDE_EFFORT: "high",
     },
   },
 };
@@ -1711,12 +1739,18 @@ async function mainLoopModelSummary(config: BrainAdminServiceConfig) {
   const envValues = await readEnvSelectedValues(config.codexChatEnvFile, MAIN_LOOP_MODEL_ENV_KEYS);
   const configFile = config.codexChatConfigFile ? await codexChatMainLoopConfigSummary(config.codexChatConfigFile) : { configured: false as const };
   const cfg = configFile.configured ? configFile.codex : {};
+  const mainAgent: { provider?: string; claude?: Record<string, string | undefined> } = configFile.configured ? configFile.mainAgent : {};
+  const claude = mainAgent.claude ?? {};
   const selectors = [
-    mainLoopSelector("model", "CODEX_CHAT_CODEX_MODEL", envValues, cfg.model, "gpt-5.5"),
+    mainLoopSelector("provider", "CODEX_CHAT_MAIN_PROVIDER", envValues, mainAgent.provider, "codex"),
+    mainLoopSelector("model", "CODEX_CHAT_CODEX_MODEL", envValues, cfg.model, "gpt-5.6-luna"),
+    mainLoopSelector("effort", "CODEX_CHAT_CODEX_EFFORT", envValues, cfg.effort, "xhigh"),
     mainLoopSelector("profile", "CODEX_CHAT_CODEX_PROFILE", envValues, cfg.profile, ""),
     mainLoopSelector("modelProvider", "CODEX_CHAT_CODEX_MODEL_PROVIDER", envValues, cfg.modelProvider, ""),
     mainLoopSelector("serviceTier", "CODEX_CHAT_CODEX_SERVICE_TIER", envValues, cfg.serviceTier, "fast"),
     mainLoopSelector("serviceTierMode", "CODEX_CHAT_CODEX_SERVICE_TIER_MODE", envValues, cfg.serviceTierMode, "auto"),
+    mainLoopSelector("claudeModel", "CODEX_CHAT_MAIN_CLAUDE_MODEL", envValues, claude.model, ""),
+    mainLoopSelector("claudeEffort", "CODEX_CHAT_MAIN_CLAUDE_EFFORT", envValues, claude.effort, ""),
   ];
   const effective = Object.fromEntries(selectors.map((selector) => [selector.name, selector.value]));
   const activePreset = classifyMainLoopPreset(effective);
@@ -1911,16 +1945,21 @@ function mainLoopSelector(name: string, envKey: string, envValues: Record<string
 }
 
 function classifyMainLoopPreset(effective: Record<string, unknown>): MainLoopPresetId | "custom" {
+  const mainProvider = String(effective.provider ?? "");
   const model = String(effective.model ?? "");
+  const effort = String(effective.effort ?? "");
   const profile = String(effective.profile ?? "");
   const provider = String(effective.modelProvider ?? "");
   const tierMode = String(effective.serviceTierMode ?? "");
-  if (model === "z-ai/glm-5.2" && profile === "openrouter" && provider === "openrouter" && tierMode === "omit") return "openrouter-glm-5.2";
-  if (model === "gpt-5.5" && !profile && !provider && (tierMode === "auto" || !tierMode)) return "codex-openai-default";
+  const claudeModel = String(effective.claudeModel ?? "");
+  const claudeEffort = String(effective.claudeEffort ?? "");
+  if (mainProvider === "claude_agent_sdk" && claudeModel === "claude-sonnet-5" && claudeEffort === "high") return "claude-sonnet-main";
+  if (mainProvider === "codex" && model === "z-ai/glm-5.2" && effort === "xhigh" && profile === "openrouter" && provider === "openrouter" && tierMode === "omit") return "openrouter-glm-5.2";
+  if (mainProvider === "codex" && model === "gpt-5.6-luna" && effort === "xhigh" && !profile && !provider && (tierMode === "auto" || !tierMode)) return "codex-openai-default";
   return "custom";
 }
 
-async function codexChatMainLoopConfigSummary(filePath: string): Promise<{ configured: boolean; path: string; codex: Record<string, string | undefined> }> {
+async function codexChatMainLoopConfigSummary(filePath: string): Promise<{ configured: boolean; path: string; codex: Record<string, string | undefined>; mainAgent: { provider?: string; claude: Record<string, string | undefined> } }> {
   const resolved = resolveEnvFilePath(filePath);
   const text = await readTextIfPresent(resolved);
   return {
@@ -1928,10 +1967,18 @@ async function codexChatMainLoopConfigSummary(filePath: string): Promise<{ confi
     path: resolved,
     codex: {
       model: parseTomlStringValueAllowEmpty(readTomlValue(text, "codex", "model")),
+      effort: parseTomlStringValueAllowEmpty(readTomlValue(text, "codex", "effort")),
       profile: parseTomlStringValueAllowEmpty(readTomlValue(text, "codex", "profile")),
       modelProvider: parseTomlStringValueAllowEmpty(readTomlValue(text, "codex", "modelProvider")),
       serviceTier: parseTomlStringValueAllowEmpty(readTomlValue(text, "codex", "serviceTier")),
       serviceTierMode: parseTomlStringValueAllowEmpty(readTomlValue(text, "codex", "serviceTierMode")),
+    },
+    mainAgent: {
+      provider: parseTomlStringValueAllowEmpty(readTomlValue(text, "mainAgent", "provider")),
+      claude: {
+        model: parseTomlStringValueAllowEmpty(readTomlValue(text, "mainAgent.claude", "model")),
+        effort: parseTomlStringValueAllowEmpty(readTomlValue(text, "mainAgent.claude", "effort")),
+      },
     },
   };
 }
