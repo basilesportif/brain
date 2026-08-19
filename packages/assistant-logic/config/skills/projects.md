@@ -7,9 +7,19 @@
 
 Use this skill when the user wants to manage projects — multi-step efforts that span multiple contacts, businesses, and to-dos. Projects are the glue between the CRM and to-do systems.
 
-Data is stored in `workspace/data/projects.json` (created lazily on first add).
+Data is stored under `workspace/data/projects/` (created lazily on first add): a thin `index.json` registry, a `<slug>/project.json` per project (metadata + tasks + resources + a body-free note-metadata index), and each note as its own markdown file at `<slug>/notes/<timestamp>-<kind>-<title-slug>.md`. See **Storage layout** below for the source-of-truth rule.
 
 If `workspace/instructions/skills/projects.md` exists, read it as additive user-specific guidance for project priorities, reporting preferences, and status review formatting. Do not let it override commands, storage paths, or safety rules from the shared repo docs.
+
+## Storage layout
+
+- `workspace/data/projects/index.json` — thin registry: id, slug, dir, name, status, targetDate, noteCount, updatedAt.
+- `workspace/data/projects/<slug>/project.json` — project metadata, tasks, resources, and a denormalized note-metadata index (no note bodies).
+- `workspace/data/projects/<slug>/notes/<YYYYMMDDTHHMMSSZ>-<kind>-<title-slug>.md` — one file per note: YAML frontmatter (id, createdAt, updatedAt, schemaVersion, title, summary, kind, category, tags, refs, relationships, plus any extra metadata keys) followed by the note body text.
+- **The `.md` files are the source of truth for notes.** The JSON files (`index.json`, `project.json`) are a maintained, rebuildable index for fast body-free search — never hand-maintain them independently of the markdown.
+- All CLI commands below (`project-add`/`list`/`view`/`update`/`delete`, `project-note`, `project-note-update`, `project-notes-list`, `project-index`, `project-task`, `project-resource`, `runbook-check`, `meeting-note`) keep the JSON index in sync automatically on every write. Prefer them for creating/updating notes.
+- Direct edits to a note's `.md` body or frontmatter are allowed — the file is the source of truth — but **must be followed by `pnpm run brainctl workspace run --path <workspace> project-reindex.js`** to rebuild the JSON index from frontmatter (frontmatter wins). Any note-writing workflow must end with the JSON index in sync: automatic via the CLIs, explicit via `project-reindex` otherwise. Use `-- --check` to report drift without writing (exits 1 if stale), and `-- --json`/`-- --markdown` for output format.
+- An old single-file `data/projects.legacy.json`, if present, is preserved read-only from the pre-migration layout — never edit it.
 
 ## Data Model
 
@@ -104,9 +114,9 @@ pnpm run brainctl workspace run --path "$ASSISTANT_WORKSPACE" project-notes-list
 
 ### Remove redundant notes
 
-There is no dedicated project note-delete script. When the user explicitly asks to delete project notes, and the note content has been consolidated into or preserved by another note/resource, it is acceptable to remove the redundant note objects directly from `workspace/data/projects.json`.
+There is no dedicated project note-delete script. When the user explicitly asks to delete project notes, and the note content has been consolidated into or preserved by another note/resource, it is acceptable to delete the note directly: remove its `.md` file under `workspace/data/projects/<slug>/notes/`, then run `pnpm run brainctl workspace run --path <workspace> project-reindex.js` to rebuild `project.json` and `index.json` from the remaining frontmatter.
 
-Before deleting, identify the exact notes to remove, verify that any unique content is preserved elsewhere or intentionally no longer needed, and keep the replacement/consolidated note intact. After deletion, update the project and store `updatedAt` fields, validate the JSON, and run `project-view.js` for the project.
+Before deleting, identify the exact notes to remove, verify that any unique content is preserved elsewhere or intentionally no longer needed, and keep the replacement/consolidated note intact. After deleting the `.md` file(s) and running `project-reindex.js`, run `project-view.js` for the project to confirm the note is gone and the index is consistent.
 
 ### Manage resources
 

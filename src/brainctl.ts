@@ -4678,13 +4678,17 @@ function assistantWorkspaceCommandCatalog(workspaceRoot: string, _assistantLogic
     },
     {
       area: "projects",
-      integration: "native-json-store",
-      state: path.join(workspaceRoot, "data", "projects.json"),
-      scripts: ["project-add.js", "project-list.js", "project-view.js", "project-update.js", "project-note.js", "project-notes-list.js", "project-resource.js", "project-task.js", "project-delete.js"],
+      integration: "native-markdown-store",
+      // Markdown layout: data/projects/<slug>/notes/*.md are the source of
+      // truth; index.json and project.json are a rebuildable JSON index
+      // (rebuild with project-reindex.js).
+      state: path.join(workspaceRoot, "data", "projects"),
+      scripts: ["project-add.js", "project-list.js", "project-view.js", "project-update.js", "project-note.js", "project-note-update.js", "project-notes-list.js", "project-index.js", "project-resource.js", "project-task.js", "project-delete.js", "project-reindex.js", "migrate-projects-to-markdown.js", "meeting-note.js", "runbook-check.js"],
       examples: [
         runner("project-add.js", '--name "Tax Strategy 2026"'),
         runner("project-list.js", ""),
         runner("project-notes-list.js", "--current"),
+        runner("project-reindex.js", "--check"),
       ],
     },
     {
@@ -5666,7 +5670,11 @@ type AssistantStateStoreSpec = {
 
 const ASSISTANT_STATE_STORES: readonly AssistantStateStoreSpec[] = [
   { key: "todos", relativePath: path.join("data", "todos.json"), arrayRootKeys: ["todos"], defaultValue: () => ({ version: 1, updatedAt: new Date().toISOString(), todos: [] }) },
-  { key: "projects", relativePath: path.join("data", "projects.json"), arrayRootKeys: ["projects"], defaultValue: () => ({ version: 1, updatedAt: new Date().toISOString(), projects: [] }) },
+  // The projects domain is a markdown-authoritative directory: notes live as
+  // data/projects/<slug>/notes/*.md and the JSON files are a rebuildable index.
+  // Scaffolding therefore seeds the index (data/projects/index.json), not a
+  // single data/projects.json document.
+  { key: "projects", relativePath: path.join("data", "projects", "index.json"), arrayRootKeys: ["projects"], defaultValue: () => ({ version: 2, updatedAt: new Date().toISOString(), projects: [] }) },
   { key: "crm", relativePath: path.join("data", "crm.json"), arrayRootKeys: ["people", "businesses", "correspondence"], defaultValue: () => ({ version: 1, updatedAt: new Date().toISOString(), people: [], businesses: [], correspondence: [] }) },
   { key: "reminders", relativePath: path.join("data", "reminders.json"), arrayRootKeys: ["reminders"], defaultValue: () => ({ version: 1, updatedAt: new Date().toISOString(), reminders: [] }) },
   { key: "calendarAllowlist", relativePath: path.join("data", "calendar-allowlist.json"), arrayRootKeys: ["emails", "domains"], defaultValue: () => ({ version: 1, enabled: false, emails: [], domains: [], updatedAt: null }) },

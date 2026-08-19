@@ -85,9 +85,18 @@ const STATE_FILES = {
     legacyRelativePaths: [],
     label: "ProtonMail audit log",
   },
+  // The projects domain is NOT a single JSON document: notes live as markdown
+  // files under data/projects/<slug>/notes/ and the JSON files are a
+  // rebuildable index (see lib/project-md-store.js). It therefore does not go
+  // through createJsonStore/createStateStore; this descriptor exists so the
+  // domain's paths stay declared in one place.
   projects: {
     key: "projects",
-    relativePath: path.join("data", "projects.json"),
+    kind: "directory",
+    relativePath: path.join("data", "projects"),
+    indexRelativePath: path.join("data", "projects", "index.json"),
+    legacyStoreRelativePath: path.join("data", "projects.json"),
+    retiredStoreRelativePath: path.join("data", "projects.legacy.json"),
     legacyRelativePaths: [],
     label: "projects store",
   },

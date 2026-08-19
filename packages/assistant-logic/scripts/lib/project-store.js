@@ -1,7 +1,7 @@
 const crypto = require("crypto");
-const { createStateStore } = require("./state-stores");
+const { createProjectMarkdownStore, stableNoteId } = require("./project-md-store");
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const NOTE_SCHEMA_VERSION = 1;
 
 function generateId() {
@@ -14,12 +14,6 @@ function generateTaskId() {
 
 function generateNoteId() {
   return `pn_${crypto.randomBytes(8).toString("hex")}`;
-}
-
-function stableNoteId(projectId, note, index = 0) {
-  const text = typeof note === "string" ? note : note?.text || "";
-  const seed = [projectId || "project", note?.createdAt || "", note?.title || note?.heading || "", index, text].join("\n");
-  return `pn_${crypto.createHash("sha256").update(seed).digest("hex").slice(0, 16)}`;
 }
 
 function ensureTasks(project) {
@@ -80,6 +74,10 @@ function coerceStringArray(value) {
     .split(",")
     .map((part) => part.trim())
     .filter(Boolean);
+}
+
+function coerceTriggers(value) {
+  return uniqueStrings(coerceStringArray(value));
 }
 
 function coerceObjectArray(value) {
@@ -174,7 +172,7 @@ function deriveTags(text, project = {}, category = "", kind = "") {
   if (projectTag) tags.push(projectTag);
   const rules = [
     [/decisive outcomes|it consulting|map & wrap|native node/, "decisive-outcomes"],
-    [/conference|expo|trade show|event project|attendee|frsa/, "conferences"],
+    [/\bexpo\b|trade show|event project|\battendee\b|\bfrsa\b|\bconferences?\b(?!\s+league)/i, "conferences"],
     [/frsa|roofing|roofers?/, "frsa"],
     [/july 2026|july-conferences-2026/, "july-2026"],
     [/june 2026/, "june-2026"],
@@ -287,6 +285,7 @@ function normalizeMetadataInput(metadata = {}) {
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return {};
   const next = { ...metadata };
   if (next.tags !== undefined) next.tags = coerceStringArray(next.tags);
+  if (next.triggers !== undefined) next.triggers = coerceTriggers(next.triggers);
   if (next.refs !== undefined) next.refs = coerceRefs(next.refs);
   if (next.relationships !== undefined) next.relationships = coerceRelationships(next.relationships);
   return next;
@@ -326,6 +325,9 @@ function buildNoteMetadata({ project = {}, note = {}, text = "", metadata = {} }
   };
 
   if (canonicalKey) out.canonicalKey = canonicalKey;
+  if (input.triggers !== undefined || existing.triggers !== undefined) {
+    out.triggers = coerceTriggers(input.triggers ?? existing.triggers);
+  }
   if (input.current !== undefined) out.current = Boolean(input.current);
   else if (existing.current !== undefined) out.current = Boolean(existing.current);
   else if (note.current !== undefined) out.current = Boolean(note.current);
@@ -378,17 +380,25 @@ function looksLikeStoreOptions(value) {
   ));
 }
 
+function normalizeStore(next) {
+  if (!Array.isArray(next.projects)) next.projects = [];
+  const fallbackDate = next.updatedAt || new Date().toISOString();
+  next.projects.forEach((project) => normalizeProject(project, fallbackDate));
+  return next;
+}
+
+/**
+ * The projects domain is stored as markdown files (source of truth) plus a
+ * rebuildable JSON index, not as a single JSON document, so it uses
+ * createProjectMarkdownStore instead of defineStateStore. The returned object
+ * exposes the same load/save/transaction surface, which is why every mutation
+ * helper below is unchanged.
+ */
 function getProjectStore(options = {}) {
-  return createStateStore("projects", {
+  return createProjectMarkdownStore({
     ...options,
     defaultValue: createEmptyStore,
-    onLoad(store) {
-      const next = store && typeof store === "object" ? store : createEmptyStore();
-      if (!Array.isArray(next.projects)) next.projects = [];
-      const fallbackDate = next.updatedAt || new Date().toISOString();
-      next.projects.forEach((project) => normalizeProject(project, fallbackDate));
-      return next;
-    },
+    onLoad: normalizeStore,
   });
 }
 
@@ -404,63 +414,69 @@ function saveStore(store, options = {}) {
 function addProject(input, options = {}) {
   const name = (input.name || "").trim();
   if (!name) throw new Error("Name is required");
-  const store = loadStore(options);
-  const now = new Date().toISOString();
-  const project = {
-    id: generateId(),
-    name,
-    description: (input.description || "").trim() || null,
-    status: input.status || "active",
-    targetDate: input.targetDate || null,
-    personIds: Array.isArray(input.personIds) ? input.personIds : [],
-    businessIds: Array.isArray(input.businessIds) ? input.businessIds : [],
-    notes: [],
-    resources: [],
-    tasks: [],
-    createdAt: now,
-    updatedAt: now,
-  };
-  if (input.initialNote) {
-    project.notes.push(createNote(project, input.initialNote, input.initialNoteMetadata || input.noteMetadata || {}, { now }));
-  }
-  store.projects.push(project);
-  saveStore(store, options);
-  return project;
+  return getProjectStore(options).transaction((store) => {
+    const now = new Date().toISOString();
+    const project = {
+      id: generateId(),
+      name,
+      description: (input.description || "").trim() || null,
+      status: input.status || "active",
+      targetDate: input.targetDate || null,
+      personIds: Array.isArray(input.personIds) ? input.personIds : [],
+      businessIds: Array.isArray(input.businessIds) ? input.businessIds : [],
+      notes: [],
+      resources: [],
+      tasks: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    if (input.initialNote) {
+      project.notes.push(createNote(project, input.initialNote, input.initialNoteMetadata || input.noteMetadata || {}, { now }));
+    }
+    store.projects.push(project);
+    store.updatedAt = now;
+    return project;
+  });
 }
 
 function updateProject(id, updates, options = {}) {
-  const store = loadStore(options);
-  const project = store.projects.find((p) => p.id === id);
-  if (!project) return null;
-  const allowed = ["name", "description", "status", "targetDate"];
-  for (const key of allowed) {
-    if (updates[key] !== undefined) {
-      project[key] = updates[key];
+  return getProjectStore(options).transaction((store, tx) => {
+    const project = store.projects.find((p) => p.id === id);
+    if (!project) {
+      tx.skipSave();
+      return null;
     }
-  }
-  if (updates._addPersonIds) {
-    for (const pid of updates._addPersonIds) {
-      if (!project.personIds.includes(pid)) project.personIds.push(pid);
+    const allowed = ["name", "description", "status", "targetDate"];
+    for (const key of allowed) {
+      if (updates[key] !== undefined) {
+        project[key] = updates[key];
+      }
     }
-  }
-  if (updates._removePersonIds) {
-    project.personIds = project.personIds.filter(
-      (pid) => !updates._removePersonIds.includes(pid)
-    );
-  }
-  if (updates._addBusinessIds) {
-    for (const bid of updates._addBusinessIds) {
-      if (!project.businessIds.includes(bid)) project.businessIds.push(bid);
+    if (updates._addPersonIds) {
+      for (const pid of updates._addPersonIds) {
+        if (!project.personIds.includes(pid)) project.personIds.push(pid);
+      }
     }
-  }
-  if (updates._removeBusinessIds) {
-    project.businessIds = project.businessIds.filter(
-      (bid) => !updates._removeBusinessIds.includes(bid)
-    );
-  }
-  project.updatedAt = new Date().toISOString();
-  saveStore(store, options);
-  return project;
+    if (updates._removePersonIds) {
+      project.personIds = project.personIds.filter(
+        (pid) => !updates._removePersonIds.includes(pid)
+      );
+    }
+    if (updates._addBusinessIds) {
+      for (const bid of updates._addBusinessIds) {
+        if (!project.businessIds.includes(bid)) project.businessIds.push(bid);
+      }
+    }
+    if (updates._removeBusinessIds) {
+      project.businessIds = project.businessIds.filter(
+        (bid) => !updates._removeBusinessIds.includes(bid)
+      );
+    }
+    const now = new Date().toISOString();
+    project.updatedAt = now;
+    store.updatedAt = now;
+    return project;
+  });
 }
 
 function listProjects({ query, status, all } = {}, options = {}) {
@@ -494,15 +510,80 @@ function addNote(id, text, metadata = {}, options = {}) {
     options = metadata;
     metadata = {};
   }
-  const store = loadStore(options);
-  const project = store.projects.find((p) => p.id === id);
-  if (!project) return null;
-  const now = new Date().toISOString();
-  const note = createNote(project, text, metadata, { now });
-  project.notes.push(note);
-  project.updatedAt = now;
-  saveStore(store, options);
-  return { project, note };
+  return getProjectStore(options).transaction((store, tx) => {
+    const project = store.projects.find((p) => p.id === id);
+    if (!project) {
+      tx.skipSave();
+      return null;
+    }
+    const now = new Date().toISOString();
+    const note = createNote(project, text, metadata, { now });
+    project.notes.push(note);
+    project.updatedAt = now;
+    store.updatedAt = now;
+    return { project, note };
+  });
+}
+
+function updateNote(projectId, noteId, { text, metadata, addTriggers, removeTags, removeTriggers } = {}, options = {}) {
+  return getProjectStore(options).transaction((store, tx) => {
+    const project = store.projects.find((p) => p.id === projectId);
+    if (!project) {
+      tx.skipSave();
+      return null;
+    }
+    const note = project.notes.find((entry) => entry.id === noteId);
+    if (!note) {
+      tx.skipSave();
+      return null;
+    }
+
+    const nextText = asTrimmedString(text) || note.text;
+    const metadataUpdates = metadata && typeof metadata === "object" && !Array.isArray(metadata)
+      ? metadata
+      : {};
+    const mergedMetadata = { ...(note.metadata || {}), ...metadataUpdates };
+    const hasReplacementTriggers = Object.prototype.hasOwnProperty.call(metadataUpdates, "triggers");
+    if (hasReplacementTriggers) {
+      mergedMetadata.triggers = coerceTriggers(metadataUpdates.triggers);
+    }
+    const normalizedAddTriggers = coerceTriggers(addTriggers);
+    if (normalizedAddTriggers.length) {
+      const baseTriggers = hasReplacementTriggers ? mergedMetadata.triggers : note.metadata?.triggers;
+      mergedMetadata.triggers = coerceTriggers([
+        ...coerceTriggers(baseTriggers),
+        ...normalizedAddTriggers,
+      ]);
+    }
+
+    note.text = nextText;
+    note.metadata = buildNoteMetadata({ project, note, text: nextText, metadata: mergedMetadata });
+    const tagRemovals = new Set(
+      (Array.isArray(removeTags) ? removeTags : [])
+        .map((value) => asTrimmedString(value).toLowerCase())
+        .filter(Boolean)
+    );
+    if (tagRemovals.size) {
+      note.metadata.tags = note.metadata.tags.filter(
+        (tag) => !tagRemovals.has(asTrimmedString(tag).toLowerCase())
+      );
+    }
+    const triggerRemovals = new Set(
+      (Array.isArray(removeTriggers) ? removeTriggers : [])
+        .map((value) => asTrimmedString(value).toLowerCase())
+        .filter(Boolean)
+    );
+    if (triggerRemovals.size && Array.isArray(note.metadata.triggers)) {
+      note.metadata.triggers = note.metadata.triggers.filter(
+        (trigger) => !triggerRemovals.has(asTrimmedString(trigger).toLowerCase())
+      );
+    }
+    const now = new Date().toISOString();
+    note.updatedAt = now;
+    project.updatedAt = now;
+    store.updatedAt = now;
+    return { project, note };
+  });
 }
 
 function noteMatchesFilters(entry, filters = {}) {
@@ -581,98 +662,135 @@ function validateProjectNotes(storeOrOptions = {}, maybeOptions = {}) {
 }
 
 function addResource(id, { label, url }, options = {}) {
-  const store = loadStore(options);
-  const project = store.projects.find((p) => p.id === id);
-  if (!project) return null;
-  const now = new Date().toISOString();
-  const resource = { label: label.trim(), url: url.trim(), addedAt: now };
-  project.resources.push(resource);
-  project.updatedAt = now;
-  saveStore(store, options);
-  return { project, resource };
+  return getProjectStore(options).transaction((store, tx) => {
+    const project = store.projects.find((p) => p.id === id);
+    if (!project) {
+      tx.skipSave();
+      return null;
+    }
+    const now = new Date().toISOString();
+    const resource = { label: label.trim(), url: url.trim(), addedAt: now };
+    project.resources.push(resource);
+    project.updatedAt = now;
+    store.updatedAt = now;
+    return { project, resource };
+  });
 }
 
 function removeResource(id, { index, label } = {}, options = {}) {
-  const store = loadStore(options);
-  const project = store.projects.find((p) => p.id === id);
-  if (!project) return null;
-  let removeIndex = -1;
-  if (index !== undefined && index !== null) {
-    removeIndex = Number(index);
-  } else if (label) {
-    const lowerLabel = label.toLowerCase();
-    removeIndex = project.resources.findIndex(
-      (r) => r.label.toLowerCase() === lowerLabel
-    );
-  }
-  if (removeIndex < 0 || removeIndex >= project.resources.length) {
-    return { project, removed: null, error: "Resource not found" };
-  }
-  const [removed] = project.resources.splice(removeIndex, 1);
-  project.updatedAt = new Date().toISOString();
-  saveStore(store, options);
-  return { project, removed };
+  return getProjectStore(options).transaction((store, tx) => {
+    const project = store.projects.find((p) => p.id === id);
+    if (!project) {
+      tx.skipSave();
+      return null;
+    }
+    let removeIndex = -1;
+    if (index !== undefined && index !== null) {
+      removeIndex = Number(index);
+    } else if (label) {
+      const lowerLabel = label.toLowerCase();
+      removeIndex = project.resources.findIndex(
+        (r) => r.label.toLowerCase() === lowerLabel
+      );
+    }
+    if (removeIndex < 0 || removeIndex >= project.resources.length) {
+      tx.skipSave();
+      return { project, removed: null, error: "Resource not found" };
+    }
+    const [removed] = project.resources.splice(removeIndex, 1);
+    const now = new Date().toISOString();
+    project.updatedAt = now;
+    store.updatedAt = now;
+    return { project, removed };
+  });
 }
 
 function addTask(id, title, options = {}) {
-  const store = loadStore(options);
-  const project = store.projects.find((p) => p.id === id);
-  if (!project) return null;
-  ensureTasks(project);
-  const now = new Date().toISOString();
-  const task = {
-    id: generateTaskId(),
-    title: title.trim(),
-    status: "open",
-    createdAt: now,
-    completedAt: null,
-  };
-  project.tasks.push(task);
-  project.updatedAt = now;
-  saveStore(store, options);
-  return { project, task };
+  return getProjectStore(options).transaction((store, tx) => {
+    const project = store.projects.find((p) => p.id === id);
+    if (!project) {
+      tx.skipSave();
+      return null;
+    }
+    ensureTasks(project);
+    const now = new Date().toISOString();
+    const task = {
+      id: generateTaskId(),
+      title: title.trim(),
+      status: "open",
+      createdAt: now,
+      completedAt: null,
+    };
+    project.tasks.push(task);
+    project.updatedAt = now;
+    store.updatedAt = now;
+    return { project, task };
+  });
 }
 
 function completeTask(projectId, taskId, options = {}) {
-  const store = loadStore(options);
-  const project = store.projects.find((p) => p.id === projectId);
-  if (!project) return null;
-  ensureTasks(project);
-  const task = project.tasks.find((t) => t.id === taskId);
-  if (!task) return { project, task: null, error: "Task not found" };
-  const now = new Date().toISOString();
-  task.status = "done";
-  task.completedAt = now;
-  project.updatedAt = now;
-  saveStore(store, options);
-  return { project, task };
+  return getProjectStore(options).transaction((store, tx) => {
+    const project = store.projects.find((p) => p.id === projectId);
+    if (!project) {
+      tx.skipSave();
+      return null;
+    }
+    ensureTasks(project);
+    const task = project.tasks.find((t) => t.id === taskId);
+    if (!task) {
+      tx.skipSave();
+      return { project, task: null, error: "Task not found" };
+    }
+    const now = new Date().toISOString();
+    task.status = "done";
+    task.completedAt = now;
+    project.updatedAt = now;
+    store.updatedAt = now;
+    return { project, task };
+  });
 }
 
 function reopenTask(projectId, taskId, options = {}) {
-  const store = loadStore(options);
-  const project = store.projects.find((p) => p.id === projectId);
-  if (!project) return null;
-  ensureTasks(project);
-  const task = project.tasks.find((t) => t.id === taskId);
-  if (!task) return { project, task: null, error: "Task not found" };
-  task.status = "open";
-  task.completedAt = null;
-  project.updatedAt = new Date().toISOString();
-  saveStore(store, options);
-  return { project, task };
+  return getProjectStore(options).transaction((store, tx) => {
+    const project = store.projects.find((p) => p.id === projectId);
+    if (!project) {
+      tx.skipSave();
+      return null;
+    }
+    ensureTasks(project);
+    const task = project.tasks.find((t) => t.id === taskId);
+    if (!task) {
+      tx.skipSave();
+      return { project, task: null, error: "Task not found" };
+    }
+    const now = new Date().toISOString();
+    task.status = "open";
+    task.completedAt = null;
+    project.updatedAt = now;
+    store.updatedAt = now;
+    return { project, task };
+  });
 }
 
 function removeTask(projectId, taskId, options = {}) {
-  const store = loadStore(options);
-  const project = store.projects.find((p) => p.id === projectId);
-  if (!project) return null;
-  ensureTasks(project);
-  const index = project.tasks.findIndex((t) => t.id === taskId);
-  if (index === -1) return { project, removed: null, error: "Task not found" };
-  const [removed] = project.tasks.splice(index, 1);
-  project.updatedAt = new Date().toISOString();
-  saveStore(store, options);
-  return { project, removed };
+  return getProjectStore(options).transaction((store, tx) => {
+    const project = store.projects.find((p) => p.id === projectId);
+    if (!project) {
+      tx.skipSave();
+      return null;
+    }
+    ensureTasks(project);
+    const index = project.tasks.findIndex((t) => t.id === taskId);
+    if (index === -1) {
+      tx.skipSave();
+      return { project, removed: null, error: "Task not found" };
+    }
+    const [removed] = project.tasks.splice(index, 1);
+    const now = new Date().toISOString();
+    project.updatedAt = now;
+    store.updatedAt = now;
+    return { project, removed };
+  });
 }
 
 function listTasks(projectId, { status } = {}, options = {}) {
@@ -688,12 +806,16 @@ function listTasks(projectId, { status } = {}, options = {}) {
 }
 
 function deleteProject(id, options = {}) {
-  const store = loadStore(options);
-  const index = store.projects.findIndex((p) => p.id === id);
-  if (index === -1) return { found: false };
-  const [removed] = store.projects.splice(index, 1);
-  saveStore(store, options);
-  return { found: true, deleted: { id: removed.id, name: removed.name } };
+  return getProjectStore(options).transaction((store, tx) => {
+    const index = store.projects.findIndex((p) => p.id === id);
+    if (index === -1) {
+      tx.skipSave();
+      return { found: false };
+    }
+    const [removed] = store.projects.splice(index, 1);
+    store.updatedAt = new Date().toISOString();
+    return { found: true, deleted: { id: removed.id, name: removed.name } };
+  });
 }
 
 module.exports = {
@@ -705,6 +827,7 @@ module.exports = {
   listProjects,
   getProject,
   addNote,
+  updateNote,
   createNote,
   buildNoteMetadata,
   listProjectNoteMetadata,

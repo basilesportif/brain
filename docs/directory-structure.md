@@ -43,7 +43,7 @@ servant-stack setup must instead resolve the separate `assistant-agent-logic`
 repo and `assistant-agent-data` workspace from the repo registry. Lab setup
 creates/recognizes:
 
-- `data/todos.json`, `data/projects.json`, `data/crm.json`, and
+- `data/todos.json`, `data/projects/` (markdown notes + rebuildable JSON index), `data/crm.json`, and
   `data/reminders.json`;
 - `private/documents/metadata.jsonl` plus private document file directories for
   file-save metadata/bytes;

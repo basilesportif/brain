@@ -1,8 +1,8 @@
 // @ts-nocheck
 import * as crypto from "node:crypto";
-import { createStateStore } from "./state-stores.js";
+import { createProjectMarkdownStore, stableNoteId } from "./project-md-store.js";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const NOTE_SCHEMA_VERSION = 1;
 
 function generateId() {
@@ -15,12 +15,6 @@ function generateTaskId() {
 
 function generateNoteId() {
   return `pn_${crypto.randomBytes(8).toString("hex")}`;
-}
-
-function stableNoteId(projectId, note, index = 0) {
-  const text = typeof note === "string" ? note : note?.text || "";
-  const seed = [projectId || "project", note?.createdAt || "", note?.title || note?.heading || "", index, text].join("\n");
-  return `pn_${crypto.createHash("sha256").update(seed).digest("hex").slice(0, 16)}`;
 }
 
 function ensureTasks(project) {
@@ -81,6 +75,10 @@ function coerceStringArray(value) {
     .split(",")
     .map((part) => part.trim())
     .filter(Boolean);
+}
+
+function coerceTriggers(value) {
+  return uniqueStrings(coerceStringArray(value));
 }
 
 function coerceObjectArray(value) {
@@ -175,7 +173,7 @@ function deriveTags(text, project = {}, category = "", kind = "") {
   if (projectTag) tags.push(projectTag);
   const rules = [
     [/decisive outcomes|it consulting|map & wrap|native node/, "decisive-outcomes"],
-    [/conference|expo|trade show|event project|attendee|frsa/, "conferences"],
+    [/\bexpo\b|trade show|event project|\battendee\b|\bfrsa\b|\bconferences?\b(?!\s+league)/i, "conferences"],
     [/frsa|roofing|roofers?/, "frsa"],
     [/july 2026|july-conferences-2026/, "july-2026"],
     [/june 2026/, "june-2026"],
@@ -288,6 +286,7 @@ function normalizeMetadataInput(metadata = {}) {
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return {};
   const next = { ...metadata };
   if (next.tags !== undefined) next.tags = coerceStringArray(next.tags);
+  if (next.triggers !== undefined) next.triggers = coerceTriggers(next.triggers);
   if (next.refs !== undefined) next.refs = coerceRefs(next.refs);
   if (next.relationships !== undefined) next.relationships = coerceRelationships(next.relationships);
   return next;
@@ -327,6 +326,9 @@ function buildNoteMetadata({ project = {}, note = {}, text = "", metadata = {} }
   };
 
   if (canonicalKey) out.canonicalKey = canonicalKey;
+  if (input.triggers !== undefined || existing.triggers !== undefined) {
+    out.triggers = coerceTriggers(input.triggers ?? existing.triggers);
+  }
   if (input.current !== undefined) out.current = Boolean(input.current);
   else if (existing.current !== undefined) out.current = Boolean(existing.current);
   else if (note.current !== undefined) out.current = Boolean(note.current);
@@ -379,17 +381,25 @@ function looksLikeStoreOptions(value) {
   ));
 }
 
+function normalizeStore(next) {
+  if (!Array.isArray(next.projects)) next.projects = [];
+  const fallbackDate = next.updatedAt || new Date().toISOString();
+  next.projects.forEach((project) => normalizeProject(project, fallbackDate));
+  return next;
+}
+
+/**
+ * The projects domain is stored as markdown files (source of truth) plus a
+ * rebuildable JSON index, not as a single JSON document, so it uses
+ * createProjectMarkdownStore instead of createStateStore. The returned object
+ * exposes the same load/save/transaction surface, which is why every mutation
+ * helper below is unchanged.
+ */
 function getProjectStore(options = {}) {
-  return createStateStore("projects", {
+  return createProjectMarkdownStore({
     ...options,
     defaultValue: createEmptyStore,
-    onLoad(store) {
-      const next = store && typeof store === "object" ? store : createEmptyStore();
-      if (!Array.isArray(next.projects)) next.projects = [];
-      const fallbackDate = next.updatedAt || new Date().toISOString();
-      next.projects.forEach((project) => normalizeProject(project, fallbackDate));
-      return next;
-    },
+    onLoad: normalizeStore,
   });
 }
 
@@ -510,6 +520,67 @@ function addNote(id, text, metadata = {}, options = {}) {
     const now = new Date().toISOString();
     const note = createNote(project, text, metadata, { now });
     project.notes.push(note);
+    project.updatedAt = now;
+    store.updatedAt = now;
+    return { project, note };
+  });
+}
+
+function updateNote(projectId, noteId, { text, metadata, addTriggers, removeTags, removeTriggers } = {}, options = {}) {
+  return getProjectStore(options).transaction((store, tx) => {
+    const project = store.projects.find((p) => p.id === projectId);
+    if (!project) {
+      tx.skipSave();
+      return null;
+    }
+    const note = project.notes.find((entry) => entry.id === noteId);
+    if (!note) {
+      tx.skipSave();
+      return null;
+    }
+
+    const nextText = asTrimmedString(text) || note.text;
+    const metadataUpdates = metadata && typeof metadata === "object" && !Array.isArray(metadata)
+      ? metadata
+      : {};
+    const mergedMetadata = { ...(note.metadata || {}), ...metadataUpdates };
+    const hasReplacementTriggers = Object.prototype.hasOwnProperty.call(metadataUpdates, "triggers");
+    if (hasReplacementTriggers) {
+      mergedMetadata.triggers = coerceTriggers(metadataUpdates.triggers);
+    }
+    const normalizedAddTriggers = coerceTriggers(addTriggers);
+    if (normalizedAddTriggers.length) {
+      const baseTriggers = hasReplacementTriggers ? mergedMetadata.triggers : note.metadata?.triggers;
+      mergedMetadata.triggers = coerceTriggers([
+        ...coerceTriggers(baseTriggers),
+        ...normalizedAddTriggers,
+      ]);
+    }
+
+    note.text = nextText;
+    note.metadata = buildNoteMetadata({ project, note, text: nextText, metadata: mergedMetadata });
+    const tagRemovals = new Set(
+      (Array.isArray(removeTags) ? removeTags : [])
+        .map((value) => asTrimmedString(value).toLowerCase())
+        .filter(Boolean)
+    );
+    if (tagRemovals.size) {
+      note.metadata.tags = note.metadata.tags.filter(
+        (tag) => !tagRemovals.has(asTrimmedString(tag).toLowerCase())
+      );
+    }
+    const triggerRemovals = new Set(
+      (Array.isArray(removeTriggers) ? removeTriggers : [])
+        .map((value) => asTrimmedString(value).toLowerCase())
+        .filter(Boolean)
+    );
+    if (triggerRemovals.size && Array.isArray(note.metadata.triggers)) {
+      note.metadata.triggers = note.metadata.triggers.filter(
+        (trigger) => !triggerRemovals.has(asTrimmedString(trigger).toLowerCase())
+      );
+    }
+    const now = new Date().toISOString();
+    note.updatedAt = now;
     project.updatedAt = now;
     store.updatedAt = now;
     return { project, note };
@@ -757,6 +828,7 @@ export {
   listProjects,
   getProject,
   addNote,
+  updateNote,
   createNote,
   buildNoteMetadata,
   listProjectNoteMetadata,

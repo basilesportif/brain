@@ -41,8 +41,53 @@ function writeJsonAtomic(filePath, value) {
   }
 }
 
+/**
+ * Atomically write arbitrary file content: write to a uniquely named temp
+ * file in the same directory, then rename over the destination. The mode of
+ * an existing destination file is preserved unless options.mode overrides it.
+ */
+function writeFileAtomic(filePath, content, options = {}) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  let mode = options.mode;
+  if (mode === undefined) {
+    try {
+      mode = fs.statSync(filePath).mode & 0o777;
+    } catch {
+      // Destination does not exist yet; fall back to the default mode.
+    }
+  }
+  const writeOptions = { encoding: options.encoding ?? "utf-8" };
+  if (mode !== undefined) writeOptions.mode = mode;
+  const tmpPath = uniqueTempPath(filePath);
+  try {
+    fs.writeFileSync(tmpPath, content, writeOptions);
+    fs.renameSync(tmpPath, filePath);
+  } finally {
+    try {
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+    } catch {
+      // Best-effort cleanup; the unique temp name avoids cross-writer clobbering.
+    }
+  }
+}
+
 function readJsonFile(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+}
+
+/**
+ * Move a file that failed to parse aside as `<path>.corrupt.<timestamp>` so
+ * it is preserved for manual recovery instead of being clobbered by the next
+ * save. Returns the preserved path, or null if the rename failed.
+ */
+function preserveCorruptFile(filePath) {
+  const corruptPath = `${filePath}.corrupt.${Date.now()}`;
+  try {
+    fs.renameSync(filePath, corruptPath);
+    return corruptPath;
+  } catch {
+    return null;
+  }
 }
 
 function formatMigrationHint(context) {
@@ -165,7 +210,19 @@ function createJsonStore(options) {
     if (!fs.existsSync(filePath)) {
       return cloneDefaultValue(defaultValue);
     }
-    const parsed = readJsonFile(filePath);
+    let parsed;
+    try {
+      parsed = readJsonFile(filePath);
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+      const preservedPath = preserveCorruptFile(filePath);
+      throw new Error(
+        `Corrupt JSON in ${label} store at ${filePath} (${error.message}). ` +
+          (preservedPath
+            ? `The corrupt file was preserved at ${preservedPath}; inspect and restore it manually.`
+            : "The corrupt file could not be moved aside; inspect and restore it manually.")
+      );
+    }
     return typeof onLoad === "function" ? onLoad(parsed) : parsed;
   }
 
@@ -215,8 +272,10 @@ function createJsonStore(options) {
 export {
   acquireFileLock,
   createJsonStore,
+  preserveCorruptFile,
   uniqueTempPath,
   withFileLock,
+  writeFileAtomic,
   writeJsonAtomic,
   readJsonFile,
 

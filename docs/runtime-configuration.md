@@ -66,7 +66,7 @@ workspaces:
         repoPath: /home/brain/.brain/workspace/backups/private-git
         remote: git@github.com:example/private-brain-backup.git
         branch: main
-        include: [config/**, state/**, projects/**, notes/**, documents/metadata/**, artifacts/metadata/**]
+        include: [config/**, state/**, data/projects/**, projects/**, notes/**, documents/metadata/**, artifacts/metadata/**]
         exclude: [.env, ".env.*", "*.env", "*.env.*", config/*.env, config/*.env.*, secrets/**, logs/**, tmp/**, cache/**, caches/**, state/setup-progress.json, state/telegram-offset.json, state/telegram-pairing/**, state/jobs/**, state/events/**, private/documents/files/**, artifacts/**, "!artifacts/metadata/**", "**/.cache/**", "**/node_modules/**", "**/*.log"]
     webPublishing:
       enabled: false
@@ -144,7 +144,7 @@ strategy = "private-git"
 repoPath = "/home/brain/.brain/workspace/backups/private-git"
 remote = "git@github.com:example/private-brain-backup.git"
 branch = "main"
-include = ["config/**", "state/**", "projects/**", "notes/**", "documents/metadata/**", "artifacts/metadata/**"]
+include = ["config/**", "state/**", "data/projects/**", "projects/**", "notes/**", "documents/metadata/**", "artifacts/metadata/**"]
 exclude = ["secrets/**", "logs/**", "tmp/**", "cache/**", "caches/**", "**/.cache/**", "**/node_modules/**", "**/*.log"]
 
 [workspaces.personal.webPublishing]

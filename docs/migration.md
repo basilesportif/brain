@@ -47,7 +47,7 @@ ASSISTANT_PRIVATE_DIR=<workspace>/private
 BRAIN_PRIVATE_DIR=<workspace>/private
 ```
 
-Native state files include `data/todos.json`, `data/projects.json`, `data/crm.json`, `data/reminders.json`, and `private/documents/metadata.jsonl`. The scaffold also creates empty/private-state placeholders for betting, email/calendar/message reminder state, finance sources, and ProtonMail drafts.
+Native state files include `data/todos.json`, `data/projects/` (markdown-authoritative notes with a rebuildable JSON index; see `data/projects.legacy.json` for the retired pre-migration single-file store), `data/crm.json`, `data/reminders.json`, and `private/documents/metadata.jsonl`. The scaffold also creates empty/private-state placeholders for betting, email/calendar/message reminder state, finance sources, and ProtonMail drafts.
 
 Legacy lab code/templates exist in the Brain monorepo for Composio/Gmail/Calendar, ProtonMail Bridge, finance/Mercury/Plaid, WHOOP, Telegram user-client messaging, betting, dictionary, transcription, and loop utilities. Personal data is supplied privately by copying/filling the scaffolded examples in the workspace (`.env.example`, `composio.yaml.example`, `messaging.yaml.example`, `telegram.yaml.example`, `protonmail.yaml.example`) into real private files such as `.env`, `composio.yaml`, `messaging.yaml`, and `protonmail.yaml`. Do not commit those filled files. Do not deploy these snapshots instead of the live `assistant-agent-logic` repo.
 

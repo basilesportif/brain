@@ -8,7 +8,7 @@ The setup flow now creates the assistant-agent-logic-compatible JSON workspace
 model in the configured workspace. The authoritative personal state is:
 
 - `data/todos.json`
-- `data/projects.json`
+- `data/projects/` (markdown notes are source of truth; `index.json`/`project.json` are a rebuildable index — see `pnpm run brainctl workspace run --path <workspace> project-reindex.js`)
 - `data/crm.json`
 - `data/reminders.json`
 - `private/documents/metadata.jsonl` for file-save metadata

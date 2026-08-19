@@ -79,7 +79,7 @@ live traffic. The control-plane source of truth is the separate
 `assistant-agent-data` workspace and separate `assistant-agent-logic` repo
 resolved from repo-registry metadata. The legacy/lab in-repo
 `packages/assistant-logic` stores and CLI commands remain compatibility helpers:
-`data/todos.json`, `data/projects.json`, `data/crm.json`,
+`data/todos.json`, `data/projects/` (markdown notes + rebuildable JSON index), `data/crm.json`,
 `data/reminders.json`, `private/documents/metadata.jsonl`,
 `instructions/skills/`, `instructions/prompts/`, `tasks/`, and selected
 `.claude/repo-registry/` state. `projects/`, `notes/`, `documents/`, and

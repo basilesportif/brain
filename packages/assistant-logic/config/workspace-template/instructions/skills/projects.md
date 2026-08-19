@@ -2,6 +2,11 @@
 
 Add only user-specific preferences here. This file is layered on top of `config/skills/projects.md`.
 
+## Storage preference
+
+- Project notes are stored as markdown files under `workspace/data/projects/<slug>/notes/` — the `.md` file is the source of truth; `index.json` and `project.json` are a maintained, rebuildable projection.
+- Direct edits to a note's `.md` file (body or frontmatter) are allowed when needed, but must be followed by `pnpm run brainctl workspace run --path <workspace> project-reindex.js` so the JSON index stays in sync.
+
 ## Priority Preferences
 
 - Projects that should always surface in status reviews:

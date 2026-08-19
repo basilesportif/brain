@@ -15,7 +15,7 @@ Goal: Tim can move the codex-chat/assistant-agent-logic setup to Brain without f
 | Assistant-agent-logic area | Brain status | Brain location | Private data / setup required |
 | --- | --- | --- | --- |
 | Todos | Native TypeScript | `packages/assistant-logic/src/lib/todo-store.ts`, `src/cli/todo-*.ts`; run with `brainctl workspace run todo-*.js` | `data/todos.json` in private workspace |
-| Projects | Native TypeScript | `packages/assistant-logic/src/lib/project-store.ts`, `src/cli/project-*.ts` | `data/projects.json` plus optional private resource folders |
+| Projects | Native TypeScript | `packages/assistant-logic/src/lib/project-store.ts`, `src/cli/project-*.ts` | `data/projects/` (markdown notes + `index.json`/`project.json` rebuildable index) plus optional private resource folders |
 | CRM | Native TypeScript | `packages/assistant-logic/src/lib/crm-store.ts`, `src/cli/crm-*.ts` | `data/crm.json` |
 | Reminders | Native TypeScript | `packages/assistant-logic/src/lib/reminder-store.ts`, `src/cli/reminder-*.ts` | `data/reminders.json` |
 | File-save | Native TypeScript | `packages/assistant-logic/src/lib/file-save-store.ts`, `src/cli/file-*.ts` | `private/documents/metadata.jsonl` and private document bytes |

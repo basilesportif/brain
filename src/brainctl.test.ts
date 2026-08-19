@@ -878,6 +878,7 @@ test("brainctl keeps setup coordinator-only and exposes legacy/lab assistant-log
     const scaffoldJson = JSON.parse(scaffold.stdout) as { details: { scaffold: { writtenFiles: string[] } } };
     assert.ok(scaffoldJson.details.scaffold.writtenFiles.includes(path.join("data", "todos.json")));
     assert.ok(scaffoldJson.details.scaffold.writtenFiles.includes(path.join("data", "bets.json")));
+    assert.ok(scaffoldJson.details.scaffold.writtenFiles.includes(path.join("data", "projects", "index.json")));
     assert.ok(scaffoldJson.details.scaffold.writtenFiles.includes(".env.example"));
     assert.ok(scaffoldJson.details.scaffold.writtenFiles.includes("composio.yaml.example"));
     assert.ok(scaffoldJson.details.scaffold.writtenFiles.includes(path.join("instructions", "skills", "projects.md")));
@@ -885,13 +886,17 @@ test("brainctl keeps setup coordinator-only and exposes legacy/lab assistant-log
 
     for (const [file, rootKey] of [
       ["todos.json", "todos"],
-      ["projects.json", "projects"],
       ["reminders.json", "reminders"],
     ] as const) {
       const parsed = JSON.parse(await readFile(path.join(workspace, "data", file), "utf8")) as Record<string, unknown>;
       assert.equal(parsed.version, 1);
       assert.deepEqual(parsed[rootKey], []);
     }
+    // Projects are stored as a markdown directory; scaffolding seeds the
+    // rebuildable index at data/projects/index.json, not data/projects.json.
+    const projectsIndex = JSON.parse(await readFile(path.join(workspace, "data", "projects", "index.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(projectsIndex.version, 2);
+    assert.deepEqual(projectsIndex.projects, []);
     const crm = JSON.parse(await readFile(path.join(workspace, "data", "crm.json"), "utf8")) as { people: unknown[]; businesses: unknown[]; correspondence: unknown[] };
     assert.deepEqual(crm.people, []);
     assert.deepEqual(crm.businesses, []);

@@ -57,6 +57,21 @@ test("native CLI surfaces preserve JSON stdout for todos/projects/CRM/reminders/
     assert.equal(viewedProject.project.resources[0].label, "Spec");
     assert.equal(viewedProject.openTasks[0].title, "Draft outline");
 
+    // Markdown-store CLIs added with the data/projects/ layout.
+    const note = parseStdout(runCli(workspace, "project-note.js", ["--id", project.project.id, "--text", "Runbook body", "--kind", "runbook", "--title", "Parity runbook"]));
+    assert.equal(note.ok, true);
+    const updatedNote = parseStdout(runCli(workspace, "project-note-update.js", ["--id", project.project.id, "--note-id", note.note.id, "--trigger", "parity check", "--current"]));
+    assert.deepEqual(updatedNote.note.metadata.triggers, ["parity check"]);
+    const projectIndex = parseStdout(runCli(workspace, "project-index.js"));
+    assert.equal(projectIndex.projects[0].keyNotes[0].noteId, note.note.id);
+    const meeting = parseStdout(runCli(workspace, "meeting-note.js", ["--project-id", project.project.id, "--person", "Jane Smith", "--date", "2026-08-19"]));
+    assert.equal(meeting.note.metadata.kind, "meeting-note");
+    const runbooks = parseStdout(runCli(workspace, "runbook-check.js"));
+    assert.equal(runbooks.summary.runbooksMissingTriggers, 0);
+    const reindex = parseStdout(runCli(workspace, "project-reindex.js", ["--check"]));
+    assert.equal(reindex.ok, true);
+    assert.deepEqual(reindex.drift, []);
+
     const person = parseStdout(runCli(workspace, "crm-add-person.js", ["--name", "Jane Smith"]));
     assert.equal(person.ok, true);
     assert.match(person.person.id, /^ct_[0-9a-f]{16}$/);

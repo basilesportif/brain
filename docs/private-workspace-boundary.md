@@ -19,7 +19,7 @@ Saved files and PDFs:
 - Store private file bytes under a configured private runtime directory such as `private/documents/files/`, not under assistant packs, docs, examples, apps, or packages.
 - Store only lightweight document metadata under the same private boundary, for example `private/documents/metadata.jsonl`.
 - Store short-term assistant state under the configured private JSON workspace:
-  `data/todos.json`, `data/projects.json`, `data/crm.json`,
+  `data/todos.json`, `data/projects/` (markdown notes + rebuildable JSON index), `data/crm.json`,
   `data/reminders.json`, `instructions/**`, `tasks/**`, selected
   `.claude/repo-registry/` files, and lightweight file-save metadata. These
   paths may be committed only to the user's private workspace backup repo,

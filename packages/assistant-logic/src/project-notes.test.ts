@@ -55,14 +55,30 @@ test("new project notes get stable structured metadata", () => {
     assert.ok(project.notes[0].metadata.tags.includes("july-2026"));
     assert.ok(project.notes[0].metadata.tags.includes("conferences"));
 
-    const parsed = JSON.parse(fs.readFileSync(path.join(fixture.workspacePath, "data", "projects.json"), "utf8"));
-    assert.equal(validateProjectNotes(parsed).ok, true);
+    // Storage is the markdown layout: data/projects/index.json plus one
+    // directory per project holding the note .md files.
+    const index = JSON.parse(
+      fs.readFileSync(path.join(fixture.workspacePath, "data", "projects", "index.json"), "utf8")
+    );
+    assert.equal(index.version, 2);
+    assert.equal(index.projects.length, 1);
+    assert.equal(index.projects[0].noteCount, 1);
+    const projectDir = path.join(fixture.workspacePath, "data", "projects", index.projects[0].slug);
+    const doc = JSON.parse(fs.readFileSync(path.join(projectDir, "project.json"), "utf8"));
+    assert.equal(doc.notes.length, 1);
+    assert.equal(Object.hasOwn(doc.notes[0], "text"), false);
+    assert.equal(fs.existsSync(path.join(projectDir, doc.notes[0].path)), true);
+    assert.equal(fs.existsSync(path.join(fixture.workspacePath, "data", "projects.json")), false);
+
+    assert.equal(validateProjectNotes({ context }).ok, true);
   } finally {
     removeFixture(fixture.root);
   }
 });
 
-test("legacy notes are normalized without losing ad hoc fields", () => {
+// Pre-migration workspaces still hold a single data/projects.json; the store
+// must keep reading it (read-only) until migrate-projects-to-markdown runs.
+test("legacy data/projects.json is still readable and normalized without losing ad hoc fields", () => {
   const fixture = createFixture("project-note-metadata-legacy");
   try {
     const projectId = "pj_legacy";
